@@ -1,0 +1,91 @@
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Python
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.pytest_cache/
+coverage.xml
+*.cover
+*.py,cover
+
+# Frontend (Vite / React)
+app/frontend/node_modules/
+app/frontend/dist/
+app/frontend/.vite/
+*.local
+
+# Logs & runtime
+logs/
+*.log
+
+# Knowledge base artifacts (large generated data; keep eval sets)
+knowledge/
+
+# Documentation (local only)
+docs/
+
+# Vector / index caches
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# Docker local volumes (if mounted into repo)
+postgres_data/
+redis_data/
+
+# IDE & OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Misc
+*.bak
+*.tmp
+.cache/
+
