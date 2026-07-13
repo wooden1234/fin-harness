@@ -18,6 +18,18 @@ AgentRoute = Literal["faq", "pdf", "account", "general", "plan"]
 RiskLevel = Literal["L1", "L2", "L3", "L4"]
 SubTaskType = Literal["faq", "pdf", "financial_query", "web_search", "general"]
 
+# 意图分类：Planner 输出意图，数据源由 resolve_evidence 按意图映射（不由 LLM 直接选源）
+SubTaskIntent = Literal[
+    "concept_explain",    # 概念/术语/规则解释
+    "product_policy",     # 产品费率、办理条件、业务政策（如信用卡年费）
+    "document_qa",        # 年报/公告/研报等文档依据问答
+    "structured_metric",  # 结构化财务指标查数
+    "market_event",       # 最新市场/监管/实时信息
+]
+
+# 证据覆盖状态：worker 对「证据是否足以回答」的自评
+CoverageStatus = Literal["covered", "partial", "uncovered", "clarify"]
+
 
 # ---------- 共享 TypedDict ----------
 class Citation(TypedDict, total=False):
@@ -39,7 +51,9 @@ class TaskResult(TypedDict, total=False):
     type: str              # SubTaskType，松散字符串避免跨模块耦合
     context: str           # 检索到的上下文原文
     citations: list[Citation]
-    fallback_to_web: bool
+    coverage: str          # CoverageStatus：covered/partial/uncovered/clarify
+    confidence: float      # 证据置信度（可选，检索分数等）
+    fallback_to_web: bool  # 兼容旧字段；等价于 coverage == "uncovered"
     fallback_reason: str
 
 
@@ -55,15 +69,32 @@ class Router(BaseModel):
 
 
 class SubTask(BaseModel):
-    """单个子任务 — Planner 分解产物"""
+    """单个子任务 — Planner 分解产物。
+
+    Planner 只产出 ``intent``；``type``（首选证据工具）与 ``evidence_chain``
+    （降级链）由 resolve_evidence 节点按意图映射填充。
+    """
     id: str = Field(default="", description="子任务唯一标识，用于结果匹配")
     question: str = Field(description="独立的子问题，可直接检索")
+    intent: str = Field(
+        default="",
+        description=(
+            "意图类别：concept_explain=概念/规则解释 / product_policy=产品费率与业务政策 / "
+            "document_qa=文档依据问答 / structured_metric=结构化财务指标查数 / "
+            "market_event=最新市场或监管信息"
+        ),
+    )
     type: SubTaskType = Field(
         default="faq",
         description=(
+            "证据工具 id（由 resolve_evidence 填充，LLM 无需输出）："
             "faq=知识库 / pdf=文档库 / financial_query=结构化财务查询 / "
-            "web_search=联网检索 / general=无需检索"
+            "web_search=联网检索"
         ),
+    )
+    evidence_chain: list[str] = Field(
+        default_factory=list,
+        description="有序证据降级链（由 resolve_evidence 填充，LLM 无需输出）",
     )
 
 

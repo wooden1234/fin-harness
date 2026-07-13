@@ -13,6 +13,9 @@ from agents.finance_agent.financial_query_agent.predefined.semantic.company_reso
     CompanyResolver,
     ResolvedCompany,
 )
+from agents.finance_agent.financial_query_agent.predefined.semantic.reason_codes import (
+    CoverageReasonCode,
+)
 from agents.finance_agent.financial_query_agent.predefined.semantic.coverage_resolver import (
     CoverageResolver,
 )
@@ -22,6 +25,7 @@ __all__ = [
     "CanonicalMetricRegistry",
     "CompanyCoverage",
     "CompanyResolver",
+    "CoverageReasonCode",
     "CoverageResolution",
     "CoverageResolver",
     "ResolvedCompany",

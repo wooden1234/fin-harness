@@ -1,18 +1,15 @@
-"""text_to_sql 信息不足追问中间件。"""
+"""text_to_sql 信息不足追问中间件。
+
+生成前只做极少数硬约束（空问题等）；是否缺信息优先由生成模型
+通过 route=clarify 决定，再在 after_generate / after_correct 截断追问。
+"""
 
 from __future__ import annotations
 
-import re
 from typing import cast
 
 from langchain_core.runnables import RunnableConfig
 
-from agents.finance_agent.financial_query_agent.predefined.semantic.registry_seed import (
-    GLOBAL_ALIASES,
-)
-from agents.finance_agent.financial_query_agent.services.entity_resolver import (
-    EntityResolver,
-)
 from agents.llm import get_router_llm
 from agents.finance_agent.financial_query_agent.services.schemas import (
     GeneratedFinancialSql,
@@ -39,13 +36,8 @@ FINANCIAL_QUERY_TEXT_TO_SQL_NEEDS_CLARIFICATION_ANSWER = (
     "当前问题中的查询条件还不够明确。请补充更具体的公司名称、财务指标、统计年份或计算口径。"
 )
 
-_VAGUE_QUESTION_MARKERS = ("怎么样", "如何", "什么情况", "表现如何", "好不好")
-_LATEST_MARKERS = ("最新", "最近", "当前", "现在")
-_RANGE_MARKERS = ("趋势", "历年", "近三年", "近五年", "近两年", "近几年", "变化")
-_RANKING_MARKERS = ("排名", "最高", "最低", "前十", "前五", "top")
-_METADATA_MARKERS = ("有哪些公司", "有哪些指标", "指标列表", "公司列表", "映射", "字典", "文档列表")
-_FINANCIAL_MARKERS = ("财务", "业绩", "收入", "利润", "现金流", "研发", "营收", "年报", "同比", "对比", "趋势")
-_YEAR_RE = re.compile(r"20\d{2}")
+# 生成前硬约束：短于该长度视为无效输入，不进入 LLM 生成。
+_MIN_QUESTION_CHARS = 2
 
 
 def _fallback_clarification(missing_fields: list[str]) -> str:
@@ -64,68 +56,9 @@ def _fallback_clarification(missing_fields: list[str]) -> str:
     return FINANCIAL_QUERY_TEXT_TO_SQL_NEEDS_CLARIFICATION_ANSWER
 
 
-def _is_vague_question(question: str) -> bool:
-    normalized = question.strip()
-    if len(normalized) < 4:
-        return True
-    return any(marker in normalized for marker in _VAGUE_QUESTION_MARKERS) and len(normalized) < 12
-
-
-def _contains_any(question: str, markers: tuple[str, ...]) -> bool:
-    return any(marker.lower() in question.lower() for marker in markers)
-
-
-def _has_company(question: str) -> bool:
-    normalized = question.lower()
-    for aliases in EntityResolver.COMPANY_ALIASES.values():
-        if any(alias.lower() in normalized for alias in aliases):
-            return True
-    return False
-
-
-def _has_metric(question: str) -> bool:
-    normalized = question.replace(" ", "").lower()
-    for alias in GLOBAL_ALIASES:
-        if alias.replace(" ", "").lower() in normalized:
-            return True
-    for aliases in EntityResolver.METRIC_ALIASES.values():
-        if any(alias.replace(" ", "").lower() in normalized for alias in aliases):
-            return True
-    return False
-
-
-def _is_metadata_question(question: str) -> bool:
-    return _contains_any(question, _METADATA_MARKERS)
-
-
-def _is_global_query(question: str) -> bool:
-    return _contains_any(question, _RANKING_MARKERS)
-
-
-def _infer_missing_fields(question: str) -> list[str]:
-    normalized = question.strip()
-    if not normalized or _is_metadata_question(normalized):
-        return []
-
-    has_financial_marker = _contains_any(normalized, _FINANCIAL_MARKERS)
-    has_metric = _has_metric(normalized)
-    has_company = _has_company(normalized)
-    has_year = bool(_YEAR_RE.search(normalized))
-    has_latest_or_range = _contains_any(normalized, _LATEST_MARKERS) or _contains_any(
-        normalized,
-        _RANGE_MARKERS,
-    )
-
-    missing: list[str] = []
-    if has_financial_marker and not has_metric:
-        missing.append("metric")
-    if has_metric and not has_company and not _is_global_query(normalized):
-        missing.append("company")
-    if has_metric and not has_year and not has_latest_or_range:
-        missing.append("year")
-    if "利润" in normalized and not any(term in normalized for term in ("净利润", "归母", "营业利润")):
-        missing.append("scope")
-    return list(dict.fromkeys(missing))
+def _is_empty_or_invalid_question(question: str) -> bool:
+    """仅拦截空输入或几乎无内容的问题。"""
+    return len(question.strip()) < _MIN_QUESTION_CHARS
 
 
 async def _build_clarification_answer(
@@ -159,7 +92,7 @@ async def _build_clarification_answer(
 
 
 class ClarificationMiddleware:
-    """模糊问题或生成阶段判定信息不足时，截断流程并返回追问。"""
+    """生成前硬约束 + 生成后按 route=clarify 追问。"""
 
     async def before_generate(
         self,
@@ -168,18 +101,16 @@ class ClarificationMiddleware:
     ) -> MiddlewareResult | None:
         del config
         question = state["question"].strip()
-        missing_fields = _infer_missing_fields(question)
-        if not _is_vague_question(question) and not missing_fields:
+        if not _is_empty_or_invalid_question(question):
             return None
-        if not missing_fields:
-            missing_fields = ["company", "metric", "year"]
+        missing_fields = ["company", "metric", "year"]
         return MiddlewareResult(
             halt=True,
             halt_reason="clarify",
             halt_answer=_fallback_clarification(missing_fields),
             state_updates={
                 "missing_fields": missing_fields,
-                "route_reason": "问题缺少生成安全 SQL 所需的关键信息。",
+                "route_reason": "问题为空或过短，无法生成查询。",
             },
         )
 

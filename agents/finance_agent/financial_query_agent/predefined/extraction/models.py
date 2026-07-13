@@ -22,9 +22,9 @@ class PredefinedSlotExtraction(BaseModel):
         default_factory=list,
         description="财务指标列表，例如 ['营业收入']",
     )
-    operation: Literal["lookup", "latest", "compare", "trend"] = Field(
+    operation: Literal["lookup", "latest", "compare", "compare_year", "trend"] = Field(
         default="lookup",
-        description="查询意图：精确查数、最新一期、公司对比、趋势查询",
+        description="查询意图：精确查数、最新一期、多公司对比、单公司跨年对比、趋势查询",
     )
     top_k: int = Field(default=5, ge=1, le=20, description="最多返回多少条结果")
 

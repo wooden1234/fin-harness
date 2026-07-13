@@ -20,9 +20,6 @@ from agents.finance_agent.financial_query_agent.predefined.execution import (
     execute_predefined_sql,
     execute_predefined_sql_query,
 )
-from agents.finance_agent.financial_query_agent.predefined.extraction.models import (
-    PredefinedSlotExtraction,
-)
 from agents.finance_agent.financial_query_agent.predefined.extraction.normalizer import (
     build_predefined_query_intent,
 )
@@ -34,7 +31,6 @@ from agents.finance_agent.financial_query_agent.predefined.intent import (
 )
 from agents.finance_agent.financial_query_agent.predefined.resolver import (
     build_resolved_query,
-    build_resolved_query_from_slots,
 )
 from agents.finance_agent.financial_query_agent.predefined.semantic.models import (
     CanonicalMetricMatch,
@@ -72,9 +68,7 @@ class PredefinedGraphState(TypedDict):
     source_state: FinAgentState
     question: str
     output: NotRequired[dict[str, Any]]
-    selection: NotRequired[PredefinedToolSelectionResult | tuple[str, FinancialQueryIntent]]
-    selection_from_tuple: NotRequired[bool]
-    slots: NotRequired[PredefinedSlotExtraction | None]
+    selection: NotRequired[PredefinedToolSelectionResult]
     template_id: NotRequired[str]
     intent: NotRequired[FinancialQueryIntent]
     canonical_matches: NotRequired[list[CanonicalMetricMatch]]
@@ -84,15 +78,20 @@ class PredefinedGraphState(TypedDict):
     rows: NotRequired[list[FinancialSqlResultRow]]
 
 
-def _fallback_to_text_to_sql(question: str, reason: str) -> dict[str, Any]:
-    """predefined 无法可靠选工具时，把控制权交回复杂查询路径。"""
+def _fallback_to_text_to_sql(
+    question: str,
+    reason: str,
+    *,
+    step: str = "predefined_tool_selection_failed",
+) -> dict[str, Any]:
+    """predefined 无法可靠执行时，把控制权交回复杂查询路径。"""
     return {
         "financial_query_text": question,
         "financial_query_plan_route": "text_to_sql",
         "financial_query_plan_reason": reason,
         "financial_query_template_id": None,
         "financial_query_next_action_sql": "fallback_to_text_to_sql",
-        "steps": ["predefined_tool_selection_failed"],
+        "steps": [step],
     }
 
 
@@ -102,13 +101,17 @@ def _clarify_output(
     coverage: CoverageResolution,
     base_updates: dict[str, Any],
 ) -> dict[str, Any]:
-    reason = coverage.clarify_reason or "当前问题存在多种可用口径，请补充查询粒度"
+    reason = (
+        coverage.clarify_reason
+        or "当前问题存在多种可用口径，请补充查询粒度"
+    )
     return {
         **base_updates,
         **financial_query_output(
             state,
             answer=reason,
             step="predefined",
+            coverage="clarify",
         ),
     }
 
@@ -177,43 +180,23 @@ async def _select_tool_node(
     question = state["question"]
     selection = await select_predefined_tool(question, config)
 
-    if isinstance(selection, tuple):
-        template_id, intent = selection
-        return {
-            "selection": selection,
-            "selection_from_tuple": True,
-            "template_id": template_id,
-            "intent": intent,
-            "slots": None,
-        }
-
-    if isinstance(selection, PredefinedToolSelectionResult):
-        if not selection.success or selection.slots is None:
-            logger.warning(
-                "predefined_workflow fallback to text_to_sql reason={}",
-                selection.error,
-            )
-            return {
-                "selection": selection,
-                "output": _fallback_to_text_to_sql(
-                    question,
-                    selection.error or "predefined_tool_selection_failed",
-                ),
-            }
-        return {
-            "selection": selection,
-            "selection_from_tuple": False,
-            "template_id": selection.template_id,
-            "intent": build_predefined_query_intent(selection.slots),
-            "slots": selection.slots,
-        }
-
-    logger.warning("predefined_workflow unexpected tool_selection result")
-    return {
-        "output": _fallback_to_text_to_sql(
-            question,
-            "predefined_tool_selection_invalid_result",
+    if not selection.success or selection.slots is None:
+        logger.warning(
+            "predefined_workflow fallback to text_to_sql reason={}",
+            selection.error,
         )
+        return {
+            "selection": selection,
+            "output": _fallback_to_text_to_sql(
+                question,
+                selection.error or "predefined_tool_selection_failed",
+            ),
+        }
+
+    return {
+        "selection": selection,
+        "template_id": selection.template_id,
+        "intent": build_predefined_query_intent(selection.slots),
     }
 
 
@@ -242,6 +225,26 @@ async def _semantic_node(
                 },
             ),
         }
+    if coverage.status == "unavailable":
+        reason_code = coverage.reason_code or "ANNUAL_DATA_NOT_FOUND"
+        logger.warning(
+            "predefined_workflow coverage unavailable → text_to_sql reason_code={}",
+            reason_code,
+        )
+        return {
+            "canonical_matches": canonical_matches,
+            "coverage": coverage,
+            "output": {
+                "financial_query_text": question,
+                "financial_query_template_id": template_id,
+                "financial_query_intent": intent,
+                **_fallback_to_text_to_sql(
+                    question,
+                    reason_code,
+                    step=reason_code,
+                ),
+            },
+        }
     return {
         "canonical_matches": canonical_matches,
         "coverage": coverage,
@@ -255,20 +258,12 @@ async def _resolve_node(
     template_id = state["template_id"]
     canonical_matches = state["canonical_matches"]
     coverage = state["coverage"]
-    if state.get("selection_from_tuple"):
-        resolved_query = await build_resolved_query(
-            template_id,
-            state["intent"],
-            canonical_matches,
-            coverage,
-        )
-    else:
-        resolved_query = await build_resolved_query_from_slots(
-            template_id,
-            state["slots"],
-            canonical_matches,
-            coverage,
-        )
+    resolved_query = await build_resolved_query(
+        template_id,
+        state["intent"],
+        canonical_matches,
+        coverage,
+    )
     return {"resolved_query": resolved_query}
 
 
@@ -331,6 +326,8 @@ async def _execute_node(
                     source_state,
                     answer=FINANCIAL_QUERY_NO_RESULT_ANSWER,
                     step="predefined",
+                    coverage="uncovered",
+                    fallback_reason="financial_query_no_rows",
                 ),
             },
         }
@@ -371,7 +368,7 @@ async def _format_node(
 
 
 def build_predefined_workflow_graph() -> StateGraph:
-    """构建 predefined 白名单查询图，便于结构测试和后续可视化。"""
+    """构建 predefined 白名单查询图。"""
     builder = StateGraph(PredefinedGraphState)
 
     builder.add_node("init", _init_node)
@@ -420,38 +417,14 @@ def build_predefined_workflow_graph() -> StateGraph:
     return builder
 
 
-async def _apply_node(
-    state: PredefinedGraphState,
-    node,
-    config: RunnableConfig = None,
-) -> PredefinedGraphState:
-    updates = await node(state, config)
-    return {**state, **updates}
+_COMPILED_PREDEFINED_GRAPH = None
 
 
-async def _run_predefined_workflow_graph(
-    state: PredefinedGraphState,
-    config: RunnableConfig = None,
-) -> PredefinedGraphState:
-    """按同一图定义执行节点，避免额外 tracing/调度副作用影响主流程。"""
-    state = await _apply_node(state, _init_node, config)
-    if _route_after_init(state) == END:
-        return state
-
-    state = await _apply_node(state, _select_tool_node, config)
-    if _route_after_tool_selection(state) == END:
-        return state
-
-    state = await _apply_node(state, _semantic_node, config)
-    if _route_after_semantic(state) == END:
-        return state
-
-    state = await _apply_node(state, _resolve_node, config)
-    state = await _apply_node(state, _execute_node, config)
-    if _route_after_execute(state) == END:
-        return state
-
-    return await _apply_node(state, _format_node, config)
+def _get_compiled_predefined_graph():
+    global _COMPILED_PREDEFINED_GRAPH
+    if _COMPILED_PREDEFINED_GRAPH is None:
+        _COMPILED_PREDEFINED_GRAPH = build_predefined_workflow_graph().compile()
+    return _COMPILED_PREDEFINED_GRAPH
 
 
 async def predefined_workflow(
@@ -461,7 +434,7 @@ async def predefined_workflow(
     """运行 predefined 白名单查询图，并保持旧 workflow 的对外返回契约。"""
     invoke_config: RunnableConfig = {**(config or {}), "callbacks": []}
     with tracing_context(enabled=False):
-        graph_state = await _run_predefined_workflow_graph(
+        graph_state = await _get_compiled_predefined_graph().ainvoke(
             {"source_state": state, "question": ""},
             config=invoke_config,
         )

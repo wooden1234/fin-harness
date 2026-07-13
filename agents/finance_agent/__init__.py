@@ -1,13 +1,12 @@
-"""finance_agent：多 worker 金融检索子图。
+"""finance_agent：FinAgent 意图驱动编排子图。
 
-职责与 assistgen 的多工具工作流保持一致：
-1. planner 先做跨能力任务拆分；
-2. 各 worker 分别执行 faq / pdf / financial_query / web_search；
-3. join 收齐各分支结果；
-4. summarize 汇总子任务结果。
-
-⚠️ 惰性加载：避免 state_mixins.py 导入本包下的 state.py 时
-   触发 graph.py → states.py 循环。
+职责：
+1. planner 按用户意图拆分（非数据源类型）；
+2. resolve_evidence 将意图映射为证据工具链；
+3. 各 evidence worker（faq/pdf/financial_query/web_search）取证；
+4. coverage gate：证据不足时沿链降级，禁止弱相关硬答；
+5. join 收齐各分支结果；
+6. summarize 汇总子任务结果。
 """
 
 import importlib

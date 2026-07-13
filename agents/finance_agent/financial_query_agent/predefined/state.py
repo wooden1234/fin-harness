@@ -8,11 +8,6 @@ from typing_extensions import TypedDict
 from agents.finance_agent.financial_query_agent.predefined.intent import (
     FinancialQueryIntent,
 )
-from agents.finance_agent.financial_query_agent.predefined.semantic.models import (
-    CanonicalMetricMatch,
-    CoverageResolution,
-    ResolvedMetricBinding,
-)
 from agents.finance_agent.financial_query_agent.services.schemas import (
     FinancialSqlResultRow,
 )
@@ -42,24 +37,7 @@ class PredefinedSqlOutputState(TypedDict):
     steps: list[str]
 
 
-class PredefinedWorkflowState(TypedDict):
-    """predefined 局部状态，供 workflows 组装复用。"""
-
-    question: str
-    template_id: str
-    intent: FinancialQueryIntent
-    canonical_matches: NotRequired[list[CanonicalMetricMatch]]
-    coverage: NotRequired[CoverageResolution]
-    metric_bindings: NotRequired[list[ResolvedMetricBinding]]
-    answer_policy_notes: NotRequired[str]
-    sql: NotRequired[str]
-    sql_params: NotRequired[dict[str, Any]]
-    rows: NotRequired[list[FinancialSqlResultRow]]
-    missing_fields: NotRequired[list[str]]
-
-
 __all__ = [
     "PredefinedSqlInputState",
     "PredefinedSqlOutputState",
-    "PredefinedWorkflowState",
 ]

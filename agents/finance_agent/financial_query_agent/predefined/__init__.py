@@ -1,7 +1,8 @@
 """predefined 白名单查询能力。
 
-包导入时只暴露无副作用的模型导出；node/execution/tool_selection
+包导入时只暴露无副作用的模型导出；execution/tool_selection
 按需懒加载，避免与 FinAgentState / services 形成循环导入。
+工作流编排见 workflows.predefined。
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ __all__ = [
     "execute_predefined_sql",
     "execute_predefined_sql_query",
     "predefined_sql",
-    "predefined_workflow",
     "select_predefined_tool",
     "template_catalog_text",
 ]
@@ -74,10 +74,5 @@ def __getattr__(name: str):
             "select_predefined_tool": select_predefined_tool,
         }
         return exports[name]
-
-    if name == "predefined_workflow":
-        from .node import predefined_workflow
-
-        return predefined_workflow
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

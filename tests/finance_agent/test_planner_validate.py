@@ -45,14 +45,15 @@ def test_validate_drops_empty_and_forbidden_types():
     unknown = SubTask.model_construct(id="3", question="未知类型问题", type="other")
     result = validate_and_normalize_tasks(
         [
-            SubTask(id="1", question="  ", type="faq"),
+            SubTask(id="1", question="  ", intent="concept_explain"),
             SubTask(id="2", question="随便问问", type="general"),
             unknown,
-            SubTask(id="4", question="什么是 T+1", type="faq"),
+            SubTask(id="4", question="什么是 T+1", intent="concept_explain"),
         ]
     )
     assert len(result.tasks) == 1
     assert result.tasks[0].question == "什么是 T+1"
+    assert result.tasks[0].intent == "concept_explain"
     assert result.needs_repair is True
     assert "empty_question" in result.issues
     assert "forbidden_type:general" in result.issues
@@ -61,12 +62,12 @@ def test_validate_drops_empty_and_forbidden_types():
 
 def test_validate_merges_near_duplicates_and_caps():
     tasks = [
-        SubTask(id="1", question="宁德时代 2024 年营业收入", type="financial_query"),
-        SubTask(id="2", question="宁德时代2024年营业收入", type="financial_query"),
-        SubTask(id="3", question="问题A", type="faq"),
-        SubTask(id="4", question="问题B", type="pdf"),
-        SubTask(id="5", question="问题C", type="web_search"),
-        SubTask(id="6", question="问题D", type="faq"),
+        SubTask(id="1", question="宁德时代 2024 年营业收入", intent="structured_metric"),
+        SubTask(id="2", question="宁德时代2024年营业收入", intent="structured_metric"),
+        SubTask(id="3", question="问题A", intent="concept_explain"),
+        SubTask(id="4", question="问题B", intent="document_qa"),
+        SubTask(id="5", question="问题C", intent="market_event"),
+        SubTask(id="6", question="问题D", intent="concept_explain"),
     ]
     result = validate_and_normalize_tasks(tasks)
     assert len(result.tasks) <= MAX_SUBTASKS
@@ -108,7 +109,7 @@ async def test_supervisor_api_error_retries_then_fallback():
     mock_llm.with_structured_output.return_value = mock_structured
 
     with patch(
-        "app.agents.finance_agent.planner.common.get_router_llm",
+        "agents.finance_agent.planner.common.get_router_llm",
         return_value=mock_llm,
     ):
         out = await supervisor_node(
@@ -136,7 +137,7 @@ async def test_supervisor_schema_error_attempts_repair():
     mock_llm.with_structured_output.return_value = mock_structured
 
     with patch(
-        "app.agents.finance_agent.planner.common.get_router_llm",
+        "agents.finance_agent.planner.common.get_router_llm",
         return_value=mock_llm,
     ):
         out = await supervisor_node(
@@ -168,7 +169,7 @@ async def test_supervisor_validation_repair_then_success():
     mock_llm.with_structured_output.return_value = mock_structured
 
     with patch(
-        "app.agents.finance_agent.planner.common.get_router_llm",
+        "agents.finance_agent.planner.common.get_router_llm",
         return_value=mock_llm,
     ):
         out = await supervisor_node(
@@ -190,7 +191,7 @@ async def test_supervisor_unclassifiable_empty_plan():
     mock_llm.with_structured_output.return_value = mock_structured
 
     with patch(
-        "app.agents.finance_agent.planner.common.get_router_llm",
+        "agents.finance_agent.planner.common.get_router_llm",
         return_value=mock_llm,
     ):
         out = await supervisor_node(
@@ -221,7 +222,7 @@ async def test_explicit_planner_nodes_route_to_repair_then_dispatch():
     state = {"messages": [HumanMessage(content="什么是 T+1？")]}
 
     with patch(
-        "app.agents.finance_agent.planner.common.get_router_llm",
+        "agents.finance_agent.planner.common.get_router_llm",
         return_value=mock_llm,
     ):
         planned = await plan_tasks_node(state, {})
@@ -231,7 +232,7 @@ async def test_explicit_planner_nodes_route_to_repair_then_dispatch():
 
     assert len(repaired["sub_tasks"]) == 1
     assert repaired["planner_repair_attempted"] is True
-    assert route_after_validate_plan(repaired) == "dispatch_workers"
+    assert route_after_validate_plan(repaired) == "resolve_evidence"
 
 
 def test_planner_eval_dataset_loads_and_scores():

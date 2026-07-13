@@ -63,8 +63,9 @@ async def validate_plan_node(
         }
 
     logger.info(
-        "planner tasks={} types={} issues={}",
+        "planner tasks={} intents={} types={} issues={}",
         len(tasks),
+        [t.intent for t in tasks],
         [t.type for t in tasks],
         issues,
     )
@@ -78,10 +79,10 @@ async def validate_plan_node(
 
 
 def route_after_validate_plan(state: FinAgentState) -> str:
-    """校验后按需进入 repair，否则进入 worker 派发。"""
+    """校验后按需进入 repair，否则进入证据链解析。"""
     if bool(state.get("planner_needs_repair")) and not bool(state.get("planner_repair_attempted")):
         return "repair_plan"
-    return "dispatch_workers"
+    return "resolve_evidence"
 
 
 __all__ = ["route_after_validate_plan", "validate_plan_node"]

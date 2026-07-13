@@ -65,6 +65,7 @@ async def faq_agent(
 
     min_score = settings.FAQ_MIN_RELEVANCE_SCORE
     if not hits or hits[0].score < min_score:
+        # 未命中或弱相关命中都视为 uncovered：禁止用弱相关片段硬答
         logger.warning("faq_agent no_context hits={} top1_score={}", len(hits), hits[0].score if hits else None)
         return {
             "messages": [AIMessage(content=NO_CONTEXT_ANSWER)],
@@ -75,6 +76,8 @@ async def faq_agent(
                     "question": query,
                     "type": "faq",
                     "context": "（未找到相关知识库条目）",
+                    "coverage": "uncovered",
+                    "confidence": float(hits[0].score) if hits else 0.0,
                     "fallback_to_web": True,
                     "fallback_reason": "faq_no_context",
                 }
@@ -98,12 +101,30 @@ async def faq_agent(
         return {
             "messages": [AIMessage(content=FAQ_BUSY_ANSWER)],
             "citations": citations,
-            "task_results": [{"sub_task_id": sub_task_id, "question": query, "type": "faq", "context": context}],
+            "task_results": [
+                {
+                    "sub_task_id": sub_task_id,
+                    "question": query,
+                    "type": "faq",
+                    "context": context,
+                    "coverage": "partial",
+                    "confidence": float(hits[0].score),
+                }
+            ],
         }
 
     logger.info("faq_agent hits={} top1_score={:.4f}", len(hits), hits[0].score)
     return {
         "messages": [AIMessage(content=answer)],
         "citations": citations,
-        "task_results": [{"sub_task_id": sub_task_id, "question": query, "type": "faq", "context": f"[LLM 回答] {answer}"}],
+        "task_results": [
+            {
+                "sub_task_id": sub_task_id,
+                "question": query,
+                "type": "faq",
+                "context": f"[LLM 回答] {answer}",
+                "coverage": "covered",
+                "confidence": float(hits[0].score),
+            }
+        ],
     }

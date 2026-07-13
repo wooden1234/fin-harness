@@ -11,7 +11,7 @@ from app.core.logger import get_logger
 
 logger = get_logger(service="final_answer")
 
-KNOWLEDGE_SOURCE_TYPES = frozenset({"faq", "pdf"})
+KNOWLEDGE_SOURCE_TYPES = frozenset({"faq", "pdf", "web"})
 
 
 def _current_sub_task_ids(state: FinAgentState) -> set[str]:
@@ -22,7 +22,7 @@ def _filter_current_turn_citations(
     state: FinAgentState,
     citations: list[dict],
 ) -> list[dict]:
-    """仅保留本轮知识库（faq/pdf）worker 产生的引用。"""
+    """保留本轮 worker 产生的可展示引用（faq/pdf/web）。"""
     current_ids = _current_sub_task_ids(state)
     filtered: list[dict] = []
     for citation in citations:

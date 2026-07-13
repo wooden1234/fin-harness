@@ -66,5 +66,10 @@ class Settings(BaseSettings):
     MINERU_BASE_URL: str = "https://mineru.net/api/v4"
     MINERU_MODEL_VERSION: str = "vlm"
 
+    # text_to_sql：规则通过后是否启用 LLM 结果质检
+    FINANCIAL_SQL_LLM_VALIDATION: bool = False
+    # text_to_sql：连续相同 validation_error_type 多少次后提前放弃纠错
+    FINANCIAL_SQL_MAX_REPEAT_SAME_ERROR: int = 2
+
 
 settings = Settings()

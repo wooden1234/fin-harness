@@ -39,6 +39,7 @@ def _operation_for_template(template_id: str) -> str:
         "exact_metric_lookup": "lookup",
         "latest_metric_lookup": "latest",
         "compare_metric_lookup": "compare",
+        "compare_year_metric_lookup": "compare_year",
         "trend_metric_lookup": "trend",
     }
     return mapping.get(template_id, "lookup")

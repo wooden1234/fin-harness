@@ -47,13 +47,14 @@ def build_sql_from_resolution(
 
     base_sql, binding_params = build_binding_select_sql(resolved_query.metric_bindings)
     years = list(resolved_query.intent.years)
-    if coverage and coverage.company_coverages:
+    # 仅 latest 允许用 coverage 补全唯一目标年；compare/trend/exact 必须用显式 years。
+    if template_id == LATEST_METRIC_LOOKUP and not years and coverage and coverage.company_coverages:
         selected_years = [
             item.selected_year
             for item in coverage.company_coverages
             if item.selected_year is not None
         ]
-        if selected_years and not years:
+        if selected_years:
             years = [max(selected_years)]
     sql = append_template_suffix(
         base_sql,

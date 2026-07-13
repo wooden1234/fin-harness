@@ -22,9 +22,9 @@ class FinancialQueryIntent(BaseModel):
         default_factory=list,
         description="标准化后的指标列表",
     )
-    operation: Literal["lookup", "latest", "compare", "trend"] = Field(
+    operation: Literal["lookup", "latest", "compare", "compare_year", "trend"] = Field(
         default="lookup",
-        description="查询意图：精确查数、最新一期、公司对比、趋势查询",
+        description="查询意图：精确查数、最新一期、多公司对比、单公司跨年对比、趋势查询",
     )
     time_scope: Literal["single", "latest", "range", "trailing_n_years", "unspecified"] = Field(
         default="unspecified",

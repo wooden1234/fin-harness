@@ -2,12 +2,6 @@
 
 from __future__ import annotations
 
-from agents.finance_agent.financial_query_agent.predefined.extraction.models import (
-    PredefinedSlotExtraction,
-)
-from agents.finance_agent.financial_query_agent.predefined.extraction.normalizer import (
-    build_predefined_query_intent,
-)
 from agents.finance_agent.financial_query_agent.predefined.intent import (
     FinancialQueryIntent,
 )
@@ -17,7 +11,8 @@ from agents.finance_agent.financial_query_agent.predefined.semantic.models impor
     ResolvedMetricBinding,
 )
 from agents.finance_agent.financial_query_agent.predefined.whitelist.descriptions import (
-    REQUIRED_FIELDS,
+    VALID_TEMPLATE_IDS,
+    collect_slot_missing_fields,
 )
 from agents.finance_agent.financial_query_agent.predefined.semantic.company_resolver import (
     CompanyResolver,
@@ -60,7 +55,7 @@ async def build_resolved_query(
     canonical_matches: list[CanonicalMetricMatch],
     coverage: CoverageResolution,
 ) -> ResolvedPredefinedQuery:
-    if template_id not in REQUIRED_FIELDS:
+    if template_id not in VALID_TEMPLATE_IDS:
         return ResolvedPredefinedQuery(
             template_id=template_id,
             intent=intent,
@@ -73,7 +68,7 @@ async def build_resolved_query(
     company_ids = await CompanyResolver.resolve_company_ids(intent.companies)
     metric_bindings = build_metric_bindings(canonical_matches, coverage)
     missing_fields = _missing_fields(
-        REQUIRED_FIELDS[template_id],
+        template_id,
         query=intent,
         company_ids=company_ids,
         metric_bindings=metric_bindings,
@@ -90,18 +85,8 @@ async def build_resolved_query(
     )
 
 
-async def build_resolved_query_from_slots(
-    template_id: str,
-    slots: PredefinedSlotExtraction,
-    canonical_matches: list[CanonicalMetricMatch],
-    coverage: CoverageResolution,
-) -> ResolvedPredefinedQuery:
-    intent = build_predefined_query_intent(slots)
-    return await build_resolved_query(template_id, intent, canonical_matches, coverage)
-
-
 def _missing_fields(
-    required_fields: tuple[str, ...],
+    template_id: str,
     *,
     query: FinancialQueryIntent,
     company_ids: list[int],
@@ -109,13 +94,14 @@ def _missing_fields(
     years: list[int],
     coverage: CoverageResolution,
 ) -> list[str]:
-    missing_fields: list[str] = []
-    if "company" in required_fields and (not query.companies or not company_ids):
-        missing_fields.append("company")
-    if "metric" in required_fields and (not query.metrics or not metric_bindings):
-        missing_fields.append("metric")
-    if "year" in required_fields and not years:
-        missing_fields.append("year")
+    missing_fields = collect_slot_missing_fields(
+        template_id,
+        company_count=len(query.companies),
+        resolved_company_count=len(company_ids),
+        metric_count=len(query.metrics),
+        has_resolved_metric=bool(metric_bindings),
+        years=years,
+    )
     if coverage.status == "unavailable":
         missing_fields.append("coverage")
     if coverage.status == "clarify":
@@ -126,5 +112,4 @@ def _missing_fields(
 __all__ = [
     "build_metric_bindings",
     "build_resolved_query",
-    "build_resolved_query_from_slots",
 ]

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agents.finance_agent.financial_query_agent.retrievers.sql_examples import (
+from agents.finance_agent.financial_query_agent.text_to_sql.retrievers.sql_examples import (
     FinancialSqlExampleRetriever,
 )
 
@@ -89,6 +89,10 @@ FINANCIAL_SQL_SCHEMA_PROMPT = """\
 - 营业利润 / 经营利润: OPERATING_PROFIT
 - 经营活动产生的现金流量净额 / 经营现金流净额: OPERATING_CASHFLOW_NET
 - 研发费用 / 研发支出: RND_EXPENSE
+- 毛利率: GROSS_MARGIN
+- 总资产 / 资产总计: TOTAL_ASSETS
+- 总负债 / 负债合计: TOTAL_LIABILITIES
+- 基本每股收益 / EPS: EPS_BASIC
 
 表 fin_core.raw_table_cells：
 - id: 单元格主键
@@ -112,6 +116,9 @@ LEFT JOIN fin_core.canonical_metrics AS canonical_metric ON canonical_metric.cod
 - 精确财务指标查询优先使用 fact.canonical_code 或 company_metric_mappings，不要把 financial_metrics.canonical_name 当统一口径。
 - 跨公司或公司特定指标查询优先使用 company_metric_mappings，并要求 mapping.is_active = true、mapping.review_status = 'approved'。
 - 当数据库完成发布状态回填后，优先筛选 fact.is_published = true 或 fact.review_status = 'approved'。
+- predefined 模板仅覆盖年报（period_type=annual）；text_to_sql 需自行处理季度/半年度问题。
+- 季度查询使用 fact.period_type = 'quarter'，并结合 period_year、period_label（如 第一季度/Q1/三季度）过滤；不要误用 annual 条件。
+- 全年各季度趋势查询保留 period_label、period_type 列，按期间标签排序展示。
 """
 
 

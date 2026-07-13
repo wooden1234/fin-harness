@@ -17,7 +17,9 @@ from app.shared import (
     AgentRoute,
     Citation,
     CoreState,
+    CoverageStatus,
     RiskLevel,
+    SubTaskIntent,
     TaskResult,
 )
 
@@ -63,6 +65,7 @@ __all__ = [
     "AgentRoute",
     "Citation",
     "CoreState",
+    "CoverageStatus",
     "FinAgentInput",
     "FinAgentState",
     "FinancialQueryState",
@@ -73,6 +76,7 @@ __all__ = [
     "RiskTriageState",
     "Router",
     "SubTask",
+    "SubTaskIntent",
     "SubTaskType",
     "SupervisorState",
     "TaskResult",

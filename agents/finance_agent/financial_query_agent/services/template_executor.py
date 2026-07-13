@@ -49,7 +49,10 @@ class FinancialTemplateExecutor:
                 fact_year_sort_key_desc=fact_year_sort_key_desc,
                 limit=limit,
             )
-        if template.name == FinancialQueryRouter.TREND_LOOKUP_TEMPLATE.name:
+        if template.name in {
+            FinancialQueryRouter.COMPARE_YEAR_LOOKUP_TEMPLATE.name,
+            FinancialQueryRouter.TREND_LOOKUP_TEMPLATE.name,
+        }:
             return await cls._search_trend_metric_lookup(
                 query,
                 search_fn=search_fn,

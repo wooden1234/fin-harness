@@ -1,10 +1,9 @@
-"""predefined 槽位抽取阶段导出。"""
+"""predefined 槽位模型与标准化导出。"""
 
-from .node import extract_predefined_slots, resolve_predefined_query_context
+from .models import PredefinedSlotExtraction
 from .normalizer import build_predefined_query_intent
 
 __all__ = [
+    "PredefinedSlotExtraction",
     "build_predefined_query_intent",
-    "extract_predefined_slots",
-    "resolve_predefined_query_context",
 ]

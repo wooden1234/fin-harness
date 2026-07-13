@@ -12,8 +12,8 @@ from agents.finance_agent.financial_query_agent.predefined.intent import (
     FinancialQueryIntent,
 )
 from agents.finance_agent.financial_query_agent.predefined.whitelist.descriptions import (
-    REQUIRED_FIELDS,
     VALID_TEMPLATE_IDS,
+    collect_slot_missing_fields,
     template_catalog_text,
 )
 from agents.finance_agent.financial_query_agent.predefined.whitelist.sql_dict import PREDEFINED_SQL_DICT
@@ -79,7 +79,6 @@ class PredefinedTemplateRegistry:
                 missing_fields=["template"],
             )
 
-        required_fields = REQUIRED_FIELDS[template_id]
         company_ids = await cls._resolve_company_ids(intent.companies)
         metric_ids = await cls._resolve_metric_ids(intent.metrics, intent.companies)
         metric_bindings: list[ResolvedMetricBinding] = []
@@ -94,11 +93,12 @@ class PredefinedTemplateRegistry:
                         selected_strategy="annual_direct",
                     )
                 )
-        missing_fields = cls._missing_fields(
-            required_fields,
-            query=intent,
-            company_ids=company_ids,
-            metric_ids=metric_ids,
+        missing_fields = collect_slot_missing_fields(
+            template_id,
+            company_count=len(intent.companies),
+            resolved_company_count=len(company_ids),
+            metric_count=len(intent.metrics),
+            has_resolved_metric=bool(metric_ids),
             years=list(intent.years),
         )
         return ResolvedPredefinedQuery(
@@ -153,24 +153,6 @@ class PredefinedTemplateRegistry:
     ) -> BuiltPredefinedSql:
         resolved_query = await cls.resolve_intent(template_id, query)
         return cls.build_from_resolution(resolved_query, limit=limit)
-
-    @staticmethod
-    def _missing_fields(
-        required_fields: tuple[str, ...],
-        *,
-        query: FinancialQueryIntent,
-        company_ids: list[int],
-        metric_ids: list[int],
-        years: list[int],
-    ) -> list[str]:
-        missing_fields: list[str] = []
-        if "company" in required_fields and (not query.companies or not company_ids):
-            missing_fields.append("company")
-        if "metric" in required_fields and (not query.metrics or not metric_ids):
-            missing_fields.append("metric")
-        if "year" in required_fields and not years:
-            missing_fields.append("year")
-        return missing_fields
 
     @staticmethod
     async def _resolve_company_ids(companies: list[str]) -> list[int]:

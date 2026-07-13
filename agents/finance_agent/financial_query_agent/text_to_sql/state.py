@@ -11,10 +11,14 @@ TextToSqlNextStep = Literal[
     "clarify_before_generate",
     "generate_sql",
     "clarify_after_generate",
+    # 规则门：简单危险错误（safety/schema/parameter）
     "validate_sql",
     "correct_sql",
     "clarify_after_correct",
-    "execute_sql",
+    # 真库验证：规则过不了的语义/运行时问题在此暴露
+    "db_verify",
+    # 结果校验：避免“SQL 能跑但答案不对”
+    "validate_result",
     "clarify_output",
     "unsafe_output",
     "execution_error_output",
@@ -50,8 +54,13 @@ class TextToSqlState(TypedDict):
     validation_error_types: NotRequired[list[str]]
     next_step: NotRequired[TextToSqlNextStep]
     attempts: NotRequired[int]
+    seen_sql_hashes: NotRequired[list[str]]
+    last_error_type: NotRequired[str]
+    repeat_error_count: NotRequired[int]
     rows: NotRequired[list[FinancialSqlResultRow]]
     execution_error: NotRequired[str]
+    result_validation_error: NotRequired[str]
+    result_validation_ok: NotRequired[bool]
     halted: NotRequired[bool]
     halt_reason: NotRequired[str]
     halt_answer: NotRequired[str]

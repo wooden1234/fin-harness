@@ -22,6 +22,7 @@ from agents.finance_agent.planner.dispatch_workers import (
 )
 from agents.finance_agent.planner.plan_tasks import plan_tasks_node
 from agents.finance_agent.planner.repair_plan import repair_plan_node
+from agents.finance_agent.planner.resolve_evidence import resolve_evidence_node
 from agents.finance_agent.planner.validate_plan import (
     route_after_validate_plan,
     validate_plan_node,
@@ -32,12 +33,15 @@ async def supervisor_node(
     state: FinAgentState,
     config: RunnableConfig = None,
 ) -> dict:
-    """兼容旧入口：顺序执行 plan → validate → repair?。"""
+    """兼容旧入口：顺序执行 plan → validate → repair? → resolve_evidence。"""
     current: dict = dict(state)
     for node in (plan_tasks_node, validate_plan_node):
         current.update(await node(cast(FinAgentState, current), config))
     if route_after_validate_plan(cast(FinAgentState, current)) == "repair_plan":
         current.update(await repair_plan_node(cast(FinAgentState, current), config))
+    if current.get("sub_tasks"):
+        resolved = await resolve_evidence_node(cast(FinAgentState, current), config)
+        current["sub_tasks"] = resolved["sub_tasks"]
     return {
         key: value
         for key, value in current.items()

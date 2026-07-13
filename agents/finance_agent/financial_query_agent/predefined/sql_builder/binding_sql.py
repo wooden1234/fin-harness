@@ -12,18 +12,15 @@ from agents.finance_agent.financial_query_agent.predefined.whitelist.schema impo
 
 
 def build_period_filters(bindings: list[ResolvedMetricBinding]) -> str:
-    """按 binding 策略生成 period_type 过滤子句。"""
+    """按 binding 生成年报 period_type 过滤子句（predefined 仅年报）。"""
     if not bindings:
         return ""
     clauses: list[str] = []
     for index, binding in enumerate(bindings):
-        if binding.selected_strategy == "sum_quarters":
-            period_clause = "fact.period_type = 'quarter'"
-        else:
-            period_clause = (
-                "(fact.period_type = 'annual' OR fact.period_type IS NULL) "
-                "AND (fact.period_type IS NULL OR fact.period_type NOT IN ('change_rate', 'unknown'))"
-            )
+        period_clause = (
+            "(fact.period_type = 'annual' OR fact.period_type IS NULL) "
+            "AND (fact.period_type IS NULL OR fact.period_type NOT IN ('change_rate', 'unknown'))"
+        )
         clauses.append(
             f"(document.company_id = :company_id_{index} "
             f"AND fact.metric_id = :metric_id_{index} AND {period_clause})"
@@ -86,6 +83,7 @@ def append_template_suffix(
     """按模板追加年份排序与 LIMIT :limit。"""
     from agents.finance_agent.financial_query_agent.predefined.whitelist.descriptions import (
         COMPARE_METRIC_LOOKUP,
+        COMPARE_YEAR_METRIC_LOOKUP,
         EXACT_METRIC_LOOKUP,
         LATEST_METRIC_LOOKUP,
         TREND_METRIC_LOOKUP,
@@ -111,7 +109,7 @@ def append_template_suffix(
             )
         else:
             suffix = "\nORDER BY COALESCE(fact.period_year, document.fiscal_year) DESC, company.name, metric.canonical_name"
-    elif template_id == TREND_METRIC_LOOKUP:
+    elif template_id in {COMPARE_YEAR_METRIC_LOOKUP, TREND_METRIC_LOOKUP}:
         if not years_empty:
             suffix = (
                 f"\n  AND COALESCE(fact.period_year, document.fiscal_year) IN ({', '.join(str(y) for y in year_values)})"

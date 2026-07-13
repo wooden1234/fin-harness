@@ -22,10 +22,26 @@ class FinancialQueryRouter:
     NEEDS_CLARIFICATION_ROUTE = "needs_clarification"
     TEXT_TO_SQL_FALLBACK_ROUTE = "text_to_sql_fallback"
 
-    EXACT_LOOKUP_TEMPLATE = FinancialQueryTemplate(name="exact_metric_lookup", description="单公司、单年份、单指标精确查数")
-    LATEST_LOOKUP_TEMPLATE = FinancialQueryTemplate(name="latest_metric_lookup", description="单公司、未指定年份、查询最新一期指标")
-    COMPARE_LOOKUP_TEMPLATE = FinancialQueryTemplate(name="compare_metric_lookup", description="多公司或多指标对比查询")
-    TREND_LOOKUP_TEMPLATE = FinancialQueryTemplate(name="trend_metric_lookup", description="单公司或单指标跨年份趋势查询")
+    EXACT_LOOKUP_TEMPLATE = FinancialQueryTemplate(
+        name="exact_metric_lookup",
+        description="恰好 1 公司 + 恰好 1 年份 + 恰好 1 指标精确查数",
+    )
+    LATEST_LOOKUP_TEMPLATE = FinancialQueryTemplate(
+        name="latest_metric_lookup",
+        description="恰好 1 公司 + 恰好 1 指标，查询最新已发布年度",
+    )
+    COMPARE_LOOKUP_TEMPLATE = FinancialQueryTemplate(
+        name="compare_metric_lookup",
+        description="≥2 公司 + 恰好 1 显式共同年份 + 恰好 1 指标横向对比",
+    )
+    COMPARE_YEAR_LOOKUP_TEMPLATE = FinancialQueryTemplate(
+        name="compare_year_metric_lookup",
+        description="恰好 1 公司 + ≥2 显式年份 + 恰好 1 指标跨年对比",
+    )
+    TREND_LOOKUP_TEMPLATE = FinancialQueryTemplate(
+        name="trend_metric_lookup",
+        description="恰好 1 公司 + 恰好 1 指标 + ≥2 个显式年份的年度趋势",
+    )
 
     @classmethod
     def match_template(cls, question: str, query: FinancialQueryIntent) -> FinancialQueryTemplate | None:
@@ -36,21 +52,52 @@ class FinancialQueryRouter:
         has_multiple_companies = len(query.companies) > 1
         has_multiple_years = len(query.years) > 1
         has_multiple_metrics = len(query.metrics) > 1
+        compare_keywords = ("对比", "比较", "对照")
+        is_compare_phrasing = any(keyword in normalized_question for keyword in compare_keywords)
         if query.has_template_blocking_ambiguity():
             return None
-        if query.operation == "compare" and (has_multiple_companies or has_multiple_metrics):
+        if (
+            query.operation == "compare"
+            and has_multiple_companies
+            and has_metric
+            and has_year
+            and not has_multiple_metrics
+            and not has_multiple_years
+        ):
             return cls.COMPARE_LOOKUP_TEMPLATE
-        if query.operation == "trend" and has_metric and (has_company or has_multiple_years):
+        if (
+            query.operation in {"compare_year", "compare"}
+            and has_company
+            and has_metric
+            and has_multiple_years
+            and not has_multiple_metrics
+            and (query.operation == "compare_year" or is_compare_phrasing)
+        ):
+            return cls.COMPARE_YEAR_LOOKUP_TEMPLATE
+        if query.operation == "trend" and has_company and has_metric and has_multiple_years:
             return cls.TREND_LOOKUP_TEMPLATE
-        if query.operation == "latest" and has_company and has_metric:
+        if query.operation == "latest" and has_company and has_metric and not query.years:
             return cls.LATEST_LOOKUP_TEMPLATE
-        if has_company and has_metric and has_year:
+        if has_company and has_metric and has_year and not has_multiple_metrics:
             return cls.EXACT_LOOKUP_TEMPLATE
-        if has_multiple_companies and has_metric:
+        if (
+            has_multiple_companies
+            and has_metric
+            and has_year
+            and not has_multiple_metrics
+            and not has_multiple_years
+        ):
             return cls.COMPARE_LOOKUP_TEMPLATE
-        if has_company and has_metric and (has_multiple_years or any(keyword in normalized_question for keyword in ["趋势", "近年", "近几年", "历年"])):
+        if has_company and has_metric and has_multiple_years and is_compare_phrasing:
+            return cls.COMPARE_YEAR_LOOKUP_TEMPLATE
+        if has_company and has_metric and has_multiple_years:
             return cls.TREND_LOOKUP_TEMPLATE
-        if has_company and has_metric and not has_year and any(keyword in normalized_question for keyword in ["最新", "最近", "今年", "当前"]):
+        if (
+            has_company
+            and has_metric
+            and not query.years
+            and any(keyword in normalized_question for keyword in ["最新", "最近", "当前"])
+        ):
             return cls.LATEST_LOOKUP_TEMPLATE
         return None
 
@@ -68,4 +115,3 @@ class FinancialQueryRouter:
 
 
 __all__ = ["FinancialQueryRouter", "FinancialQueryTemplate"]
-

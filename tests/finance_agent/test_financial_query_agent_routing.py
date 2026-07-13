@@ -7,9 +7,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from langchain_core.messages import HumanMessage
 
-from app.agents.finance_agent.financial_query_agent import (
+from agents.finance_agent.financial_query_agent import (
     _run_financial_query_agent,
 )
+
+AGENT_MODULE = "agents.finance_agent.financial_query_agent"
 
 
 def _base_state(question: str) -> dict:
@@ -37,15 +39,15 @@ async def test_agent_routes_to_predefined_when_planner_says_so():
 
     with (
         patch(
-            "app.agents.finance_agent.financial_query_agent.planner.financial_query_planner",
+            f"{AGENT_MODULE}.planner.financial_query_planner",
             new=AsyncMock(return_value=planner_updates),
         ),
         patch(
-            "app.agents.finance_agent.financial_query_agent.workflows.predefined_workflow",
+            f"{AGENT_MODULE}.workflows.predefined_workflow",
             new=AsyncMock(return_value=predefined_updates),
         ),
         patch(
-            "app.agents.finance_agent.financial_query_agent.workflows.text_to_sql_workflow",
+            f"{AGENT_MODULE}.workflows.text_to_sql_workflow",
             new=AsyncMock(),
         ) as mock_text_to_sql,
     ):
@@ -78,15 +80,15 @@ async def test_agent_falls_back_to_text_to_sql_when_predefined_fails():
 
     with (
         patch(
-            "app.agents.finance_agent.financial_query_agent.planner.financial_query_planner",
+            f"{AGENT_MODULE}.planner.financial_query_planner",
             new=AsyncMock(return_value=planner_updates),
         ),
         patch(
-            "app.agents.finance_agent.financial_query_agent.workflows.predefined_workflow",
+            f"{AGENT_MODULE}.workflows.predefined_workflow",
             new=AsyncMock(return_value=predefined_updates),
         ),
         patch(
-            "app.agents.finance_agent.financial_query_agent.workflows.text_to_sql_workflow",
+            f"{AGENT_MODULE}.workflows.text_to_sql_workflow",
             new=AsyncMock(return_value=text_to_sql_updates),
         ) as mock_text_to_sql,
     ):
@@ -118,15 +120,15 @@ async def test_agent_routes_directly_to_text_to_sql():
 
     with (
         patch(
-            "app.agents.finance_agent.financial_query_agent.planner.financial_query_planner",
+            f"{AGENT_MODULE}.planner.financial_query_planner",
             new=AsyncMock(return_value=planner_updates),
         ),
         patch(
-            "app.agents.finance_agent.financial_query_agent.workflows.predefined_workflow",
+            f"{AGENT_MODULE}.workflows.predefined_workflow",
             new=AsyncMock(),
         ) as mock_predefined,
         patch(
-            "app.agents.finance_agent.financial_query_agent.workflows.text_to_sql_workflow",
+            f"{AGENT_MODULE}.workflows.text_to_sql_workflow",
             new=AsyncMock(return_value=text_to_sql_updates),
         ),
     ):

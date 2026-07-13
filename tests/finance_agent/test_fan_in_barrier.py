@@ -75,8 +75,20 @@ async def test_graph_builds_and_routes_asymmetric_web_fallback():
     build_finance_agent_subgraph().compile()
 
     tasks = [
-        SubTask(id="f1", question="交易规则是什么", type="faq"),
-        SubTask(id="w1", question="最近有什么新规", type="web_search"),
+        SubTask(
+            id="f1",
+            question="交易规则是什么",
+            intent="concept_explain",
+            type="faq",
+            evidence_chain=["faq", "web_search"],
+        ),
+        SubTask(
+            id="w1",
+            question="最近有什么新规",
+            intent="market_event",
+            type="web_search",
+            evidence_chain=["web_search"],
+        ),
     ]
     sends = route_after_dispatch_workers({"sub_tasks": tasks})
     assert [send.node for send in sends] == ["faq_agent", "web_search_agent"]
@@ -86,10 +98,12 @@ async def test_graph_builds_and_routes_asymmetric_web_fallback():
         {
             "sub_task_id": "f1",
             "sub_question": "交易规则是什么",
+            "evidence_chain": ["faq", "web_search"],
             "task_results": [
                 {
                     "sub_task_id": "f1",
                     "type": "faq",
+                    "coverage": "uncovered",
                     "fallback_to_web": True,
                 }
             ],

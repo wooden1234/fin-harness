@@ -6,12 +6,13 @@ from agents.finance_agent.financial_query_agent.text_to_sql.components.nodes imp
     clarify_before_generate_node,
     clarify_output_node,
     correct_sql_node,
-    execute_sql_node,
+    db_verify_node,
     execution_error_output_node,
     format_output_node,
     generate_sql_node,
     prepare_context_node,
     unsafe_output_node,
+    validate_result_node,
     validate_sql_node,
 )
 
@@ -21,11 +22,12 @@ __all__ = [
     "clarify_before_generate_node",
     "clarify_output_node",
     "correct_sql_node",
-    "execute_sql_node",
+    "db_verify_node",
     "execution_error_output_node",
     "format_output_node",
     "generate_sql_node",
     "prepare_context_node",
     "unsafe_output_node",
+    "validate_result_node",
     "validate_sql_node",
 ]

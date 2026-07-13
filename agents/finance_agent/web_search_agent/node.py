@@ -59,7 +59,7 @@ def _query_from_state(state: FinAgentState) -> str:
     return _latest_user_query(list(state.get("messages") or []))
 
 
-def _to_citations(results: list[WebSearchResult]) -> list[Citation]:
+def _to_citations(results: list[WebSearchResult], *, sub_task_id: str = "") -> list[Citation]:
     citations: list[Citation] = []
     for result in results:
         url = str(result.get("url") or "")
@@ -71,6 +71,7 @@ def _to_citations(results: list[WebSearchResult]) -> list[Citation]:
             "url": url,
             "snippet": snippet,
             "source_type": "web",
+            "sub_task_id": sub_task_id,
         }
         published_at = result.get("published_date")
         if published_at:
@@ -169,6 +170,8 @@ async def web_search_agent(
                     "question": query,
                     "type": "web_search",
                     "context": answer,
+                    "coverage": "uncovered",
+                    "fallback_reason": "web_empty_query",
                 }
             ],
             "steps": ["web_search_agent"],
@@ -188,18 +191,23 @@ async def web_search_agent(
                     "question": query,
                     "type": "web_search",
                     "context": answer,
+                    "coverage": "uncovered",
+                    "fallback_reason": "web_search_failed",
                 }
             ],
             "steps": ["web_search_agent"],
         }
 
-    citations = _to_citations(search_response["results"])
+    citations = _to_citations(search_response["results"], sub_task_id=sub_task_id)
     if search_response["answer"]:
         answer = search_response["answer"]
     elif citations:
         answer = _fallback_answer_from_results(search_response["results"])
     else:
         answer = search_response["answer"] or WEB_SEARCH_NO_RESULT_ANSWER
+
+    # 无搜索结果（未配置 / 无可靠来源）时明确 uncovered，交给 summarize 说明依据不足
+    coverage = "covered" if citations else "uncovered"
 
     if citations:
         sources = _format_sources(citations)
@@ -215,6 +223,8 @@ async def web_search_agent(
                 "type": "web_search",
                 "context": f"[联网搜索] {answer}",
                 "citations": citations,
+                "coverage": coverage,
+                **({} if citations else {"fallback_reason": "web_no_result"}),
             }
         ],
         "steps": ["web_search_agent"],

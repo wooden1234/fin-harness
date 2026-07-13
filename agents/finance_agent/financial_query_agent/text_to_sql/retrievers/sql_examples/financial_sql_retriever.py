@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from agents.finance_agent.financial_query_agent.retrievers.sql_examples.base import (
+from agents.finance_agent.financial_query_agent.text_to_sql.retrievers.sql_examples.base import (
     BaseSqlExampleRetriever,
     SqlExample,
 )
@@ -19,6 +19,20 @@ class FinancialSqlExampleRetriever(BaseSqlExampleRetriever):
         "趋势分析": ("趋势", "历年", "近三年", "近五年", "近5年"),
         "多公司对比": ("和", "与", "对比", "比较", "分别"),
         "排名查询": ("排名", "前十", "最高", "最低", "top"),
+        "季度查询": (
+            "季度",
+            "季报",
+            "一季",
+            "二季",
+            "三季",
+            "四季",
+            "半年度",
+            "半年",
+            "q1",
+            "q2",
+            "q3",
+            "q4",
+        ),
     }
 
     _ALL_EXAMPLES: dict[str, tuple[SqlExample, ...]] = {
@@ -235,6 +249,140 @@ LIMIT :limit
                 notes=["排名查询优先按数值列排序", "排名指标使用 canonical_code，仍需输出展示别名"],
             ),
         ),
+        "季度查询": (
+            SqlExample(
+                category="季度查询",
+                question="宁德时代 2024 年一季度营业收入是多少",
+                sql="""
+SELECT
+  company.id AS company_id,
+  company.name AS company_name,
+  company.ticker AS ticker,
+  document.fiscal_year AS fiscal_year,
+  fact.period_year AS period_year,
+  fact.period_label AS period_label,
+  fact.period_type AS period_type,
+  canonical_metric.name AS metric_name,
+  COALESCE(fact.raw_value, CAST(fact.value AS TEXT), '') AS raw_value,
+  COALESCE(fact.unit, '') AS unit,
+  COALESCE(fact.currency, '') AS currency,
+  COALESCE(document.source, '') AS source,
+  table_ctx.page_num AS page_num,
+  COALESCE(document.doc_id, '') AS doc_id
+FROM fin_core.annual_financial_facts AS fact
+JOIN fin_core.annual_financial_tables AS table_ctx ON table_ctx.id = fact.table_id
+JOIN fin_core.annual_report_documents AS document ON document.id = table_ctx.document_id
+JOIN fin_core.financial_metrics AS metric ON metric.id = fact.metric_id
+JOIN fin_core.company_metric_mappings AS mapping
+  ON mapping.company_id = document.company_id
+ AND mapping.source_metric_id = fact.metric_id
+JOIN fin_core.canonical_metrics AS canonical_metric ON canonical_metric.code = mapping.canonical_code
+LEFT JOIN fin_core.financial_companies AS company ON company.id = document.company_id
+WHERE company.name = :company_name
+  AND mapping.canonical_code = :canonical_code
+  AND mapping.is_active = true
+  AND mapping.review_status = 'approved'
+  AND canonical_metric.is_active = true
+  AND fact.period_type = 'quarter'
+  AND (fact.is_published = true OR fact.review_status = 'approved')
+  AND COALESCE(fact.period_year, document.fiscal_year) = :year
+  AND (
+    fact.period_label ILIKE :quarter_label_pattern
+    OR fact.period_label ILIKE :quarter_label_pattern_alt
+  )
+ORDER BY fact.period_label ASC
+LIMIT :limit
+""",
+                notes=[
+                    "季度问题必须筛选 fact.period_type = 'quarter'，不要用 annual 条件替代",
+                    "单季查询结合 period_label（第一季度/Q1 等）与 period_year",
+                ],
+            ),
+            SqlExample(
+                category="季度查询",
+                question="比亚迪 2024 年各季度净利润",
+                sql="""
+SELECT
+  company.id AS company_id,
+  company.name AS company_name,
+  COALESCE(fact.period_year, document.fiscal_year) AS period_year,
+  fact.period_label AS period_label,
+  fact.period_type AS period_type,
+  canonical_metric.name AS metric_name,
+  COALESCE(fact.raw_value, CAST(fact.value AS TEXT), '') AS raw_value,
+  COALESCE(fact.unit, '') AS unit,
+  COALESCE(document.source, '') AS source,
+  table_ctx.page_num AS page_num,
+  COALESCE(document.doc_id, '') AS doc_id
+FROM fin_core.annual_financial_facts AS fact
+JOIN fin_core.annual_financial_tables AS table_ctx ON table_ctx.id = fact.table_id
+JOIN fin_core.annual_report_documents AS document ON document.id = table_ctx.document_id
+JOIN fin_core.financial_metrics AS metric ON metric.id = fact.metric_id
+JOIN fin_core.company_metric_mappings AS mapping
+  ON mapping.company_id = document.company_id
+ AND mapping.source_metric_id = fact.metric_id
+JOIN fin_core.canonical_metrics AS canonical_metric ON canonical_metric.code = mapping.canonical_code
+LEFT JOIN fin_core.financial_companies AS company ON company.id = document.company_id
+WHERE company.name = :company_name
+  AND mapping.canonical_code = :canonical_code
+  AND mapping.is_active = true
+  AND mapping.review_status = 'approved'
+  AND canonical_metric.is_active = true
+  AND fact.period_type = 'quarter'
+  AND (fact.is_published = true OR fact.review_status = 'approved')
+  AND COALESCE(fact.period_year, document.fiscal_year) = :year
+ORDER BY fact.period_label ASC
+LIMIT :limit
+""",
+                notes=[
+                    "全年各季度查询保留 period_label 与 period_type 列",
+                    "按 period_label 升序展示一季度到四季度",
+                ],
+            ),
+            SqlExample(
+                category="季度查询",
+                question="腾讯 2023 年 Q3 营业收入",
+                sql="""
+SELECT
+  company.id AS company_id,
+  company.name AS company_name,
+  COALESCE(fact.period_year, document.fiscal_year) AS period_year,
+  fact.period_label AS period_label,
+  fact.period_type AS period_type,
+  canonical_metric.name AS metric_name,
+  COALESCE(fact.raw_value, CAST(fact.value AS TEXT), '') AS raw_value,
+  COALESCE(fact.unit, '') AS unit,
+  COALESCE(document.source, '') AS source,
+  table_ctx.page_num AS page_num,
+  COALESCE(document.doc_id, '') AS doc_id
+FROM fin_core.annual_financial_facts AS fact
+JOIN fin_core.annual_financial_tables AS table_ctx ON table_ctx.id = fact.table_id
+JOIN fin_core.annual_report_documents AS document ON document.id = table_ctx.document_id
+JOIN fin_core.financial_metrics AS metric ON metric.id = fact.metric_id
+JOIN fin_core.company_metric_mappings AS mapping
+  ON mapping.company_id = document.company_id
+ AND mapping.source_metric_id = fact.metric_id
+JOIN fin_core.canonical_metrics AS canonical_metric ON canonical_metric.code = mapping.canonical_code
+LEFT JOIN fin_core.financial_companies AS company ON company.id = document.company_id
+WHERE company.name = :company_name
+  AND mapping.canonical_code = :canonical_code
+  AND mapping.is_active = true
+  AND mapping.review_status = 'approved'
+  AND canonical_metric.is_active = true
+  AND fact.period_type = 'quarter'
+  AND (fact.is_published = true OR fact.review_status = 'approved')
+  AND COALESCE(fact.period_year, document.fiscal_year) = :year
+  AND (
+    fact.period_label ILIKE :quarter_label_pattern
+    OR fact.period_label ILIKE '%三%'
+    OR fact.period_label ILIKE '%3%'
+  )
+ORDER BY fact.period_label ASC
+LIMIT :limit
+""",
+                notes=["Q1-Q4 缩写需映射到 period_label 模糊匹配", "季度查询不要套用 predefined 的年报过滤"],
+            ),
+        ),
     }
 
     def get_examples(self, query: str, *, k: int = 3) -> list[SqlExample]:
@@ -281,7 +429,24 @@ LIMIT :limit
             score += 1
         if category == "排名查询" and ("前" in tokens or "top" in tokens):
             score += 1
+        if category == "季度查询":
+            if re.search(r"q[1-4]", query, re.IGNORECASE):
+                score += 2
+            if any(token in query for token in ("一季度", "二季度", "三季度", "四季度", "各季度", "分季度")):
+                score += 2
+        if category == "单指标查数" and self._looks_like_quarter_query(query):
+            score -= 2
         return score
+
+    @staticmethod
+    def _looks_like_quarter_query(query: str) -> bool:
+        lowered = query.lower()
+        if re.search(r"q[1-4]", lowered):
+            return True
+        return any(
+            token in query
+            for token in ("季度", "季报", "半年度", "半年", "一季", "二季", "三季", "四季")
+        )
 
     @staticmethod
     def _extract_years(query: str) -> list[str]:

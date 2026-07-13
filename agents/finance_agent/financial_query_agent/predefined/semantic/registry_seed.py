@@ -32,6 +32,26 @@ CANONICAL_METRICS: dict[str, CanonicalMetricDefinition] = {
         name="经营现金流",
         description="经营活动产生的现金流量净额",
     ),
+    "GROSS_MARGIN": CanonicalMetricDefinition(
+        code="GROSS_MARGIN",
+        name="毛利率",
+        description="毛利率",
+    ),
+    "TOTAL_ASSETS": CanonicalMetricDefinition(
+        code="TOTAL_ASSETS",
+        name="总资产",
+        description="资产总计",
+    ),
+    "TOTAL_LIABILITIES": CanonicalMetricDefinition(
+        code="TOTAL_LIABILITIES",
+        name="总负债",
+        description="负债合计",
+    ),
+    "EPS_BASIC": CanonicalMetricDefinition(
+        code="EPS_BASIC",
+        name="基本每股收益",
+        description="基本每股收益",
+    ),
 }
 
 GLOBAL_ALIASES: dict[str, str] = {
@@ -54,6 +74,17 @@ GLOBAL_ALIASES: dict[str, str] = {
     "经营现金流": "OPERATING_CASHFLOW_NET",
     "现金流": "OPERATING_CASHFLOW_NET",
     "经营现金流净额": "OPERATING_CASHFLOW_NET",
+    "毛利率": "GROSS_MARGIN",
+    "毛利": "GROSS_MARGIN",
+    "总资产": "TOTAL_ASSETS",
+    "资产总计": "TOTAL_ASSETS",
+    "资产总额": "TOTAL_ASSETS",
+    "总负债": "TOTAL_LIABILITIES",
+    "负债合计": "TOTAL_LIABILITIES",
+    "负债总额": "TOTAL_LIABILITIES",
+    "基本每股收益": "EPS_BASIC",
+    "每股收益": "EPS_BASIC",
+    "EPS": "EPS_BASIC",
 }
 
 COMPANY_OVERRIDES: dict[str, dict[str, tuple[str, ...]]] = {

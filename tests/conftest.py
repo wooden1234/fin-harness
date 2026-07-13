@@ -1,11 +1,17 @@
 """pytest 公共配置：加载项目根目录 .env。"""
 
 from pathlib import Path
+import sys
 
 import pytest
 from dotenv import load_dotenv
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+BACKEND_DIR = ROOT_DIR / "app" / "backend"
+for path in (str(BACKEND_DIR), str(ROOT_DIR)):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
 load_dotenv(ROOT_DIR / ".env", override=False)
 
 

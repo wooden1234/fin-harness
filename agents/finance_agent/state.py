@@ -24,6 +24,9 @@ class PlannerState(TypedDict):
     sub_tasks: NotRequired[list[SubTask]]
     sub_question: NotRequired[str]
     sub_task_id: NotRequired[str]
+    # Send 派发时随任务下发的证据降级链（如 ["faq", "web_search"]），
+    # 供 worker 后条件边决定 uncovered 时的下一跳
+    evidence_chain: NotRequired[list[str]]
 
 
 class WorkerOutputState(TypedDict):

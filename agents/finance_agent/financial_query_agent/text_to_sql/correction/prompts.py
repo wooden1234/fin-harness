@@ -23,7 +23,11 @@ FINANCIAL_QUERY_TEXT_TO_SQL_CORRECTION_PROMPT = """你是 financial_query 的只
 - safety: 只处理只读、安全关键字、单条 SELECT、LIMIT 等问题
 - schema: 只使用 Schema 中列出的表和列，修正表名、别名和 JOIN 路径
 - parameter: 修正 SQL 命名参数和 params，使二者完全一致
-- semantic: 财务事实查数必须走 canonical_code 或 company_metric_mappings，并包含 approved/active 映射约束
+- semantic: 财务事实查数必须走 canonical_code 或 company_metric_mappings，并包含 approved/active 映射约束；或结果质检发现答非所问
+- runtime: 根据数据库执行报错修正 SQL（列不存在、类型不匹配、JOIN 条件错误等）
+- result_empty: 点查类问题返回 0 行时，检查公司名、年份、指标口径、JOIN 与过滤条件
+- result_schema: 补齐财务事实查询应有的数值列和指标名称列
+- 季度查询：使用 fact.period_type = 'quarter'，必要时补充 period_label 过滤，不要用 annual 条件替代
 """
 
 __all__ = ["FINANCIAL_QUERY_TEXT_TO_SQL_CORRECTION_PROMPT"]

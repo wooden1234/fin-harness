@@ -2,76 +2,29 @@
 
 from __future__ import annotations
 
-from langchain_core.runnables import RunnableLambda
-
 _BUILT = False
 _financial_query_agent = None
 
 
-def _merge_steps(*step_lists: object) -> list[str]:
-    merged: list[str] = []
-    for step_list in step_lists:
-        if not isinstance(step_list, list):
-            continue
-        merged.extend(str(item) for item in step_list)
-    return merged
+def build_financial_query_agent_graph():
+    from agents.finance_agent.financial_query_agent.graph import (
+        build_financial_query_agent_graph as _build,
+    )
+
+    return _build()
 
 
 async def _run_financial_query_agent(state, config=None):
-    """按 planner 结果分发到 predefined 或 text_to_sql。"""
-    from agents.finance_agent.financial_query_agent.planner import (
-        financial_query_planner,
-    )
-    from agents.finance_agent.financial_query_agent.workflows import (
-        predefined_workflow,
-        text_to_sql_workflow,
-    )
-
-    planner_updates = await financial_query_planner(state, config)
-    route_name = str(planner_updates.get("financial_query_plan_route") or "")
-    merged_state = {**state, **planner_updates}
-
-    if route_name == "predefined":
-        predefined_updates = await predefined_workflow(merged_state, config)
-        if str(predefined_updates.get("financial_query_plan_route") or "") == "text_to_sql":
-            fallback_state = {**merged_state, **predefined_updates}
-            text_to_sql_updates = await text_to_sql_workflow(fallback_state, config)
-            return {
-                **planner_updates,
-                **predefined_updates,
-                **text_to_sql_updates,
-                "steps": _merge_steps(
-                    planner_updates.get("steps"),
-                    predefined_updates.get("steps"),
-                    text_to_sql_updates.get("steps"),
-                ),
-            }
-        return {
-            **planner_updates,
-            **predefined_updates,
-            "steps": _merge_steps(
-                planner_updates.get("steps"),
-                predefined_updates.get("steps"),
-            ),
-        }
-
-    if route_name == "text_to_sql":
-        text_to_sql_updates = await text_to_sql_workflow(merged_state, config)
-        return {
-            **planner_updates,
-            **text_to_sql_updates,
-            "steps": _merge_steps(
-                planner_updates.get("steps"),
-                text_to_sql_updates.get("steps"),
-            ),
-        }
-
-    return planner_updates
+    """按 LangGraph 节点编排运行 financial_query_agent（测试兼容入口）。"""
+    global _BUILT, _financial_query_agent
+    if not _BUILT:
+        _financial_query_agent = _build_subgraph()
+        _BUILT = True
+    return await _financial_query_agent.ainvoke(state, config)
 
 
 def _build_subgraph() -> object:
-    """惰性构建 runnable，在首次访问时组装。"""
-    return RunnableLambda(_run_financial_query_agent)
+    return build_financial_query_agent_graph().compile()
 
 
 def __getattr__(name):
@@ -86,4 +39,7 @@ def __getattr__(name):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = ["financial_query_agent"]
+__all__ = [
+    "build_financial_query_agent_graph",
+    "financial_query_agent",
+]

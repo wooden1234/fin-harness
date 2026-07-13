@@ -1,9 +1,9 @@
 """text_to_sql SQL 校验单元测试。"""
 
-from app.agents.finance_agent.financial_query_agent.text_to_sql.validation import (
+from agents.finance_agent.financial_query_agent.text_to_sql.validation import (
     validate_generated_sql,
 )
-from app.agents.finance_agent.financial_query_agent.services.schemas import (
+from agents.finance_agent.financial_query_agent.services.schemas import (
     GeneratedFinancialSql,
 )
 
@@ -69,7 +69,8 @@ def test_validate_generated_sql_rejects_non_whitelisted_table():
     assert "非白名单表" in result.error
 
 
-def test_validate_generated_sql_rejects_fact_value_query_without_canonical_path():
+def test_validate_generated_sql_allows_fact_value_query_without_canonical_path_at_rule_gate():
+    """语义口径改在结果层校验，规则门不再因 canonical 路径拦截。"""
     result = validate_generated_sql(
         """
 SELECT
@@ -88,9 +89,7 @@ LIMIT :limit
         params={"metric_name": "营业收入", "limit": 5},
     )
 
-    assert not result.ok
-    assert result.error_type == "semantic"
-    assert "财务事实查数必须使用" in result.error
+    assert result.ok
 
 
 def test_validate_generated_sql_accepts_company_metric_mapping_canonical_path():

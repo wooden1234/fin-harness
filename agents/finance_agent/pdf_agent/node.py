@@ -75,6 +75,7 @@ async def pdf_agent(
 
     min_score = settings.PDF_MIN_RELEVANCE_SCORE
     if not hits or hits[0].score < min_score:
+        # 未命中或弱相关命中都视为 uncovered：禁止用弱相关片段硬答
         logger.warning("pdf_agent no_context hits={} top1_score={}", len(hits), hits[0].score if hits else None)
         return {
             "messages": [AIMessage(content=PDF_NO_CONTEXT_ANSWER)],
@@ -85,6 +86,8 @@ async def pdf_agent(
                     "question": query,
                     "type": "pdf",
                     "context": "（未找到相关文档条目）",
+                    "coverage": "uncovered",
+                    "confidence": float(hits[0].score) if hits else 0.0,
                     "fallback_to_web": True,
                     "fallback_reason": "pdf_no_context",
                 }
@@ -109,11 +112,29 @@ async def pdf_agent(
         return {
             "messages": [AIMessage(content=PDF_BUSY_ANSWER)],
             "citations": citations,
-            "task_results": [{"sub_task_id": sub_task_id, "question": query, "type": "pdf", "context": context}],
+            "task_results": [
+                {
+                    "sub_task_id": sub_task_id,
+                    "question": query,
+                    "type": "pdf",
+                    "context": context,
+                    "coverage": "partial",
+                    "confidence": float(hits[0].score),
+                }
+            ],
         }
 
     return {
         "messages": [AIMessage(content=answer)],
         "citations": citations,
-        "task_results": [{"sub_task_id": sub_task_id, "question": query, "type": "pdf", "context": f"[LLM 回答] {answer}"}],
+        "task_results": [
+            {
+                "sub_task_id": sub_task_id,
+                "question": query,
+                "type": "pdf",
+                "context": f"[LLM 回答] {answer}",
+                "coverage": "covered",
+                "confidence": float(hits[0].score),
+            }
+        ],
     }

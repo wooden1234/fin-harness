@@ -32,22 +32,32 @@ def financial_query_output(
     answer: str,
     context: str | None = None,
     step: str,
+    coverage: str = "covered",
+    fallback_reason: str = "",
 ) -> dict:
-    """结构化 SQL 查询输出：只返回答案，不写入 citations。"""
+    """结构化 SQL 查询输出：只返回答案，不写入 citations。
+
+    ``coverage`` 标记证据状态：covered=查到可靠数据 / clarify=需澄清 /
+    uncovered=查无或失败（沿证据链降级，禁止改走 FAQ 编数）。
+    """
     try:
         query = str(state.get("financial_query_text") or query_from_state(state))
     except ValueError:
         query = str(state.get("sub_question") or "")
+    task_result = {
+        "sub_task_id": sub_task_id_from_state(state),
+        "question": query,
+        "type": "financial_query",
+        "context": context or answer,
+        "coverage": coverage,
+    }
+    if fallback_reason:
+        task_result["fallback_reason"] = fallback_reason
+    if coverage == "uncovered":
+        task_result["fallback_to_web"] = True
     return {
         "messages": [AIMessage(content=answer)],
-        "task_results": [
-            {
-                "sub_task_id": sub_task_id_from_state(state),
-                "question": query,
-                "type": "financial_query",
-                "context": context or answer,
-            }
-        ],
+        "task_results": [task_result],
         "steps": [step],
     }
 
@@ -55,9 +65,11 @@ def financial_query_output(
 def database_failure_output(state: FinAgentState, *, step: str) -> dict:
     return financial_query_output(
         state,
-        answer="暂未在结构化财务数据库中找到相关指标，建议查阅年报 PDF 文档获取更多信息。",
+        answer="暂未在结构化财务数据库中找到相关指标。",
         context="（数据库查询失败）",
         step=step,
+        coverage="uncovered",
+        fallback_reason="financial_query_db_failure",
     )
 
 

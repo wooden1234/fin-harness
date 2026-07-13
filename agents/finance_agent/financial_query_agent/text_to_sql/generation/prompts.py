@@ -20,6 +20,7 @@ FINANCIAL_QUERY_TEXT_TO_SQL_PROMPT = """你是 financial_query 的只读 SQL 生
 9. 若需要限制结果数，请在 SQL 中保留 LIMIT :limit，并在 params 中提供 limit
 10. 优先复用示例中的 join 路径、过滤字段和结果别名，不要臆造表或列
 11. 用户说“近三年/近五年/历年/趋势”但未给具体年份时，不要因缺年份追问；用最新可用年度倒序取 N 条，再按 period_year 升序展示
+12. 用户问季度/半年度/Q1-Q4/各季度时，筛选 fact.period_type = 'quarter'，结合 period_label 与 period_year；不要套用年报 period_type=annual 的过滤
 """
 
 __all__ = ["FINANCIAL_QUERY_TEXT_TO_SQL_PROMPT"]

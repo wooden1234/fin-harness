@@ -17,6 +17,10 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from agents.finance_agent.financial_query_agent.predefined.semantic.reason_codes import (
+    CoverageReasonCode,
+)
+
 # ---------------------------------------------------------------------------
 # 枚举类型
 # ---------------------------------------------------------------------------
@@ -32,12 +36,13 @@ CoverageStatus = Literal[
 # 单家公司的取数策略：从 DB 里用什么方式拿到指标值
 CoverageStrategy = Literal[
     "annual_direct",            # 直接取年报（period_type=annual）数据
-    "sum_quarters",             # 无年报时，将四个季度加总
+    "sum_quarters",             # 已废弃：predefined 不再做四季汇总
+    "quarter_only",             # 仅有季度、无年报 → 应回退 text_to_sql
     "latest_annual",            # 取最近一期年报
-    "latest_available",         # 取最近可用数据（年报或季报均可）
+    "latest_available",         # 已废弃：predefined 不再接受非年报最新值
     "partial_compare",          # 对比场景下部分公司缺数据
     "clarify_for_granularity",  # 年报/季报等多种粒度均可用，需用户确认
-    "unavailable",              # 该公司该指标无可用数据
+    "unavailable",              # 该公司该指标无可用年报数据
 ]
 
 # 指标名映射来源：全局别名表 vs 公司级覆盖规则
@@ -48,10 +53,11 @@ MatchType = Literal[
 
 # 查询操作类型，与 extraction / tool_selection 的 operation 字段一致
 QueryType = Literal[
-    "lookup",   # 查指定年份的单值
-    "latest",   # 查最新一期
-    "compare",  # 多公司横向对比
-    "trend",    # 多年历史趋势
+    "lookup",        # 查指定年份的单值
+    "latest",        # 查最新一期
+    "compare",       # 多公司横向对比（同年）
+    "compare_year",  # 单公司跨年对比
+    "trend",         # 多年历史趋势
 ]
 
 # 答案生成策略：formatter 据此决定是否附加口径说明
@@ -59,7 +65,7 @@ AnswerPolicy = Literal[
     "direct",                              # 直接展示查数结果，无需额外说明
     "compare_with_mixed_source_metrics",   # 对比公司使用了不同口径字段，需提示
     "partial_compare",                     # 部分公司缺数据，对比结果不完整
-    "sum_quarters_disclosure",             # 数值由四季度汇总，需披露计算方式
+    "sum_quarters_disclosure",             # 已废弃：predefined 不再汇总季度
     "trend_with_gaps",                     # 趋势序列存在年份缺口
     "clarify_for_granularity",             # 需用户确认查询粒度后再答
     "unavailable",                         # 无法生成有效答案
@@ -166,7 +172,8 @@ class CoverageResolution(BaseModel):
     canonical_metric_code: str = ""
     company_coverages: list[CompanyCoverage] = Field(default_factory=list)
     answer_policy: AnswerPolicy = "unavailable"  # 答案格式化策略
-    clarify_reason: str = ""       # status=clarify 时展示给用户的追问文案
+    reason_code: CoverageReasonCode | None = None  # 机器可读结论码，供路由/监控
+    clarify_reason: str = ""       # 展示给用户的追问或 partial 说明文案
     unavailable_reason: str = ""   # status=unavailable 时的原因说明
 
 
@@ -197,6 +204,7 @@ __all__ = [
     "CompanyMetricMatch",
     "CompanyMetricOverride",
     "CoverageRequest",
+    "CoverageReasonCode",
     "CoverageResolution",
     "CoverageStatus",
     "CoverageStrategy",

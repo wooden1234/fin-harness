@@ -12,9 +12,6 @@ from agents.finance_agent.financial_query_agent.predefined.state import (
     PredefinedSqlInputState,
     PredefinedSqlOutputState,
 )
-from agents.finance_agent.financial_query_agent.predefined.quarter_aggregate import (
-    aggregate_quarter_rows,
-)
 from agents.finance_agent.financial_query_agent.predefined.sql_builder import (
     build_sql_from_resolution,
 )
@@ -126,8 +123,6 @@ async def execute_predefined_sql(
         params=built.params,
         limit=limit,
     )
-    if isinstance(resolved_query, ResolvedPredefinedQuery) and resolved_query.metric_bindings:
-        rows = aggregate_quarter_rows(rows, resolved_query.metric_bindings)
     return PredefinedSqlOutputState(
         task=task,
         template_id=template_id,

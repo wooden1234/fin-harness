@@ -28,8 +28,12 @@ from agents.finance_agent.financial_query_agent.text_to_sql.middleware import (
 from agents.finance_agent.financial_query_agent.text_to_sql.state import (
     TextToSqlState,
 )
+from agents.finance_agent.financial_query_agent.text_to_sql.components.retry_guard import (
+    resolve_retry_action,
+)
 from agents.finance_agent.financial_query_agent.text_to_sql.validation import (
     validate_generated_sql,
+    validate_query_result_full,
 )
 from app.core.logger import get_logger
 
@@ -60,6 +64,9 @@ async def prepare_context_node(
         "top_k": int(state.get("top_k", DEFAULT_TEXT_TO_SQL_TOP_K)),
         "max_attempts": int(state.get("max_attempts", DEFAULT_TEXT_TO_SQL_MAX_ATTEMPTS)),
         "attempts": int(state.get("attempts", 0)),
+        "seen_sql_hashes": list(state.get("seen_sql_hashes", [])),
+        "last_error_type": str(state.get("last_error_type", "")),
+        "repeat_error_count": int(state.get("repeat_error_count", 0)),
         "next_step": "clarify_before_generate",
     }
 
@@ -121,6 +128,7 @@ async def validate_sql_node(
     state: TextToSqlState,
     config: RunnableConfig = None,
 ) -> dict[str, Any]:
+    """规则门：拦截简单危险错误；通过后进入真库验证。"""
     attempts = int(state.get("attempts", 0)) + 1
     validation = validate_generated_sql(
         state.get("sql", ""),
@@ -128,10 +136,19 @@ async def validate_sql_node(
     )
     validation_errors = [validation.error] if validation.error else []
     validation_error_types = [validation.error_type] if validation.error_type else []
-    next_step = "execute_sql"
     if not validation.ok:
-        max_attempts = int(state.get("max_attempts", DEFAULT_TEXT_TO_SQL_MAX_ATTEMPTS))
-        next_step = "unsafe_output" if attempts >= max_attempts else "correct_sql"
+        return {
+            "attempts": attempts,
+            "validated_sql": validation.validated_sql,
+            **resolve_retry_action(
+                state,
+                error_type=validation.error_type,
+                error=validation.error,
+                sql=state.get("sql", ""),
+                params=state.get("sql_params", {}),
+                terminal_on_abort="unsafe_output",
+            ),
+        }
     return {
         "attempts": attempts,
         "validated_sql": validation.validated_sql,
@@ -139,7 +156,7 @@ async def validate_sql_node(
         "validation_error_type": validation.error_type,
         "validation_errors": validation_errors,
         "validation_error_types": validation_error_types,
-        "next_step": next_step,
+        "next_step": "db_verify",
     }
 
 
@@ -187,10 +204,11 @@ async def clarify_after_correct_node(
     return {"next_step": "validate_sql"}
 
 
-async def execute_sql_node(
+async def db_verify_node(
     state: TextToSqlState,
     config: RunnableConfig = None,
 ) -> dict[str, Any]:
+    """真库验证：规则过不了的运行时/语义问题在此暴露；成功则进入结果校验。"""
     try:
         rows = await execute_generated_sql(
             state.get("validated_sql", "") or state.get("sql", ""),
@@ -200,15 +218,56 @@ async def execute_sql_node(
         return {
             "rows": rows,
             "execution_error": "",
-            "next_step": "format_output",
+            "next_step": "validate_result",
         }
-    except Exception:
-        logger.exception("text_to_sql_workflow execution failed")
+    except Exception as exc:
+        logger.exception("text_to_sql_workflow db_verify failed")
+        error_text = str(exc).strip() or "sql_execution_failed"
         return {
             "rows": [],
-            "execution_error": "sql_execution_failed",
-            "next_step": "execution_error_output",
+            "execution_error": error_text,
+            **resolve_retry_action(
+                state,
+                error_type="runtime",
+                error=error_text,
+                sql=state.get("validated_sql", "") or state.get("sql", ""),
+                params=state.get("sql_params", {}),
+                terminal_on_abort="execution_error_output",
+            ),
         }
+
+
+async def validate_result_node(
+    state: TextToSqlState,
+    config: RunnableConfig = None,
+) -> dict[str, Any]:
+    """结果校验：规则 → 可选 LLM 质检；失败走 correct_sql，重试用尽走 execution_error。"""
+    rows = list(state.get("rows", []))
+    validation = await validate_query_result_full(
+        question=state.get("question", ""),
+        sql=state.get("validated_sql", "") or state.get("sql", ""),
+        rows=rows,
+        config=config,
+    )
+    if validation.ok:
+        return {
+            "result_validation_ok": True,
+            "result_validation_error": "",
+            "next_step": "format_output",
+        }
+
+    return {
+        "result_validation_ok": False,
+        "result_validation_error": validation.error,
+        **resolve_retry_action(
+            state,
+            error_type=validation.error_type,
+            error=validation.error,
+            sql=state.get("validated_sql", "") or state.get("sql", ""),
+            params=state.get("sql_params", {}),
+            terminal_on_abort="execution_error_output",
+        ),
+    }
 
 
 async def clarify_output_node(
@@ -266,11 +325,12 @@ __all__ = [
     "clarify_before_generate_node",
     "clarify_output_node",
     "correct_sql_node",
-    "execute_sql_node",
+    "db_verify_node",
     "execution_error_output_node",
     "format_output_node",
     "generate_sql_node",
     "prepare_context_node",
     "unsafe_output_node",
+    "validate_result_node",
     "validate_sql_node",
 ]
