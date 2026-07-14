@@ -2,7 +2,7 @@ from pathlib import Path
 import os
 from llama_index.core import SimpleDirectoryReader, Document
 from llama_index.core.node_parser import SentenceSplitter
-from llama_index.core.schema import TextNode
+from llama_index.core.schema import NodeRelationship, RelatedNodeInfo, TextNode
 import re
 from retrieval.embeddings import get_embed_model
 from typing import List
@@ -114,14 +114,26 @@ def chunk_documents(
 
             section = _section_from_q_heading(m.group(0))
             meta = {**base_meta, "section": section}
+            doc_id = str(meta.get("doc_id") or "").strip()
+            relationships = (
+                {NodeRelationship.SOURCE: RelatedNodeInfo(node_id=doc_id)}
+                if doc_id and doc_id != "None"
+                else {}
+            )
 
             if len(q_text) <= chunk_size:
-                nodes.append(TextNode(text=q_text, metadata=meta))
+                nodes.append(
+                    TextNode(text=q_text, metadata=meta, relationships=relationships)
+                )
             else:
                 # 超长单题：只在题内切，避免跨题粘连
                 sub_doc = Document(text=q_text, metadata=meta)
                 for sub in splitter.get_nodes_from_documents([sub_doc]):
                     sub.metadata.update(meta)
+                    if doc_id and doc_id != "None":
+                        sub.relationships[NodeRelationship.SOURCE] = RelatedNodeInfo(
+                            node_id=doc_id
+                        )
                     nodes.append(sub)
 
     return nodes

@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.core.logger import get_logger
 from retrieval import RetrievalHit, get_pdf_retriever
 from retrieval.filters import infer_pdf_metadata_filters
+from retrieval.pdf_kb_router import get_pdf_kb_router
 
 logger = get_logger(service="pdf_agent")
 
@@ -65,11 +66,31 @@ async def pdf_agent(
     else:
         query = _latest_user_query(list(state.get("messages") or []))
 
-    metadata_filters = infer_pdf_metadata_filters(query)
-    logger.info("pdf_agent query={} sub_task_id={} filters={}", query[:80], sub_task_id, metadata_filters)
+    route = get_pdf_kb_router().route(query)
+    categories = list(route.categories) or None
+    metadata_filters = infer_pdf_metadata_filters(query, knowledge_bases=categories)
+    logger.info(
+        "pdf_agent query={} sub_task_id={} routed={} confidence={} filters={}",
+        query[:80],
+        sub_task_id,
+        categories,
+        route.confidence,
+        metadata_filters,
+    )
 
     retriever = get_pdf_retriever(top_k=5, similarity_threshold=None, metadata_filters=metadata_filters, hybrid=True)
     hits = retriever.search(query, top_k=5, metadata_filters=metadata_filters)
+    trace = getattr(retriever, "last_trace", None)
+    if trace is not None:
+        logger.info(
+            "pdf_agent retrieval trace abstained={} reason={} policy={} vector_hits={} lexical_hits={} final_hits={}",
+            trace.abstained,
+            trace.abstain_reason,
+            trace.on_empty_policy,
+            trace.vector_hits,
+            trace.lexical_hits,
+            trace.final_hits,
+        )
 
     citations = _hits_to_citations(hits, sub_task_id=sub_task_id) if hits else []
 

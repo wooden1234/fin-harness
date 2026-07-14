@@ -6,6 +6,7 @@ from functools import lru_cache
 import json
 from typing import Any
 
+from app.core.config import settings
 from app.core.logger import get_logger
 from retrieval.bm25 import bm25_scores
 from retrieval.collections import (
@@ -16,9 +17,11 @@ from retrieval.collections import (
 from retrieval.filters import (
     MetadataFilters,
     filter_categories,
+    has_strict_filters,
     merge_filters,
     metadata_matches,
 )
+from retrieval.kb_contract import RetrievalTrace, apply_on_empty_policy
 from retrieval.index import load_index
 
 logger = get_logger(service="retriever")
@@ -71,17 +74,23 @@ class VectorRetriever(Retriever):
         self.metadata_filters = metadata_filters or {}
         self.candidate_multiplier = max(candidate_multiplier, 1)
         self._indices = {cat: load_index(cat) for cat in self.categories}
+        self.last_trace: RetrievalTrace | None = None
 
     def search(
         self,
         query: str,
         top_k: int | None = None,
         metadata_filters: MetadataFilters | None = None,
+        *,
+        enforce_on_empty: bool = True,
     ) -> list[RetrievalHit]:
         k = top_k or self.top_k
         filters = merge_filters(self.metadata_filters, metadata_filters)
         categories = _filtered_categories(self.categories, filters)
         per_store_k = max(k, k * self.candidate_multiplier)
+        if has_strict_filters(filters):
+            # Exact filters need a deeper vector scan before post-filtering.
+            per_store_k = max(per_store_k, k * 12)
 
         hits: list[RetrievalHit] = []
         for category in categories:
@@ -109,7 +118,18 @@ class VectorRetriever(Retriever):
                 )
 
         hits.sort(key=lambda h: h.score, reverse=True)
-        return hits[:k]
+        hits = hits[:k]
+        if enforce_on_empty:
+            hits, trace = apply_on_empty_policy(
+                hits,
+                query=query,
+                filters=filters,
+                categories=categories,
+                vector_hits=len(hits),
+                lexical_hits=0,
+            )
+            self.last_trace = trace
+        return hits
 
 
 class HybridRetriever(Retriever):
@@ -136,6 +156,15 @@ class HybridRetriever(Retriever):
             metadata_filters=self.metadata_filters,
             candidate_multiplier=4,
         )
+        self.es_bm25_retriever = None
+        if settings.ELASTICSEARCH_ENABLED:
+            from retrieval.es_bm25 import ElasticsearchBM25Retriever
+
+            self.es_bm25_retriever = ElasticsearchBM25Retriever(
+                categories=self.categories,
+                metadata_filters=self.metadata_filters,
+            )
+        self.last_trace: RetrievalTrace | None = None
 
     def search(
         self,
@@ -146,19 +175,38 @@ class HybridRetriever(Retriever):
         k = top_k or self.top_k
         filters = merge_filters(self.metadata_filters, metadata_filters)
         candidate_k = max(self.candidate_top_k, k * 4)
+        active_categories = _filtered_categories(self.categories, filters)
 
         vector_hits = self.vector_retriever.search(
             query,
             top_k=candidate_k,
             metadata_filters=filters,
+            enforce_on_empty=False,
         )
-        lexical_hits = self._bm25_search(
+        lexical_hits = self._lexical_search(
             query,
             top_k=candidate_k,
             metadata_filters=filters,
         )
-        if not lexical_hits and vector_hits:
-            lexical_hits = _bm25_rerank_hits(query, vector_hits, top_k=candidate_k)
+
+        if not vector_hits and not lexical_hits:
+            hits, trace = apply_on_empty_policy(
+                [],
+                query=query,
+                filters=filters,
+                categories=active_categories,
+                vector_hits=0,
+                lexical_hits=0,
+            )
+            self.last_trace = trace
+            if trace.abstained:
+                logger.info(
+                    "retrieval abstain reason={} policy={} filters={}",
+                    trace.abstain_reason,
+                    trace.on_empty_policy,
+                    filters,
+                )
+            return hits
 
         hits = _fuse_hits(
             vector_hits,
@@ -166,7 +214,39 @@ class HybridRetriever(Retriever):
             top_k=k,
             vector_weight=self.vector_weight,
         )
+        hits, trace = apply_on_empty_policy(
+            hits,
+            query=query,
+            filters=filters,
+            categories=active_categories,
+            vector_hits=len(vector_hits),
+            lexical_hits=len(lexical_hits),
+        )
+        trace.final_hits = len(hits)
+        self.last_trace = trace
         return hits
+
+    def _lexical_search(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        metadata_filters: MetadataFilters | None,
+    ) -> list[RetrievalHit]:
+        if self.es_bm25_retriever is not None:
+            try:
+                return self.es_bm25_retriever.search(
+                    query,
+                    top_k=top_k,
+                    metadata_filters=metadata_filters,
+                )
+            except Exception as exc:
+                logger.warning("es bm25 search failed error={}", exc)
+        return self._bm25_search(
+            query,
+            top_k=top_k,
+            metadata_filters=metadata_filters,
+        )
 
     def _bm25_search(
         self,
@@ -358,7 +438,7 @@ def _load_pg_text_rows(category: str) -> tuple[RetrievalHit, ...]:
     import psycopg
     from psycopg import sql
 
-    from retrieval.index import _pg_connection_strings
+    from retrieval.index import VECTOR_SCHEMA, _pg_connection_strings
 
     table_name = get_table_name(category)
     physical_table = f"data_{table_name}"
@@ -368,7 +448,8 @@ def _load_pg_text_rows(category: str) -> tuple[RetrievalHit, ...]:
     with psycopg.connect(sync_url) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                sql.SQL("SELECT node_id, text, metadata_ FROM public.{}").format(
+                sql.SQL("SELECT node_id, text, metadata_ FROM {}.{}").format(
+                    sql.Identifier(VECTOR_SCHEMA),
                     sql.Identifier(physical_table)
                 )
             )

@@ -35,6 +35,19 @@ class Settings(BaseSettings):
     ALGORITHM: str
     ACCESS_TOKEN_EXPIRE_MINUTES: int
 
+    # Elasticsearch（BM25 / 全文检索）
+    ELASTICSEARCH_URL: str = ""
+    ELASTICSEARCH_INDEX_PREFIX: str = "fin_agent"
+    ELASTICSEARCH_INDEX_FAQ: str = "fin_agent_faq"
+    ELASTICSEARCH_INDEX_MACRO: str = "fin_agent_macro_research"
+    ELASTICSEARCH_INDEX_ANNUAL_REPORT: str = "fin_agent_annual_reports"
+    ELASTICSEARCH_INDEX_RESEARCH_REPORT: str = "fin_agent_research_reports"
+    ELASTICSEARCH_INDEX_INDUSTRY_WHITEPAPER: str = "fin_agent_industry_whitepapers"
+    ELASTICSEARCH_INDEX_POLICY: str = "fin_agent_policy"
+    ELASTICSEARCH_USERNAME: str = ""
+    ELASTICSEARCH_PASSWORD: str = ""
+    ELASTICSEARCH_ENABLED: bool = False
+
     # LLM（W3+ Supervisor / Agent）
     DEEPSEEK_API_KEY: str = ""
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"

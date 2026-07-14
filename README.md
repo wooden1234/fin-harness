@@ -86,8 +86,8 @@ fin-harness/
 ├── evidence/        # 证据与引用
 ├── compliance/      # 合规规则与审查
 ├── audit/           # 审计与回放
-├── evals/           # 评测与回归
-├── scripts/         # 初始化、数据导入、评测脚本
+├── evals/           # 评测、回归与评测脚本
+├── scripts/         # 初始化与数据导入脚本
 └── tests/           # 单元与集成测试
 ```
 

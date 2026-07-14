@@ -4,6 +4,7 @@ from retrieval.collections import (
     get_table_name,
     pdf_categories,
 )
+from retrieval.kb_contract import RetrievalTrace
 from retrieval.retriever import (
     FAQRetriever,
     HybridRetriever,
@@ -20,6 +21,7 @@ __all__ = [
     "FAQRetriever",
     "HybridRetriever",
     "RetrievalHit",
+    "RetrievalTrace",
     "Retriever",
     "VectorFAQRetriever",
     "VectorRetriever",

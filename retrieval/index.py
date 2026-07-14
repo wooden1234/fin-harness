@@ -7,6 +7,7 @@ from llama_index.vector_stores.postgres import PGVectorStore
 from app.core.config import settings
 from retrieval.collections import get_collection_registry, get_table_name
 from retrieval.embeddings import get_embed_model
+from retrieval.es_index import index_nodes_to_elasticsearch
 
 EMBED_DIM = settings.EMBEDDING_DIM
 VECTOR_SCHEMA = "rag"
@@ -58,19 +59,29 @@ def build_index(
     table_name: str | None = None,
     rebuild: bool = False,
     show_progress: bool = True,
+    sync_elasticsearch: bool = True,
 ) -> VectorStoreIndex:
-    """将 ingest 得到的 nodes 写入指定 pgvector 集合。"""
+    """将 ingest 得到的 nodes 写入指定 pgvector 集合，并可双写 ES BM25。"""
     embed_model = get_embed_model()
     Settings.embed_model = embed_model
     resolved = table_name or get_table_name(category)
     vector_store = get_vector_store(resolved, rebuild=rebuild)
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
-    return VectorStoreIndex(
+    index = VectorStoreIndex(
         nodes,
         storage_context=storage_context,
         embed_model=embed_model,
         show_progress=show_progress,
     )
+    if sync_elasticsearch:
+        indexed = index_nodes_to_elasticsearch(
+            category,
+            nodes,
+            rebuild=rebuild,
+        )
+        if indexed:
+            print(f"es indexed: category={category} nodes={indexed} rebuild={rebuild}")
+    return index
 
 
 @lru_cache(maxsize=None)
@@ -90,8 +101,9 @@ def build_indexes_by_category(
     *,
     rebuild: bool = True,
     show_progress: bool = True,
+    sync_elasticsearch: bool = True,
 ) -> dict[str, int]:
-    """按 category 分组写入各自 pgvector 集合。"""
+    """按 category 分组写入各自 pgvector 集合，并可双写 ES。"""
     counts: dict[str, int] = {}
     for category, nodes in nodes_by_category.items():
         if not nodes:
@@ -101,6 +113,7 @@ def build_indexes_by_category(
             category=category,
             rebuild=rebuild,
             show_progress=show_progress,
+            sync_elasticsearch=sync_elasticsearch,
         )
         counts[category] = len(nodes)
     return counts
@@ -117,7 +130,7 @@ def main() -> None:
     nodes = run_ingest()
     print(f"nodes: {len(nodes)}")
     build_index(nodes, category="faq", rebuild=args.rebuild)
-    print(f"index built → table={get_table_name('faq')}, dim={EMBED_DIM}")
+    print(f"index built → table={get_table_name('faq')}, dim={EMBED_DIM} (pg + es if configured)")
     print("collections:", get_collection_registry())
 
 

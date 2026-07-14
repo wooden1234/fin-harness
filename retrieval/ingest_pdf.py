@@ -708,9 +708,23 @@ def write_job_output(
 
 
 def chunks_to_nodes(chunks: list[ChunkRecord]) -> list[Any]:
-    from llama_index.core.schema import TextNode
+    from llama_index.core.schema import NodeRelationship, RelatedNodeInfo, TextNode
 
-    return [TextNode(text=c.text, metadata=c.metadata) for c in chunks]
+    nodes: list[Any] = []
+    for chunk in chunks:
+        # LlamaIndex 写入 PG 时会用 ref_doc_id 覆盖扁平 doc_id，必须设 SOURCE。
+        doc_id = str(chunk.metadata.get("doc_id") or "").strip()
+        relationships = {}
+        if doc_id and doc_id != "None":
+            relationships[NodeRelationship.SOURCE] = RelatedNodeInfo(node_id=doc_id)
+        nodes.append(
+            TextNode(
+                text=chunk.text,
+                metadata=chunk.metadata,
+                relationships=relationships,
+            )
+        )
+    return nodes
 
 
 def _load_ingest_manifest(path: Path) -> dict[str, Any]:
@@ -734,6 +748,7 @@ def run_ingest_pdf(
     export_md: bool = True,
     export_chunks: bool = True,
     manifest_path: Path = MANIFEST_PATH,
+    skip_schema_gate: bool = False,
 ) -> tuple[list[ChunkRecord], dict[str, Any]]:
     manifest = load_manifest(manifest_path)
     ruleset = load_rules()
@@ -747,11 +762,26 @@ def run_ingest_pdf(
     all_chunks: list[ChunkRecord] = []
     summaries: dict[str, Any] = {}
 
+    from retrieval.kb_contract import SchemaGateError, validate_chunks_schema
+
     for job in jobs:
         logger.info(f"ingest {job.doc_id} ({job.category}) parts={len(job.parts)}")
-        chunks, parts_blocks, summary = process_job(
-            job, ruleset, make_chunks=export_chunks
-        )
+        try:
+            chunks, parts_blocks, summary = process_job(
+                job, ruleset, make_chunks=export_chunks
+            )
+            if export_chunks and chunks and not skip_schema_gate:
+                validate_chunks_schema(chunks, job.category)
+        except SchemaGateError as exc:
+            logger.error("schema gate rejected doc_id=%s category=%s: %s", job.doc_id, job.category, exc)
+            summaries[job.doc_id] = {
+                "doc_id": job.doc_id,
+                "category": job.category,
+                "status": "schema_rejected",
+                "error": str(exc),
+                "missing_fields": exc.missing_fields,
+            }
+            continue
         if write_output:
             if export_chunks:
                 out_path = write_job_output(job, chunks, output_dir)
@@ -825,7 +855,13 @@ def main() -> None:
     parser.add_argument(
         "--rebuild-index",
         action="store_true",
-        help="切块完成后写入 pgvector（需配置 Embedding；与 --md-only 不兼容）",
+        help="切块完成后写入 pgvector，并在配置了 ELASTICSEARCH_URL 时双写 ES BM25"
+        "（需 Embedding；与 --md-only 不兼容）",
+    )
+    parser.add_argument(
+        "--skip-schema-gate",
+        action="store_true",
+        help="跳过 KB schema 门禁（仅调试；缺 metadata 的 chunk 不应入库）",
     )
     args = parser.parse_args()
 
@@ -842,6 +878,7 @@ def main() -> None:
         write_output=not args.no_write,
         export_md=export_md,
         export_chunks=export_chunks,
+        skip_schema_gate=args.skip_schema_gate,
     )
 
     print(f"documents={report['total_documents']} chunks={report['total_chunks']}")
@@ -857,20 +894,34 @@ def main() -> None:
         from collections import defaultdict
 
         from retrieval.index import build_indexes_by_category
+        from retrieval.kb_contract import SchemaGateError, validate_chunks_schema
 
         by_category: dict[str, list] = defaultdict(list)
         for chunk in chunks:
             cat = chunk.metadata.get("category") or chunk.metadata.get("doc_type")
             if not cat:
                 raise ValueError(f"chunk 缺少 category 元数据: {chunk.metadata}")
+            if not args.skip_schema_gate:
+                try:
+                    validate_chunks_schema([chunk], str(cat))
+                except SchemaGateError as exc:
+                    raise SchemaGateError(
+                        str(cat),
+                        exc.missing_fields,
+                        doc_id=str(chunk.metadata.get("doc_id") or ""),
+                    ) from exc
             by_category[cat].append(chunk)
 
         nodes_by_category = {
             cat: chunks_to_nodes(cat_chunks) for cat, cat_chunks in by_category.items()
         }
-        counts = build_indexes_by_category(nodes_by_category, rebuild=True)
+        counts = build_indexes_by_category(
+            nodes_by_category,
+            rebuild=True,
+            sync_elasticsearch=True,
+        )
         for cat, n in counts.items():
-            print(f"index rebuilt: category={cat} nodes={n}")
+            print(f"index rebuilt: category={cat} nodes={n} (pg + es if configured)")
 
 
 if __name__ == "__main__":
