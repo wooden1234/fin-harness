@@ -7,8 +7,8 @@ from typing import Any
 
 from app.core.config import settings
 from app.core.logger import get_logger
-from retrieval.collections import get_collection_registry, get_table_name
-from retrieval.es_client import create_es_client, index_name
+from retrieval.core.collections import get_collection_registry, get_table_name
+from retrieval.clients.es_client import create_es_client, index_name
 
 logger = get_logger(service="es_index")
 

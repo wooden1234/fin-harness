@@ -1,10 +1,3 @@
-from retrieval.core.collections import (
-    all_categories,
-    get_collection_registry,
-    get_table_name,
-    pdf_categories,
-)
-from retrieval.core.kb_contract import RetrievalTrace
 from retrieval.retrievers.retriever import (
     FAQRetriever,
     HybridRetriever,
@@ -21,15 +14,10 @@ __all__ = [
     "FAQRetriever",
     "HybridRetriever",
     "RetrievalHit",
-    "RetrievalTrace",
     "Retriever",
     "VectorFAQRetriever",
     "VectorRetriever",
-    "all_categories",
-    "get_collection_registry",
     "get_faq_retriever",
     "get_pdf_retriever",
     "get_retriever",
-    "get_table_name",
-    "pdf_categories",
 ]

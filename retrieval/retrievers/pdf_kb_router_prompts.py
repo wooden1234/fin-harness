@@ -55,7 +55,7 @@ _PDF_KB_ROUTE_BODY = """你是金融 PDF 检索系统的知识库路由器。
 
 
 def build_pdf_kb_route_system_prompt() -> str:
-    from retrieval.filters import routable_kb_ids
+    from retrieval.core.filters import routable_kb_ids
 
     kb_ids = ", ".join(routable_kb_ids())
     return _PDF_KB_ROUTE_BODY.replace("{kb_ids}", kb_ids)

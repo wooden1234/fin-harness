@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from retrieval.filters import MetadataFilters, get_kb_profile
+from retrieval.core.filters import MetadataFilters, get_kb_profile
 
 
 class SchemaGateError(Exception):

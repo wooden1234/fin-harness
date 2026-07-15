@@ -1,4 +1,4 @@
-from retrieval.filters import (
+from retrieval.core.filters import (
     FILTER_RULES,
     KNOWLEDGE_BASE_PROFILES,
     MatchMode,

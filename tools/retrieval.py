@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from retrieval import RetrievalHit, get_faq_retriever, get_pdf_retriever
-from retrieval.filters import infer_pdf_metadata_filters
-from retrieval.pdf_kb_router import get_pdf_kb_router
+from retrieval.core.filters import infer_pdf_metadata_filters
+from retrieval.retrievers.pdf_kb_router import get_pdf_kb_router
 
 
 def faq_search(query: str, *, top_k: int = 3) -> list[RetrievalHit]:

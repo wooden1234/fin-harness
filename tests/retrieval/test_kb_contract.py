@@ -1,7 +1,7 @@
 import pytest
 
-from retrieval.filters import reload_filter_config
-from retrieval.kb_contract import (
+from retrieval.core.filters import reload_filter_config
+from retrieval.core.kb_contract import (
     RetrievalTrace,
     SchemaGateError,
     apply_on_empty_policy,

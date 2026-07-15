@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from retrieval.collections import get_collection_registry, get_table_name
-from retrieval.es_client import create_es_client, index_name
-from retrieval.filters import MetadataFilters, filter_categories, merge_filters, metadata_matches
+from retrieval.core.collections import get_collection_registry, get_table_name
+from retrieval.clients.es_client import create_es_client, index_name
+from retrieval.core.filters import MetadataFilters, filter_categories, merge_filters, metadata_matches
 
 if TYPE_CHECKING:
-    from retrieval.retriever import RetrievalHit
+    from retrieval.retrievers.retriever import RetrievalHit
 
 _ROOT_META_FIELDS = (
     "doc_id",
@@ -56,7 +56,7 @@ class ElasticsearchBM25Retriever:
         top_k: int,
         metadata_filters: MetadataFilters | None = None,
     ) -> list[RetrievalHit]:
-        from retrieval.retriever import RetrievalHit
+        from retrieval.retrievers.retriever import RetrievalHit
 
         filters = merge_filters(self.metadata_filters, metadata_filters)
         categories = _filtered_categories(self.categories, filters)

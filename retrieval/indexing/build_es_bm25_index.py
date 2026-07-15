@@ -19,7 +19,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 BACKEND_DIR = ROOT_DIR / "app" / "backend"
 for path in (ROOT_DIR, BACKEND_DIR):
     if str(path) not in sys.path:
@@ -28,8 +28,8 @@ for path in (ROOT_DIR, BACKEND_DIR):
 import psycopg  # noqa: E402
 from psycopg import sql  # noqa: E402
 
-from retrieval.es_client import create_es_client, index_name  # noqa: E402
-from retrieval.es_index import (  # noqa: E402
+from retrieval.clients.es_client import create_es_client, index_name  # noqa: E402
+from retrieval.indexing.es_index import (  # noqa: E402
     DEFAULT_BATCH_SIZE,
     DEFAULT_SEARCH_ANALYZER,
     DEFAULT_TEXT_ANALYZER,
@@ -38,7 +38,7 @@ from retrieval.es_index import (  # noqa: E402
     coerce_metadata,
     selected_collections,
 )
-from retrieval.index import VECTOR_SCHEMA, _pg_connection_strings  # noqa: E402
+from retrieval.indexing.index import VECTOR_SCHEMA, _pg_connection_strings  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:

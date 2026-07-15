@@ -11,8 +11,8 @@ from agents.states import Citation, FinAgentState
 from app.core.config import settings
 from app.core.logger import get_logger
 from retrieval import RetrievalHit, get_pdf_retriever
-from retrieval.filters import infer_pdf_metadata_filters
-from retrieval.pdf_kb_router import get_pdf_kb_router
+from retrieval.core.filters import infer_pdf_metadata_filters
+from retrieval.retrievers.pdf_kb_router import get_pdf_kb_router
 
 logger = get_logger(service="pdf_agent")
 

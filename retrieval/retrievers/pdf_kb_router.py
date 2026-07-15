@@ -11,8 +11,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, ValidationError
 
 from app.core.logger import get_logger
-from retrieval.filters import routable_kb_ids
-from retrieval.pdf_kb_router_prompts import (
+from retrieval.core.filters import routable_kb_ids
+from retrieval.retrievers.pdf_kb_router_prompts import (
     build_pdf_kb_route_human_prompt,
     build_pdf_kb_route_system_prompt,
 )

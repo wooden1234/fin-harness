@@ -48,6 +48,24 @@ class Settings(BaseSettings):
     ELASTICSEARCH_PASSWORD: str = ""
     ELASTICSEARCH_ENABLED: bool = False
 
+    # Milvus（向量检索）
+    MILVUS_ENABLED: bool = False
+    MILVUS_URI: str = "http://localhost:19530"
+    MILVUS_TOKEN: str = ""
+    MILVUS_COLLECTION_PREFIX: str = "fin_agent"
+    MILVUS_COLLECTION_FAQ: str = "fin_agent_faq"
+    MILVUS_COLLECTION_MACRO: str = "fin_agent_macro_research"
+    MILVUS_COLLECTION_ANNUAL_REPORT: str = "fin_agent_annual_reports"
+    MILVUS_COLLECTION_RESEARCH_REPORT: str = "fin_agent_research_reports"
+    MILVUS_COLLECTION_INDUSTRY_WHITEPAPER: str = "fin_agent_industry_whitepapers"
+    MILVUS_COLLECTION_POLICY: str = "fin_agent_policy"
+    MILVUS_DIM: int = 1536
+    MILVUS_METRIC_TYPE: str = "COSINE"
+    MILVUS_INDEX_TYPE: str = "HNSW"
+    MILVUS_M: int = 16
+    MILVUS_EF_CONSTRUCTION: int = 200
+    MILVUS_SEARCH_EF: int = 64
+
     # LLM（W3+ Supervisor / Agent）
     DEEPSEEK_API_KEY: str = ""
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
@@ -62,6 +80,16 @@ class Settings(BaseSettings):
     DASHSCOPE_API_KEY: str = ""
     EMBEDDING_MODEL: str = "text-embedding-v2"
     QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    RERANK_ENABLED: bool = False
+    RERANK_PROVIDER: str = "dashscope"
+    RERANK_MODEL: str = "gte-rerank-v2"
+    RERANK_BASE_URL: str = (
+        "https://dashscope.aliyuncs.com/api/v1/services/rerank/"
+        "text-rerank/text-rerank"
+    )
+    RERANK_CANDIDATE_TOP_K: int = 20
+    RERANK_TIMEOUT_SEC: float = 30.0
+    RERANK_RETURN_DOCUMENTS: bool = True
 
     # 联网搜索。默认关闭，配置 TAVILY_API_KEY 后启用 Tavily。
     WEB_SEARCH_PROVIDER: str = "tavily"

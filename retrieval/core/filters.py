@@ -2,7 +2,7 @@
 
 - Engine (matchers, metadata_matches): stable Python
 - KB contracts (filter fields, query_infer_fields): knowledge/raw/kb_filter_profiles.yaml
-- Document type routing: retrieval/pdf_kb_router.py (LLM)
+- Document type routing: retrieval/retrievers/pdf_kb_router.py (LLM)
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import yaml
 
 MetadataFilters = dict[str, Any]
 
-_ROOT = Path(__file__).resolve().parent.parent
+_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_PROFILES_PATH = _ROOT / "knowledge" / "raw" / "kb_filter_profiles.yaml"
 
 
