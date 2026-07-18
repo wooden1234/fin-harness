@@ -28,6 +28,7 @@ class TableRules:
 class CategoryRules:
     name: str
     chunk_strategy: str = "section"
+    chunk: dict[str, Any] = field(default_factory=dict)
     drop_block_types: set[str] = field(default_factory=set)
     keep_block_types: set[str] = field(default_factory=set)
     noise_paragraph_patterns: list[re.Pattern[str]] = field(default_factory=list)
@@ -51,6 +52,7 @@ class CleanRuleSet:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         global_cfg = raw.get("global", {})
         global_table = global_cfg.get("table", {})
+        global_chunk = global_cfg.get("chunk", {})
 
         base_drop = set(global_cfg.get("drop_block_types", []))
         base_keep = set(global_cfg.get("keep_block_types", []))
@@ -65,6 +67,7 @@ class CleanRuleSet:
         for name, cfg in raw.get("categories", {}).items():
             cover = cfg.get("cover", {})
             cat_table_cfg = {**global_table, **cfg.get("table", {})}
+            cat_chunk_cfg = {**global_chunk, **cfg.get("chunk", {})}
             cat_drop = (
                 set(cfg["drop_block_types"])
                 if "drop_block_types" in cfg
@@ -74,6 +77,7 @@ class CleanRuleSet:
             categories[name] = CategoryRules(
                 name=name,
                 chunk_strategy=cfg.get("chunk_strategy", "section"),
+                chunk=cat_chunk_cfg,
                 drop_block_types=cat_drop,
                 keep_block_types=cat_keep,
                 noise_paragraph_patterns=_compile_patterns(
@@ -99,6 +103,7 @@ class CleanRuleSet:
 
         categories["_default"] = CategoryRules(
             name="_default",
+            chunk=dict(global_chunk),
             drop_block_types=base_drop,
             keep_block_types=base_keep,
             noise_paragraph_patterns=base_noise,

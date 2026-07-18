@@ -7,10 +7,18 @@ import sys
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _ROOT_DIR_STR = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", ".."))
+_BACKEND_DIR_STR = os.path.abspath(os.path.join(_ROOT_DIR_STR, "app", "backend"))
 if sys.path and os.path.abspath(sys.path[0]) == _SCRIPT_DIR:
     sys.path.pop(0)
-if _ROOT_DIR_STR not in sys.path:
-    sys.path.insert(0, _ROOT_DIR_STR)
+for _path in (_BACKEND_DIR_STR, _ROOT_DIR_STR):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(_ROOT_DIR_STR) / ".env")
 
 import argparse
 import json
@@ -22,7 +30,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import yaml
-from retrieval.indexing.clean_rules import (
+from retrieval.pdf_processing.clean_rules import (
     CleanRuleSet,
     ExtractedBlock,
     extract_blocks,
@@ -499,10 +507,11 @@ def chunk_blocks(
     ruleset: CleanRuleSet,
 ) -> list[ChunkRecord]:
     global_cfg = ruleset.global_rules
-    chunk_cfg = global_cfg.get("chunk", {})
     prefix_cfg = global_cfg.get("chunk_prefix", {})
     page_cfg = global_cfg.get("page", {})
     strategy = job.chunk_strategy
+    category_rules = ruleset.for_category(job.category)
+    chunk_cfg = category_rules.chunk or global_cfg.get("chunk", {})
 
     chunks: list[ChunkRecord] = []
     chunk_index = 0
@@ -703,11 +712,16 @@ def chunks_to_nodes(chunks: list[ChunkRecord]) -> list[Any]:
     for chunk in chunks:
         # LlamaIndex 写入 PG 时会用 ref_doc_id 覆盖扁平 doc_id，必须设 SOURCE。
         doc_id = str(chunk.metadata.get("doc_id") or "").strip()
+        chunk_index = int(chunk.metadata.get("chunk_index") or 0)
+        chunk_id = str(chunk.metadata.get("chunk_id") or f"{doc_id}:L3:{chunk_index:06d}")
+        chunk.metadata["chunk_id"] = chunk_id
+        chunk.metadata.setdefault("chunk_level", "L3")
         relationships = {}
         if doc_id and doc_id != "None":
             relationships[NodeRelationship.SOURCE] = RelatedNodeInfo(node_id=doc_id)
         nodes.append(
             TextNode(
+                id_=chunk_id,
                 text=chunk.text,
                 metadata=chunk.metadata,
                 relationships=relationships,
@@ -728,6 +742,41 @@ def _save_ingest_manifest(path: Path, manifest: dict[str, Any]) -> None:
     path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _normalize_output_dir(output_dir: Path) -> Path:
+    return output_dir if output_dir.is_absolute() else ROOT_DIR / output_dir
+
+
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT_DIR))
+    except ValueError:
+        return str(path)
+
+
+def _successful_doc_ids(report: dict[str, Any]) -> set[str]:
+    doc_ids: set[str] = set()
+    for doc_id, summary in report.get("documents", {}).items():
+        if summary.get("status") == "schema_rejected":
+            continue
+        if summary.get("chunks", 0) or summary.get("output"):
+            doc_ids.add(str(doc_id))
+    return doc_ids
+
+
+def build_parent_outputs(output_dir: Path, doc_ids: set[str] | None = None) -> dict[str, int]:
+    """为本次处理的文档生成 parent_chunks.jsonl。"""
+    from retrieval.indexing.scripts.build_parent_chunks import write_parent_chunks
+
+    counts: dict[str, int] = {}
+    for chunks_path in sorted(output_dir.glob("**/chunks.jsonl")):
+        doc_id = chunks_path.parent.name
+        if doc_ids and doc_id not in doc_ids:
+            continue
+        _, count = write_parent_chunks(chunks_path)
+        counts[doc_id] = count
+    return counts
+
+
 def run_ingest_pdf(
     *,
     categories: Iterable[str] | None = None,
@@ -739,6 +788,7 @@ def run_ingest_pdf(
     manifest_path: Path = MANIFEST_PATH,
     skip_schema_gate: bool = False,
 ) -> tuple[list[ChunkRecord], dict[str, Any]]:
+    output_dir = _normalize_output_dir(output_dir)
     manifest = load_manifest(manifest_path)
     ruleset = load_rules()
     jobs = discover_ingest_jobs(manifest, categories=categories, doc_ids=doc_ids)
@@ -747,7 +797,8 @@ def run_ingest_pdf(
         logger.warning("未找到可 ingest 的 PDF 文档")
         return [], {"documents": {}, "total_chunks": 0}
 
-    ingest_manifest = _load_ingest_manifest(INGEST_MANIFEST_PATH)
+    ingest_manifest_path = output_dir / "ingest_manifest.json"
+    ingest_manifest = _load_ingest_manifest(ingest_manifest_path)
     all_chunks: list[ChunkRecord] = []
     summaries: dict[str, Any] = {}
 
@@ -774,10 +825,10 @@ def run_ingest_pdf(
         if write_output:
             if export_chunks:
                 out_path = write_job_output(job, chunks, output_dir)
-                summary["output"] = str(out_path.relative_to(ROOT_DIR))
+                summary["output"] = _display_path(out_path)
             if export_md:
                 md_path = write_cleaned_md(job, parts_blocks, ruleset, output_dir)
-                summary["cleaned_md"] = str(md_path.relative_to(ROOT_DIR))
+                summary["cleaned_md"] = _display_path(md_path)
         summaries[job.doc_id] = summary
         if export_chunks:
             all_chunks.extend(chunks)
@@ -796,7 +847,7 @@ def run_ingest_pdf(
         ingest_manifest["total_chunks"] = sum(
             s.get("chunks", 0) for s in ingest_manifest["documents"].values()
         )
-        _save_ingest_manifest(INGEST_MANIFEST_PATH, ingest_manifest)
+        _save_ingest_manifest(ingest_manifest_path, ingest_manifest)
 
     return all_chunks, report
 
@@ -844,8 +895,33 @@ def main() -> None:
     parser.add_argument(
         "--rebuild-index",
         action="store_true",
-        help="切块完成后写入 pgvector，并在配置了 ELASTICSEARCH_URL 时双写 ES BM25"
+        help="旧链路：切块完成后写入 pgvector，并在配置了 ELASTICSEARCH_URL 时双写 ES BM25"
         "（需 Embedding；与 --md-only 不兼容）",
+    )
+    parser.add_argument(
+        "--build-parent-chunks",
+        action="store_true",
+        help="根据 L3 chunks 生成 L1/L2 parent_chunks.jsonl",
+    )
+    parser.add_argument(
+        "--write-parent-pg",
+        action="store_true",
+        help="将 documents、parent_chunks、chunk_registry 写入 PostgreSQL rag schema",
+    )
+    parser.add_argument(
+        "--index-es-leaf",
+        action="store_true",
+        help="将 L3 chunks 写入 Elasticsearch BM25 索引",
+    )
+    parser.add_argument(
+        "--index-milvus-leaf",
+        action="store_true",
+        help="将 L3 chunks 写入 Milvus 向量索引",
+    )
+    parser.add_argument(
+        "--rebuild-stores",
+        action="store_true",
+        help="重建本次处理文档对应的 PG/ES/Milvus 数据；仅对显式写入的 store 生效",
     )
     parser.add_argument(
         "--skip-schema-gate",
@@ -856,14 +932,24 @@ def main() -> None:
 
     if args.md_only and args.rebuild_index:
         parser.error("--md-only 与 --rebuild-index 不能同时使用")
+    if args.md_only and (
+        args.build_parent_chunks
+        or args.write_parent_pg
+        or args.index_es_leaf
+        or args.index_milvus_leaf
+    ):
+        parser.error("--md-only 不能与 parent/PG/ES/Milvus 入库同时使用")
+    if args.no_write and (args.build_parent_chunks or args.write_parent_pg):
+        parser.error("--no-write 下无法生成或写入 parent_chunks.jsonl")
 
     export_md = not args.no_export_md
     export_chunks = not args.md_only
+    output_dir = _normalize_output_dir(args.output_dir)
 
     chunks, report = run_ingest_pdf(
         categories=args.categories,
         doc_ids=args.doc_id,
-        output_dir=args.output_dir,
+        output_dir=output_dir,
         write_output=not args.no_write,
         export_md=export_md,
         export_chunks=export_chunks,
@@ -878,6 +964,64 @@ def main() -> None:
         if summary.get("cleaned_md"):
             parts.append(f"md={summary['cleaned_md']}")
         print(f"  {doc_id}: " + " ".join(parts) if parts else f"  {doc_id}: (stats only)")
+
+    doc_ids = _successful_doc_ids(report)
+    needs_parent = args.build_parent_chunks or args.write_parent_pg or args.index_es_leaf or args.index_milvus_leaf
+    if needs_parent and doc_ids:
+        parent_counts = build_parent_outputs(output_dir, doc_ids=doc_ids)
+        total_parents = sum(parent_counts.values())
+        print(f"parent chunks built: documents={len(parent_counts)} parent_chunks={total_parents}")
+
+        from retrieval.indexing.scripts.build_parent_chunks import (
+            enrich_leaf_chunk_metadata,
+            load_parent_link_map_for_dir,
+        )
+
+        links = load_parent_link_map_for_dir(output_dir, doc_ids=doc_ids)
+        enrich_leaf_chunk_metadata(chunks, links)
+
+    if args.write_parent_pg and doc_ids:
+        from retrieval.indexing.parent_store import index_parent_store
+
+        counts = index_parent_store(
+            input_dir=output_dir,
+            doc_ids=doc_ids,
+            rebuild=args.rebuild_stores,
+        )
+        print(
+            "pg parent store indexed: "
+            f"documents={counts['documents']} parent_chunks={counts['parent_chunks']} "
+            f"leaf_chunks={counts['leaf_chunks']}"
+        )
+
+    if args.index_es_leaf and chunks:
+        from collections import defaultdict
+
+        from retrieval.indexing.es_index import index_nodes_to_elasticsearch
+
+        by_category: dict[str, list] = defaultdict(list)
+        for chunk in chunks:
+            cat = chunk.metadata.get("category") or chunk.metadata.get("doc_type")
+            if cat:
+                by_category[str(cat)].append(chunk)
+        for cat, cat_chunks in by_category.items():
+            indexed = index_nodes_to_elasticsearch(
+                cat,
+                chunks_to_nodes(cat_chunks),
+                rebuild=args.rebuild_stores,
+                require_configured=True,
+            )
+            print(f"es leaf indexed: category={cat} nodes={indexed}")
+
+    if args.index_milvus_leaf and chunks:
+        from retrieval.indexing.milvus_index import group_chunks_by_category, index_chunks_to_milvus
+
+        counts = index_chunks_to_milvus(
+            group_chunks_by_category(chunks),
+            rebuild=args.rebuild_stores,
+        )
+        for cat, n in counts.items():
+            print(f"milvus leaf indexed: category={cat} chunks={n}")
 
     if args.rebuild_index and chunks:
         from collections import defaultdict

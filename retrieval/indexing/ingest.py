@@ -1,15 +1,33 @@
-from pathlib import Path
+from __future__ import annotations
+
 import os
-from llama_index.core import SimpleDirectoryReader, Document
+import sys
+from pathlib import Path
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = _SCRIPT_DIR.parent.parent
+_BACKEND_DIR = ROOT_DIR / "app" / "backend"
+if sys.path and os.path.abspath(sys.path[0]) == str(_SCRIPT_DIR):
+    sys.path.pop(0)
+for _path in (str(_BACKEND_DIR), str(ROOT_DIR)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
+from dotenv import load_dotenv
+
+load_dotenv(ROOT_DIR / ".env")
+
+import re
+from typing import List
+
+from llama_index.core import Document, SimpleDirectoryReader
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.schema import NodeRelationship, RelatedNodeInfo, TextNode
-import re
-from retrieval.clients.embeddings import get_embed_model
-from typing import List
-from retrieval.indexing.index import EMBED_DIM, build_index
-from retrieval.core.collections import get_table_name
 
-ROOT_DIR = Path(__file__).resolve().parent.parent.parent
+from retrieval.clients.embeddings import get_embed_model
+from retrieval.core.collections import get_table_name
+from retrieval.indexing.index import EMBED_DIM, build_index
+
 RAW_DIR = ROOT_DIR / "knowledge" / "raw"
 
 

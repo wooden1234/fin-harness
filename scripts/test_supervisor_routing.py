@@ -16,10 +16,13 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+BACKEND_DIR = ROOT / "app" / "backend"
+for path in (str(BACKEND_DIR), str(ROOT)):
+    if path not in sys.path:
+        sys.path.insert(0, path)
 load_dotenv(ROOT / ".env")
 
-from app.agents.supervisor import analyze_and_route_query, route_query  # noqa: E402
+from agents.supervisor import analyze_and_route_query, route_query  # noqa: E402
 
 SAMPLE_QUERIES = [
     "什么是 T+1 交易制度？",

@@ -1,12 +1,31 @@
+from __future__ import annotations
+
+import os
+import sys
 from functools import lru_cache
+from pathlib import Path
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_ROOT_DIR = _SCRIPT_DIR.parent.parent
+_BACKEND_DIR = _ROOT_DIR / "app" / "backend"
+if sys.path and os.path.abspath(sys.path[0]) == str(_SCRIPT_DIR):
+    sys.path.pop(0)
+for _path in (str(_BACKEND_DIR), str(_ROOT_DIR)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine, text
+
+load_dotenv(_ROOT_DIR / ".env")
 
 from llama_index.core import Settings, StorageContext, VectorStoreIndex
 from llama_index.core.schema import TextNode
 from llama_index.vector_stores.postgres import PGVectorStore
 
 from app.core.config import settings
-from retrieval.core.collections import get_collection_registry, get_table_name
 from retrieval.clients.embeddings import get_embed_model
+from retrieval.core.collections import get_collection_registry, get_table_name
 from retrieval.indexing.es_index import index_nodes_to_elasticsearch
 
 EMBED_DIM = settings.EMBEDDING_DIM
@@ -30,6 +49,46 @@ def _pg_connection_strings() -> tuple[str, str]:
     return sync_url, async_url
 
 
+def _pg_table_name(table_name: str) -> str:
+    """LlamaIndex PGVectorStore 实际表名为 data_{table_name}。"""
+    return f"data_{table_name}"
+
+
+def _drop_vector_table(table_name: str) -> None:
+    """删除 pgvector 表（含索引），以便按新 embed_dim 重建 schema。"""
+    sync_url, _ = _pg_connection_strings()
+    engine = create_engine(sync_url)
+    pg_table = _pg_table_name(table_name)
+    with engine.begin() as conn:
+        conn.execute(
+            text(f'DROP TABLE IF EXISTS "{VECTOR_SCHEMA}"."{pg_table}" CASCADE')
+        )
+
+
+def _vector_table_embed_dim(table_name: str) -> int | None:
+    """读取现有 embedding 列维度；表不存在时返回 None。"""
+    sync_url, _ = _pg_connection_strings()
+    engine = create_engine(sync_url)
+    pg_table = _pg_table_name(table_name)
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT a.atttypmod
+                FROM pg_attribute a
+                JOIN pg_class c ON a.attrelid = c.oid
+                JOIN pg_namespace n ON c.relnamespace = n.oid
+                WHERE n.nspname = :schema
+                  AND c.relname = :table
+                  AND a.attname = 'embedding'
+                  AND NOT a.attisdropped
+                """
+            ),
+            {"schema": VECTOR_SCHEMA, "table": pg_table},
+        ).fetchone()
+    return int(row[0]) if row else None
+
+
 def get_vector_store(
     table_name: str | None = None,
     *,
@@ -39,6 +98,14 @@ def get_vector_store(
     """按 category 或显式 table_name 获取 PGVectorStore。"""
     resolved = table_name or get_table_name(category)
     sync_url, async_url = _pg_connection_strings()
+    existing_dim = _vector_table_embed_dim(resolved)
+    if rebuild or (existing_dim is not None and existing_dim != EMBED_DIM):
+        if existing_dim is not None and existing_dim != EMBED_DIM:
+            print(
+                f"pgvector dim mismatch: table={_pg_table_name(resolved)} "
+                f"has {existing_dim}, EMBEDDING_DIM={EMBED_DIM}; dropping table"
+            )
+        _drop_vector_table(resolved)
     vector_store = PGVectorStore.from_params(
         connection_string=sync_url,
         async_connection_string=async_url,
@@ -47,7 +114,7 @@ def get_vector_store(
         schema_name=VECTOR_SCHEMA,
         perform_setup=True,
     )
-    if rebuild:
+    if rebuild and existing_dim == EMBED_DIM:
         vector_store.clear()
     return vector_store
 

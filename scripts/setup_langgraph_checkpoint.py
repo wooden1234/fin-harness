@@ -14,10 +14,13 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+BACKEND_DIR = ROOT / "app" / "backend"
+for path in (str(BACKEND_DIR), str(ROOT)):
+    if path not in sys.path:
+        sys.path.insert(0, path)
 load_dotenv(ROOT / ".env")
 
-from app.agents.checkpoint import checkpoint_dsn, close_checkpoint, init_checkpoint  # noqa: E402
+from agents.checkpoint import checkpoint_dsn, close_checkpoint, init_checkpoint  # noqa: E402
 
 
 async def main() -> None:

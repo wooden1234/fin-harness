@@ -1,0 +1,12 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "fin_agent": "./langgraph_entry.py:graph",
+    "finance_agent": "./langgraph_entry.py:finance_graph",
+    "financial_query_agent": "./langgraph_entry.py:financial_query_graph",
+    "predefined_workflow": "./langgraph_entry.py:predefined_graph",
+    "text_to_sql_workflow": "./langgraph_entry.py:text_to_sql_graph",
+    "fin_agent_combined": "./langgraph_entry.py:combined_graph"
+  },
+  "env": "./.env"
+}

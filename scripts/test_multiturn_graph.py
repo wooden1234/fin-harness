@@ -17,11 +17,14 @@ from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, HumanMessage
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+BACKEND_DIR = ROOT / "app" / "backend"
+for path in (str(BACKEND_DIR), str(ROOT)):
+    if path not in sys.path:
+        sys.path.insert(0, path)
 load_dotenv(ROOT / ".env")
 
-from app.agents.checkpoint import close_checkpoint, init_checkpoint, make_thread_config  # noqa: E402
-from app.agents.graph import get_graph, reset_graph_cache  # noqa: E402
+from agents.checkpoint import close_checkpoint, init_checkpoint, make_thread_config  # noqa: E402
+from agents.graph import get_graph, reset_graph_cache  # noqa: E402
 
 TURN1 = "什么是 T+1 交易制度？"
 TURN2 = "刚才说的这个制度，当天买入的股票什么时候可以卖？"

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from retrieval.core.collections import get_collection_registry, get_table_name
 from retrieval.clients.es_client import create_es_client, index_name
-from retrieval.core.filters import MetadataFilters, filter_categories, merge_filters, metadata_matches
+from retrieval.core.filters import MetadataFilters, filter_categories, merge_filters
 
 if TYPE_CHECKING:
     from retrieval.retrievers.retriever import RetrievalHit
@@ -80,8 +80,6 @@ class ElasticsearchBM25Retriever:
         for raw_hit in response.get("hits", {}).get("hits", []):
             source = raw_hit.get("_source") or {}
             metadata = _hit_metadata(source)
-            if not metadata_matches(metadata, filters):
-                continue
             category = str(source.get("category") or metadata.get("category") or "")
             collection = str(
                 source.get("collection")
@@ -134,70 +132,6 @@ def _filter_clauses(filters: MetadataFilters | None) -> list[dict[str, Any]]:
     if categories:
         clauses.append({"terms": {"category": categories}})
 
-    doc_id = filters.get("doc_id")
-    if doc_id:
-        clauses.append({"term": {"doc_id": str(doc_id)}})
-
-    ticker = filters.get("ticker")
-    if ticker:
-        clauses.append({"term": {"ticker": str(ticker)}})
-
-    year = filters.get("year") or filters.get("fiscal_year")
-    if year is not None:
-        year_int = _to_int(year)
-        clauses.append(
-            {
-                "bool": {
-                    "should": [
-                        {"term": {"year": year_int}},
-                        {"term": {"fiscal_year": year_int}},
-                    ],
-                    "minimum_should_match": 1,
-                }
-            }
-        )
-
-    source = filters.get("source")
-    if source:
-        clauses.append(
-            {
-                "multi_match": {
-                    "query": str(source),
-                    "fields": ["source", "file", "title", "doc_id"],
-                }
-            }
-        )
-
-    issuer = filters.get("issuer")
-    if issuer:
-        clauses.append(
-            {
-                "multi_match": {
-                    "query": str(issuer),
-                    "fields": ["issuer", "title"],
-                }
-            }
-        )
-
-    company = filters.get("company")
-    if company:
-        clauses.append(
-            {
-                "multi_match": {
-                    "query": str(company),
-                    "fields": [
-                        "company",
-                        "ticker",
-                        "source",
-                        "file",
-                        "title",
-                        "issuer",
-                        "doc_group",
-                    ],
-                }
-            }
-        )
-
     return clauses
 
 
@@ -211,9 +145,3 @@ def _filtered_categories(
     allowed = set(filter_cats)
     return [category for category in categories if category in allowed]
 
-
-def _to_int(value: Any) -> int | str:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return str(value)

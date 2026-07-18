@@ -2,30 +2,34 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from functools import lru_cache
 import json
 from typing import Any
 
 from app.core.config import settings
 from app.core.logger import get_logger
-from retrieval.clients.rerank_client import rerank_documents, rerank_enabled
-from retrieval.retrievers.bm25 import bm25_scores
+from retrieval.clients.embeddings import get_embed_model
+from retrieval.clients.milvus_client import collection_name, create_milvus_client, milvus_enabled
+from retrieval.clients.rerank_client import (
+    rerank_documents,
+    rerank_enabled,
+    rerank_provider,
+)
 from retrieval.core.collections import (
     get_collection_registry,
-    get_table_name,
     pdf_categories,
 )
 from retrieval.core.filters import (
     MetadataFilters,
     filter_categories,
-    has_strict_filters,
     merge_filters,
-    metadata_matches,
 )
 from retrieval.core.kb_contract import RetrievalTrace, apply_on_empty_policy
-from retrieval.indexing.index import load_index
+from retrieval.retrievers.bm25 import bm25_scores
 
 logger = get_logger(service="retriever")
+
+DEFAULT_VECTOR_SIMILARITY_THRESHOLD = 0.35
+DEFAULT_RERANK_PARENT_EXCERPT_CHARS = 1600
 
 
 @dataclass
@@ -50,13 +54,13 @@ class Retriever(ABC):
 
 
 class VectorRetriever(Retriever):
-    """单库或多库向量检索；多库时按 score 合并取 Top-K。"""
+    """基于 Milvus 的 L3 向量检索；PG 只在召回后补 parent 上下文。"""
 
     def __init__(
         self,
         categories: list[str] | None = None,
         top_k: int = 5,
-        similarity_threshold: float | None = 0.5,
+        similarity_threshold: float | None = None,
         metadata_filters: MetadataFilters | None = None,
         candidate_multiplier: int = 4,
     ):
@@ -71,11 +75,25 @@ class VectorRetriever(Retriever):
             self.categories = list(categories)
 
         self.top_k = top_k
-        self.similarity_threshold = similarity_threshold
+        self.similarity_threshold = (
+            DEFAULT_VECTOR_SIMILARITY_THRESHOLD
+            if similarity_threshold is None
+            else similarity_threshold
+        )
         self.metadata_filters = metadata_filters or {}
         self.candidate_multiplier = max(candidate_multiplier, 1)
-        self._indices = {cat: load_index(cat) for cat in self.categories}
+        self._client: Any | None = None
+        self._embed_model: Any | None = None
         self.last_trace: RetrievalTrace | None = None
+
+    def _ensure_milvus(self) -> bool:
+        if not milvus_enabled():
+            return False
+        if self._client is None:
+            self._client = create_milvus_client()
+        if self._embed_model is None:
+            self._embed_model = get_embed_model()
+        return True
 
     def search(
         self,
@@ -89,42 +107,95 @@ class VectorRetriever(Retriever):
         filters = merge_filters(self.metadata_filters, metadata_filters)
         categories = _filtered_categories(self.categories, filters)
         per_store_k = max(k, k * self.candidate_multiplier)
-        if has_strict_filters(filters):
-            # Exact filters need a deeper vector scan before post-filtering.
-            per_store_k = max(per_store_k, k * 12)
+        try:
+            milvus_ready = self._ensure_milvus()
+        except Exception as exc:
+            logger.warning("milvus vector search skipped error={}", exc)
+            milvus_ready = False
+        if not milvus_ready or self._client is None or self._embed_model is None:
+            logger.warning("milvus vector search skipped reason=MILVUS_UNAVAILABLE")
+            hits: list[RetrievalHit] = []
+            if enforce_on_empty:
+                hits, trace = apply_on_empty_policy(
+                    hits,
+                    query=query,
+                    filters=_category_only_filters(filters),
+                    categories=categories,
+                    vector_hits=0,
+                    lexical_hits=0,
+                )
+                self.last_trace = trace
+            return hits
+
+        query_embedding = self._embed_model.get_query_embedding(query)
 
         hits: list[RetrievalHit] = []
         for category in categories:
-            index = self._indices[category]
-            retriever = index.as_retriever(similarity_top_k=per_store_k)
-            for nws in retriever.retrieve(query):
-                score = float(nws.score or 0.0)
+            name = collection_name(category)
+            if not self._client.has_collection(name):
+                logger.warning("milvus collection missing category={} collection={}", category, name)
+                continue
+            try:
+                results = self._client.search(
+                    collection_name=name,
+                    data=[query_embedding],
+                    limit=per_store_k,
+                    output_fields=[
+                        "chunk_id",
+                        "doc_id",
+                        "category",
+                        "source",
+                        "section_path",
+                        "block_type",
+                        "parent_chunk_id",
+                        "root_chunk_id",
+                        "chunk_index",
+                        "page_num",
+                        "text",
+                        "metadata",
+                    ],
+                    search_params=_milvus_search_params(per_store_k),
+                )
+            except Exception as exc:
+                logger.warning("milvus search failed category={} error={}", category, exc)
+                continue
+
+            for raw_hit in _flatten_milvus_results(results):
+                score = _milvus_score(raw_hit)
                 if self.similarity_threshold is not None and score < self.similarity_threshold:
                     continue
-                node = nws.node
-                metadata = dict(node.metadata or {})
+                entity = _milvus_entity(raw_hit)
+                metadata = _coerce_metadata(entity.get("metadata"))
                 metadata.setdefault("category", category)
-                metadata.setdefault("collection", get_table_name(category))
-                if not metadata_matches(metadata, filters):
-                    continue
+                metadata.setdefault("collection", name)
+                metadata.setdefault("chunk_id", entity.get("chunk_id") or raw_hit.get("id"))
+                metadata.setdefault("doc_id", entity.get("doc_id"))
+                metadata.setdefault("source", entity.get("source"))
+                metadata.setdefault("section_path", entity.get("section_path"))
+                metadata.setdefault("block_type", entity.get("block_type"))
+                metadata.setdefault("parent_chunk_id", entity.get("parent_chunk_id"))
+                metadata.setdefault("root_chunk_id", entity.get("root_chunk_id"))
+                metadata.setdefault("chunk_index", entity.get("chunk_index"))
+                metadata.setdefault("page_num", entity.get("page_num"))
+                metadata["vector_score"] = score
                 hits.append(
                     RetrievalHit(
-                        text=node.get_content(metadata_mode="none"),
+                        text=str(entity.get("text") or ""),
                         score=score,
                         metadata=metadata,
-                        node_id=node.node_id,
+                        node_id=str(metadata.get("chunk_id") or raw_hit.get("id") or "") or None,
                         category=category,
-                        collection=get_table_name(category),
+                        collection=name,
                     )
                 )
 
         hits.sort(key=lambda h: h.score, reverse=True)
-        hits = hits[:k]
+        hits = _hydrate_hits_from_parent_store(hits[:k])
         if enforce_on_empty:
             hits, trace = apply_on_empty_policy(
                 hits,
                 query=query,
-                filters=filters,
+                filters=_category_only_filters(filters),
                 categories=categories,
                 vector_hits=len(hits),
                 lexical_hits=0,
@@ -134,7 +205,7 @@ class VectorRetriever(Retriever):
 
 
 class HybridRetriever(Retriever):
-    """Vector retrieval plus BM25 lexical retrieval over the same collections."""
+    """Milvus 向量召回 + ES BM25 召回，本地 BM25 兜底，PG 补 parent 上下文。"""
 
     def __init__(
         self,
@@ -158,6 +229,8 @@ class HybridRetriever(Retriever):
         self.fusion_mode = fusion
         self.rrf_k = max(int(rrf_k), 1)
         self.rerank_enabled = rerank_enabled()
+        self.rerank_provider = rerank_provider() if self.rerank_enabled else None
+        self.rerank_model = settings.RERANK_MODEL if self.rerank_enabled else None
         self.rerank_candidate_top_k = max(
             int(settings.RERANK_CANDIDATE_TOP_K or 0),
             self.top_k,
@@ -189,6 +262,7 @@ class HybridRetriever(Retriever):
         filters = merge_filters(self.metadata_filters, metadata_filters)
         candidate_k = max(self.candidate_top_k, k * 4)
         active_categories = _filtered_categories(self.categories, filters)
+        trace_filters = _category_only_filters(filters)
 
         vector_hits = self.vector_retriever.search(
             query,
@@ -207,7 +281,7 @@ class HybridRetriever(Retriever):
             hits, trace = apply_on_empty_policy(
                 [],
                 query=query,
-                filters=filters,
+                filters=trace_filters,
                 categories=active_categories,
                 vector_hits=0,
                 lexical_hits=0,
@@ -235,19 +309,28 @@ class HybridRetriever(Retriever):
                 top_k=fusion_top_k,
                 vector_weight=self.vector_weight,
             )
+        hits = _hydrate_hits_from_parent_store(hits)
         hits = self._rerank_hits(
             query,
             hits,
             top_k=k,
         )
+        hits = self._select_diverse_hits(hits, top_k=k)
         hits, trace = apply_on_empty_policy(
             hits,
             query=query,
-            filters=filters,
+            filters=trace_filters,
             categories=active_categories,
             vector_hits=len(vector_hits),
             lexical_hits=len(lexical_hits),
         )
+        if self.rerank_enabled:
+            trace.extra.update(
+                {
+                    "rerank_provider": self.rerank_provider,
+                    "rerank_model": self.rerank_model,
+                }
+            )
         trace.final_hits = len(hits)
         self.last_trace = trace
         return hits
@@ -268,11 +351,28 @@ class HybridRetriever(Retriever):
                 )
             except Exception as exc:
                 logger.warning("es bm25 search failed error={}", exc)
-        return self._bm25_search(
+        return self._local_bm25_search(
             query,
             top_k=top_k,
             metadata_filters=metadata_filters,
         )
+
+    def _local_bm25_search(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        metadata_filters: MetadataFilters | None,
+    ) -> list[RetrievalHit]:
+        filters = merge_filters(self.metadata_filters, metadata_filters)
+        categories = _filtered_categories(self.categories, filters)
+        candidates: list[RetrievalHit] = []
+        for category in categories:
+            try:
+                candidates.extend(_load_pg_bm25_rows(category))
+            except Exception as exc:
+                logger.warning("local bm25 load failed category={} error={}", category, exc)
+        return _bm25_rerank_hits(query, candidates, top_k=top_k)
 
     def _rerank_hits(
         self,
@@ -288,11 +388,16 @@ class HybridRetriever(Retriever):
         try:
             reranked = rerank_documents(
                 query=query,
-                documents=[hit.text for hit in candidate_hits],
-                top_n=min(top_k, len(candidate_hits)),
+                documents=[_rerank_text(hit) for hit in candidate_hits],
+                top_n=len(candidate_hits),
             )
         except Exception as exc:
-            logger.warning("external rerank failed error={}", exc)
+            logger.warning(
+                "external rerank failed provider={} model={} error={}",
+                self.rerank_provider,
+                self.rerank_model,
+                exc,
+            )
             return hits[:top_k]
 
         if not reranked:
@@ -307,9 +412,11 @@ class HybridRetriever(Retriever):
             hit = candidate_hits[item.index]
             metadata = dict(hit.metadata)
             metadata["rerank_score"] = item.score
+            metadata["rerank_provider"] = self.rerank_provider
+            metadata["rerank_model"] = self.rerank_model
             ordered.append(
                 RetrievalHit(
-                    text=item.document or hit.text,
+                    text=hit.text,
                     score=item.score,
                     metadata=metadata,
                     node_id=hit.node_id,
@@ -328,30 +435,121 @@ class HybridRetriever(Retriever):
 
         return ordered[:top_k]
 
-    def _bm25_search(
+    def _select_diverse_hits(
         self,
-        query: str,
+        hits: list[RetrievalHit],
         *,
         top_k: int,
-        metadata_filters: MetadataFilters | None,
     ) -> list[RetrievalHit]:
-        filters = merge_filters(self.metadata_filters, metadata_filters)
-        categories = _filtered_categories(self.categories, filters)
-        candidates: list[RetrievalHit] = []
-        for category in categories:
-            try:
-                rows = _load_pg_text_rows(category)
-            except Exception as exc:
-                logger.warning("bm25 load failed category={} error={}", category, exc)
-                continue
-            for hit in rows:
-                if metadata_matches(hit.metadata, filters):
-                    candidates.append(hit)
-
-        if not candidates:
+        if not hits:
             return []
-        return _bm25_rerank_hits(query, candidates, top_k=top_k)
 
+        selected: list[RetrievalHit] = []
+        selected_keys: set[str] = set()
+        remaining = list(hits)
+        passes = (
+            {
+                "max_chunks_per_doc": 2,
+                "enforce_page_limit": True,
+                "enforce_adjacent_limit": True,
+            },
+            {
+                "max_chunks_per_doc": 2,
+                "enforce_page_limit": False,
+                "enforce_adjacent_limit": False,
+            },
+            {
+                "max_chunks_per_doc": None,
+                "enforce_page_limit": False,
+                "enforce_adjacent_limit": False,
+            },
+        )
+
+        for rules in passes:
+            if len(selected) >= top_k or not remaining:
+                break
+            next_remaining: list[RetrievalHit] = []
+            for hit in remaining:
+                if len(selected) >= top_k:
+                    next_remaining.append(hit)
+                    continue
+                hit_key = _hit_key(hit)
+                if hit_key in selected_keys:
+                    continue
+                if self._violates_diversity_rules(
+                    hit,
+                    selected,
+                    max_chunks_per_doc=rules["max_chunks_per_doc"],
+                    enforce_page_limit=rules["enforce_page_limit"],
+                    enforce_adjacent_limit=rules["enforce_adjacent_limit"],
+                ):
+                    next_remaining.append(hit)
+                    continue
+                selected.append(hit)
+                selected_keys.add(hit_key)
+            remaining = next_remaining
+
+        if len(selected) >= top_k:
+            return selected[:top_k]
+
+        for hit in remaining:
+            if len(selected) >= top_k:
+                break
+            hit_key = _hit_key(hit)
+            if hit_key in selected_keys:
+                continue
+            selected.append(hit)
+            selected_keys.add(hit_key)
+        return selected[:top_k]
+
+    def _violates_diversity_rules(
+        self,
+        candidate: RetrievalHit,
+        selected: list[RetrievalHit],
+        *,
+        max_chunks_per_doc: int | None,
+        enforce_page_limit: bool,
+        enforce_adjacent_limit: bool,
+    ) -> bool:
+        candidate_doc_id = _metadata_string(candidate.metadata, "doc_id")
+        candidate_page_num = _metadata_int(candidate.metadata, "page_num")
+        candidate_chunk_index = _metadata_int(candidate.metadata, "chunk_index")
+
+        if candidate_doc_id and max_chunks_per_doc is not None:
+            doc_hits = sum(
+                1
+                for hit in selected
+                if _metadata_string(hit.metadata, "doc_id") == candidate_doc_id
+            )
+            if doc_hits >= max_chunks_per_doc:
+                return True
+
+        if not candidate_doc_id:
+            return False
+
+        for hit in selected:
+            if _metadata_string(hit.metadata, "doc_id") != candidate_doc_id:
+                continue
+
+            if enforce_page_limit:
+                selected_page_num = _metadata_int(hit.metadata, "page_num")
+                if (
+                    candidate_page_num is not None
+                    and selected_page_num is not None
+                    and candidate_page_num == selected_page_num
+                ):
+                    return True
+
+            if enforce_adjacent_limit:
+                selected_chunk_index = _metadata_int(hit.metadata, "chunk_index")
+                if (
+                    candidate_chunk_index is not None
+                    and selected_chunk_index is not None
+                    and abs(candidate_chunk_index - selected_chunk_index) <= 1
+                ):
+                    return True
+
+        return False
 
 # 兼容旧名
 FAQRetriever = Retriever
@@ -426,6 +624,11 @@ def _filtered_categories(
     return [category for category in categories if category in allowed]
 
 
+def _category_only_filters(filters: MetadataFilters | None) -> MetadataFilters:
+    categories = filter_categories(filters)
+    return {"category": categories} if categories else {}
+
+
 def _hit_key(hit: RetrievalHit) -> str:
     if hit.node_id:
         return f"node:{hit.node_id}"
@@ -442,13 +645,16 @@ def _bm25_rerank_hits(
     *,
     top_k: int,
 ) -> list[RetrievalHit]:
-    scores = bm25_scores(query, [h.text for h in hits])
+    if not hits:
+        return []
+    scores = bm25_scores(query, [hit.text for hit in hits])
     ranked: list[RetrievalHit] = []
     for hit, score in zip(hits, scores, strict=False):
         if score <= 0:
             continue
         metadata = dict(hit.metadata)
         metadata["bm25_score"] = score
+        metadata["bm25_backend"] = "local"
         ranked.append(
             RetrievalHit(
                 text=hit.text,
@@ -459,7 +665,7 @@ def _bm25_rerank_hits(
                 collection=hit.collection,
             )
         )
-    ranked.sort(key=lambda h: h.score, reverse=True)
+    ranked.sort(key=lambda hit: hit.score, reverse=True)
     return ranked[:top_k]
 
 
@@ -563,41 +769,213 @@ def _normalized_by_key(hits: list[RetrievalHit]) -> dict[str, float]:
     return {_hit_key(hit): hit.score / max_score for hit in hits}
 
 
-@lru_cache(maxsize=16)
-def _load_pg_text_rows(category: str) -> tuple[RetrievalHit, ...]:
+def _flatten_milvus_results(results: Any) -> list[dict[str, Any]]:
+    if not results:
+        return []
+    if isinstance(results, list) and results and isinstance(results[0], list):
+        return [dict(item) for item in results[0]]
+    if isinstance(results, list):
+        return [dict(item) for item in results]
+    return []
+
+
+def _milvus_entity(raw_hit: dict[str, Any]) -> dict[str, Any]:
+    entity = raw_hit.get("entity") or raw_hit.get("fields") or {}
+    return dict(entity) if isinstance(entity, dict) else {}
+
+
+def _milvus_score(raw_hit: dict[str, Any]) -> float:
+    value = raw_hit.get("distance", raw_hit.get("score", raw_hit.get("similarity", 0.0)))
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _milvus_search_params(limit: int) -> dict[str, Any]:
+    params: dict[str, Any] = {}
+    if settings.MILVUS_INDEX_TYPE.upper() == "HNSW":
+        params["ef"] = max(int(settings.MILVUS_SEARCH_EF or 0), int(limit))
+    return {
+        "metric_type": settings.MILVUS_METRIC_TYPE,
+        "params": params,
+    }
+
+
+def _rerank_text(hit: RetrievalHit) -> str:
+    text = str(hit.metadata.get("rerank_text") or "").strip()
+    return text or hit.text
+
+
+def _build_rerank_text(leaf_text: str, parent_text: str) -> str:
+    leaf = " ".join(str(leaf_text or "").split())
+    parent = " ".join(str(parent_text or "").split())
+    if not parent or parent == leaf:
+        return leaf
+    excerpt = parent[:DEFAULT_RERANK_PARENT_EXCERPT_CHARS]
+    return f"{leaf}\n\n上下文摘录：\n{excerpt}"
+
+
+def _metadata_string(metadata: dict[str, Any], key: str) -> str:
+    value = metadata.get(key)
+    return str(value).strip() if value is not None else ""
+
+
+def _metadata_int(metadata: dict[str, Any], key: str) -> int | None:
+    value = metadata.get(key)
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _hydrate_hits_from_parent_store(hits: list[RetrievalHit]) -> list[RetrievalHit]:
+    if not hits:
+        return hits
+
+    chunk_ids = [
+        str(hit.node_id or hit.metadata.get("chunk_id") or "").strip()
+        for hit in hits
+    ]
+    chunk_ids = [chunk_id for chunk_id in chunk_ids if chunk_id]
+    if not chunk_ids:
+        return hits
+
+    contexts = _load_parent_contexts(chunk_ids)
+    if not contexts:
+        return hits
+
+    hydrated: list[RetrievalHit] = []
+    for hit in hits:
+        chunk_id = str(hit.node_id or hit.metadata.get("chunk_id") or "").strip()
+        context = contexts.get(chunk_id)
+        if context is None:
+            hydrated.append(hit)
+            continue
+
+        metadata = dict(hit.metadata)
+        metadata.update(context["leaf_metadata"])
+        leaf_text = hit.text
+        parent_text = str(context.get("context_text") or hit.text)
+        metadata["leaf_text"] = leaf_text
+        metadata["rerank_text"] = _build_rerank_text(leaf_text, parent_text)
+        metadata["context_chunk_id"] = context.get("context_chunk_id")
+        metadata["context_chunk_level"] = context.get("context_chunk_level")
+        metadata["context_section_path"] = context.get("context_section_path")
+        metadata["context_page_range"] = context.get("context_page_range")
+        hydrated.append(
+            RetrievalHit(
+                text=parent_text,
+                score=hit.score,
+                metadata=metadata,
+                node_id=hit.node_id,
+                category=hit.category,
+                collection=hit.collection,
+            )
+        )
+    return hydrated
+
+
+def _load_parent_contexts(chunk_ids: list[str]) -> dict[str, dict[str, Any]]:
     import psycopg
     from psycopg import sql
 
-    from retrieval.indexing.index import VECTOR_SCHEMA, _pg_connection_strings
+    from retrieval.indexing.index import _pg_connection_strings
+    from retrieval.indexing.parent_store import RAG_SCHEMA
 
-    table_name = get_table_name(category)
-    physical_table = f"data_{table_name}"
     sync_url, _ = _pg_connection_strings()
 
+    contexts: dict[str, dict[str, Any]] = {}
+    with psycopg.connect(sync_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    """
+                    SELECT
+                        cr.chunk_id,
+                        cr.metadata,
+                        pc.chunk_id,
+                        pc.chunk_level,
+                        pc.text,
+                        pc.section_path,
+                        pc.page_range,
+                        pc.metadata
+                    FROM {}.chunk_registry cr
+                    LEFT JOIN {}.parent_chunks pc
+                        ON pc.chunk_id = COALESCE(NULLIF(cr.parent_chunk_id, ''), NULLIF(cr.root_chunk_id, ''))
+                    WHERE cr.chunk_id = ANY(%s)
+                    """
+                ).format(
+                    sql.Identifier(RAG_SCHEMA),
+                    sql.Identifier(RAG_SCHEMA),
+                ),
+                (chunk_ids,),
+            )
+            for (
+                leaf_chunk_id,
+                leaf_metadata,
+                context_chunk_id,
+                context_chunk_level,
+                context_text,
+                context_section_path,
+                context_page_range,
+                context_metadata,
+            ) in cur.fetchall():
+                contexts[str(leaf_chunk_id)] = {
+                    "leaf_metadata": _coerce_metadata(leaf_metadata),
+                    "context_metadata": _coerce_metadata(context_metadata),
+                    "context_chunk_id": context_chunk_id,
+                    "context_chunk_level": context_chunk_level,
+                    "context_text": context_text,
+                    "context_section_path": context_section_path,
+                    "context_page_range": context_page_range,
+                }
+    return contexts
+
+
+def _load_pg_bm25_rows(category: str) -> list[RetrievalHit]:
+    import psycopg
+    from psycopg import sql
+
+    from retrieval.indexing.index import _pg_connection_strings
+    from retrieval.indexing.parent_store import RAG_SCHEMA
+
+    sync_url, _ = _pg_connection_strings()
     rows: list[RetrievalHit] = []
     with psycopg.connect(sync_url) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                sql.SQL("SELECT node_id, text, metadata_ FROM {}.{}").format(
-                    sql.Identifier(VECTOR_SCHEMA),
-                    sql.Identifier(physical_table)
-                )
+                sql.SQL(
+                    """
+                    SELECT chunk_id, text, metadata
+                    FROM {}.parent_chunks
+                    WHERE category = %s
+                      AND chunk_level = 'L2'
+                    """
+                ).format(sql.Identifier(RAG_SCHEMA)),
+                (category,),
             )
-            for node_id, text, metadata in cur.fetchall():
+            for chunk_id, text, metadata in cur.fetchall():
                 meta = _coerce_metadata(metadata)
+                row_text = str(text or "")
+                if not row_text:
+                    continue
                 meta.setdefault("category", category)
-                meta.setdefault("collection", table_name)
+                meta.setdefault("chunk_id", chunk_id)
+                meta.setdefault("chunk_level", "L2")
                 rows.append(
                     RetrievalHit(
-                        text=text or "",
+                        text=row_text,
                         score=0.0,
                         metadata=meta,
-                        node_id=str(node_id) if node_id is not None else None,
+                        node_id=str(chunk_id),
                         category=category,
-                        collection=table_name,
+                        collection=str(meta.get("collection") or ""),
                     )
                 )
-    return tuple(rows)
+    return rows
 
 
 def _coerce_metadata(metadata: Any) -> dict[str, Any]:

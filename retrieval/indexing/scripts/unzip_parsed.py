@@ -1,9 +1,9 @@
 """解压 knowledge/parsed 下 MinerU 输出的 zip 包。
 
 用法:
-    python scripts/unzip_parsed.py
-    python scripts/unzip_parsed.py --categories annual_reports industry_whitepapers
-    python scripts/unzip_parsed.py --force
+    python retrieval/indexing/scripts/unzip_parsed.py
+    python retrieval/indexing/scripts/unzip_parsed.py --categories annual_reports industry_whitepapers
+    python retrieval/indexing/scripts/unzip_parsed.py --force
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import sys
 import zipfile
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
+ROOT_DIR = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT_DIR))
 
 from app.core.logger import get_logger

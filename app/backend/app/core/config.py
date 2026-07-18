@@ -75,13 +75,18 @@ class Settings(BaseSettings):
     FAQ_MIN_RELEVANCE_SCORE: float = 0.35
     PDF_MIN_RELEVANCE_SCORE: float = 0.35
 
-    # Embedding（DashScope 兼容 OpenAI API）
+    # Embedding（OpenAI 兼容：DashScope / 讯飞星辰 MaaS）
+    EMBEDDING_PROVIDER: str = "dashscope"
+    EMBEDDING_API_KEY: str = ""
+    EMBEDDING_MODEL: str = "text-embedding-v2"
+    EMBEDDING_BASE_URL: str = ""
+    EMBEDDING_BATCH_SIZE: int = 0
     QWEN_API_KEY: str = ""
     DASHSCOPE_API_KEY: str = ""
-    EMBEDDING_MODEL: str = "text-embedding-v2"
     QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     RERANK_ENABLED: bool = False
     RERANK_PROVIDER: str = "dashscope"
+    RERANK_API_KEY: str = ""
     RERANK_MODEL: str = "gte-rerank-v2"
     RERANK_BASE_URL: str = (
         "https://dashscope.aliyuncs.com/api/v1/services/rerank/"

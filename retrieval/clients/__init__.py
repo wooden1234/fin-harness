@@ -5,9 +5,11 @@ from retrieval.clients.milvus_client import (
     create_milvus_client,
     milvus_enabled,
 )
-from retrieval.clients.rerank_client import rerank_documents, rerank_enabled
+from retrieval.clients.mineru import MinerUClient
+from retrieval.clients.rerank_client import rerank_documents, rerank_enabled, rerank_provider
 
 __all__ = [
+    "MinerUClient",
     "create_es_client",
     "create_milvus_client",
     "get_embed_model",
@@ -16,4 +18,5 @@ __all__ = [
     "milvus_enabled",
     "rerank_documents",
     "rerank_enabled",
+    "rerank_provider",
 ]
