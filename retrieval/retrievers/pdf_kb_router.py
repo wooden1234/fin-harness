@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
-from typing import cast
+from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, field_validator
 
+from app.core.config import settings
 from app.core.logger import get_logger
 from retrieval.core.filters import routable_kb_ids
 from retrieval.retrievers.pdf_kb_router_prompts import (
@@ -21,9 +23,13 @@ logger = get_logger(service="pdf_kb_router")
 
 
 class PdfKbRouteDecision(BaseModel):
+    supported: bool = Field(
+        default=True,
+        description="问题是否有合理的 PDF 文档证据基础；明确不支持时为 false",
+    )
     categories: list[str] = Field(
         default_factory=list,
-        description="相关知识库 ID 列表（可多个）；无法判断时应返回全部可选库",
+        description="相关知识库 ID 列表；无法可靠判断时返回空列表，由路由器统一回退全库",
     )
     uncertain: bool = Field(
         default=False,
@@ -40,9 +46,50 @@ class PdfKbRouteDecision(BaseModel):
         description="一句中文说明为何选择这些库",
     )
 
+    @field_validator("categories", mode="before")
+    @classmethod
+    def _normalize_categories(cls, value: Any) -> list[str]:
+        if isinstance(value, str):
+            return [value]
+        if not isinstance(value, list):
+            return []
+        return [str(item) for item in value if item]
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _normalize_confidence(cls, value: Any) -> float:
+        try:
+            return min(max(float(value), 0.0), 1.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @field_validator("uncertain", mode="before")
+    @classmethod
+    def _normalize_uncertain(cls, value: Any) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "1", "yes"}
+        return bool(value)
+
+    @field_validator("supported", mode="before")
+    @classmethod
+    def _normalize_supported(cls, value: Any) -> bool:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"false", "0", "no", "否"}:
+                return False
+            if normalized in {"true", "1", "yes", "是"}:
+                return True
+        return bool(value)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def _normalize_reason(cls, value: Any) -> str:
+        return str(value or "")
+
 
 @dataclass(frozen=True)
 class PdfKbRouteResult:
+    supported: bool
     categories: tuple[str, ...]
     confidence: float
     reason: str
@@ -61,11 +108,17 @@ class PdfKbRouter:
         *,
         llm: BaseChatModel | None = None,
         min_confidence: float = 0.5,
+        unsupported_min_confidence: float | None = None,
         system_prompt: str | None = None,
         fallback_to_all_when_uncertain: bool = True,
     ) -> None:
         self._llm = llm
         self.min_confidence = min_confidence
+        self.unsupported_min_confidence = (
+            settings.PDF_KB_UNSUPPORTED_MIN_CONFIDENCE
+            if unsupported_min_confidence is None
+            else unsupported_min_confidence
+        )
         self._system_prompt_override = system_prompt
         self.fallback_to_all_when_uncertain = fallback_to_all_when_uncertain
         self._cache: dict[str, PdfKbRouteResult] = {}
@@ -105,45 +158,34 @@ class PdfKbRouter:
         if raw.startswith("```"):
             raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
             raw = re.sub(r"\s*```$", "", raw)
-        try:
-            return PdfKbRouteDecision.model_validate_json(raw)
-        except ValidationError:
-            match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-            if match is None:
-                raise
-            return PdfKbRouteDecision.model_validate_json(match.group(0))
+        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+        payload = json.loads(match.group(0) if match else raw)
+        if not isinstance(payload, dict):
+            raise ValueError("route payload must be a JSON object")
+        return PdfKbRouteDecision.model_validate(payload)
+
+    @staticmethod
+    def _response_text(response: Any) -> str:
+        content = getattr(response, "content", response)
+        if isinstance(content, dict):
+            return json.dumps(content, ensure_ascii=False)
+        if isinstance(content, list):
+            return "".join(
+                block.get("text", str(block)) if isinstance(block, dict) else str(block)
+                for block in content
+            )
+        return str(content)
 
     def _invoke_decision(self, query: str) -> PdfKbRouteDecision:
         llm = self._get_llm()
         messages = self._build_messages(query)
-        structured = llm.with_structured_output(PdfKbRouteDecision, method="json_mode")
-
-        last_exc: Exception | None = None
-        for attempt in range(2):
-            try:
-                return cast(PdfKbRouteDecision, structured.invoke(messages))
-            except Exception as exc:
-                last_exc = exc
-                logger.warning(
-                    "pdf_kb_router structured invoke failed attempt={} error={}",
-                    attempt + 1,
-                    type(exc).__name__,
-                )
-
         try:
             response = llm.invoke(messages)
-            content = getattr(response, "content", response)
-            if isinstance(content, list):
-                content = "".join(
-                    block.get("text", str(block)) if isinstance(block, dict) else str(block)
-                    for block in content
-                )
-            return self._parse_decision_text(str(content))
+            return self._parse_decision_text(self._response_text(response))
         except Exception as exc:
             logger.warning(
-                "pdf_kb_router plain invoke failed error={} prior={}",
+                "pdf_kb_router invoke failed; fallback to all categories error={}",
                 type(exc).__name__,
-                type(last_exc).__name__ if last_exc else None,
             )
             return PdfKbRouteDecision(
                 categories=[],
@@ -160,6 +202,32 @@ class PdfKbRouter:
 
         decision = self._invoke_decision(key)
 
+        if (
+            not decision.supported
+            and float(decision.confidence) >= self.unsupported_min_confidence
+        ):
+            result = PdfKbRouteResult(
+                supported=False,
+                categories=(),
+                confidence=float(decision.confidence),
+                reason=str(decision.reason or "pdf_knowledge_base_unsupported"),
+                uncertain=True,
+                fallback_all=False,
+                raw=decision,
+            )
+            self._cache[key] = result
+            return result
+
+        # 低置信度拒答只作为路由不确定信号，继续全库召回以保护可回答问题。
+        if not decision.supported:
+            decision = decision.model_copy(
+                update={
+                    "supported": True,
+                    "uncertain": True,
+                    "reason": f"低置信度拒答，继续召回：{decision.reason}",
+                }
+            )
+
         categories = self._normalize_categories(list(decision.categories or []))
         uncertain = bool(decision.uncertain)
         fallback_all = False
@@ -175,6 +243,7 @@ class PdfKbRouter:
             uncertain = True
 
         result = PdfKbRouteResult(
+            supported=True,
             categories=tuple(categories),
             confidence=float(decision.confidence),
             reason=str(decision.reason or ""),

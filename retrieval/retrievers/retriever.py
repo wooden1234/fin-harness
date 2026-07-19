@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import json
+import math
 from typing import Any
 
 from app.core.config import settings
@@ -29,7 +30,7 @@ from retrieval.retrievers.bm25 import bm25_scores
 logger = get_logger(service="retriever")
 
 DEFAULT_VECTOR_SIMILARITY_THRESHOLD = 0.35
-DEFAULT_RERANK_PARENT_EXCERPT_CHARS = 1600
+AUTO_MERGE_SCORE_BONUS = 0.02
 
 
 @dataclass
@@ -40,6 +41,7 @@ class RetrievalHit:
     node_id: str | None = None
     category: str | None = None
     collection: str | None = None
+    score_type: str = "unknown"
 
 
 class Retriever(ABC):
@@ -54,7 +56,7 @@ class Retriever(ABC):
 
 
 class VectorRetriever(Retriever):
-    """基于 Milvus 的 L3 向量检索；PG 只在召回后补 parent 上下文。"""
+    """基于 Milvus 的 L3 向量检索。"""
 
     def __init__(
         self,
@@ -62,7 +64,8 @@ class VectorRetriever(Retriever):
         top_k: int = 5,
         similarity_threshold: float | None = None,
         metadata_filters: MetadataFilters | None = None,
-        candidate_multiplier: int = 4,
+        candidate_multiplier: int | None = None,
+        diversify: bool = True,
     ):
         registry = get_collection_registry()
         if categories is None:
@@ -81,7 +84,13 @@ class VectorRetriever(Retriever):
             else similarity_threshold
         )
         self.metadata_filters = metadata_filters or {}
-        self.candidate_multiplier = max(candidate_multiplier, 1)
+        configured_multiplier = (
+            settings.VECTOR_CANDIDATE_MULTIPLIER
+            if candidate_multiplier is None
+            else candidate_multiplier
+        )
+        self.candidate_multiplier = max(int(configured_multiplier), 1)
+        self.diversify = diversify
         self._client: Any | None = None
         self._embed_model: Any | None = None
         self.last_trace: RetrievalTrace | None = None
@@ -186,11 +195,15 @@ class VectorRetriever(Retriever):
                         node_id=str(metadata.get("chunk_id") or raw_hit.get("id") or "") or None,
                         category=category,
                         collection=name,
+                        score_type="vector",
                     )
                 )
 
         hits.sort(key=lambda h: h.score, reverse=True)
-        hits = _hydrate_hits_from_parent_store(hits[:k])
+        if self.diversify:
+            hits = _select_vector_hits(hits, top_k=k)
+        else:
+            hits = hits[:k]
         if enforce_on_empty:
             hits, trace = apply_on_empty_policy(
                 hits,
@@ -201,11 +214,11 @@ class VectorRetriever(Retriever):
                 lexical_hits=0,
             )
             self.last_trace = trace
-        return hits
+            return hits
 
 
 class HybridRetriever(Retriever):
-    """Milvus 向量召回 + ES BM25 召回，本地 BM25 兜底，PG 补 parent 上下文。"""
+    """Milvus 向量召回 + ES BM25 召回，本地 BM25 兜底。"""
 
     def __init__(
         self,
@@ -235,12 +248,16 @@ class HybridRetriever(Retriever):
             int(settings.RERANK_CANDIDATE_TOP_K or 0),
             self.top_k,
         )
+        self.last_rerank_status = "not_run"
+        self.last_rerank_error = ""
         self.vector_retriever = VectorRetriever(
             categories=self.categories,
             top_k=self.candidate_top_k,
             similarity_threshold=similarity_threshold,
             metadata_filters=self.metadata_filters,
             candidate_multiplier=4,
+            # hybrid 先保留完整向量候选，避免在 rerank 前淘汰低排名但有效的 chunk。
+            diversify=False,
         )
         self.es_bm25_retriever = None
         if settings.ELASTICSEARCH_ENABLED:
@@ -259,6 +276,8 @@ class HybridRetriever(Retriever):
         metadata_filters: MetadataFilters | None = None,
     ) -> list[RetrievalHit]:
         k = top_k or self.top_k
+        self.last_rerank_status = "not_run"
+        self.last_rerank_error = ""
         filters = merge_filters(self.metadata_filters, metadata_filters)
         candidate_k = max(self.candidate_top_k, k * 4)
         active_categories = _filtered_categories(self.categories, filters)
@@ -287,6 +306,13 @@ class HybridRetriever(Retriever):
                 lexical_hits=0,
             )
             self.last_trace = trace
+            trace.extra.update(
+                {
+                    "rerank_status": "no_candidates",
+                    "rerank_error": "",
+                    "score_source": self.fusion_mode,
+                }
+            )
             if trace.abstained:
                 logger.info(
                     "retrieval abstain reason={} policy={} filters={}",
@@ -309,13 +335,9 @@ class HybridRetriever(Retriever):
                 top_k=fusion_top_k,
                 vector_weight=self.vector_weight,
             )
-        hits = _hydrate_hits_from_parent_store(hits)
-        hits = self._rerank_hits(
-            query,
-            hits,
-            top_k=k,
-        )
-        hits = self._select_diverse_hits(hits, top_k=k)
+        # rerank 先确定最终 top-k，之后只对这些命中做父节点合并。
+        hits = self._rerank_hits(query, hits, top_k=k)
+        hits = _auto_merge_parent_hits(hits, top_k=k)
         hits, trace = apply_on_empty_policy(
             hits,
             query=query,
@@ -331,6 +353,15 @@ class HybridRetriever(Retriever):
                     "rerank_model": self.rerank_model,
                 }
             )
+        trace.extra.update(
+            {
+                "rerank_status": self.last_rerank_status,
+                "rerank_error": self.last_rerank_error,
+                "score_source": "rerank"
+                if self.last_rerank_status == "success"
+                else self.fusion_mode,
+            }
+        )
         trace.final_hits = len(hits)
         self.last_trace = trace
         return hits
@@ -381,8 +412,19 @@ class HybridRetriever(Retriever):
         *,
         top_k: int,
     ) -> list[RetrievalHit]:
+        def fallback(reason: str, status: str = "fallback_to_fusion") -> list[RetrievalHit]:
+            self.last_rerank_status = status
+            self.last_rerank_error = reason
+            selected = hits[:top_k]
+            for hit in selected:
+                hit.metadata["rerank_status"] = status
+                hit.metadata["rerank_fallback_reason"] = reason
+                hit.metadata["score_source"] = hit.score_type or self.fusion_mode
+            return selected
+
+        self.last_rerank_error = ""
         if not self.rerank_enabled or not hits:
-            return hits[:top_k]
+            return fallback("rerank_disabled" if hits else "no_candidates", "disabled" if hits else "no_candidates")
 
         candidate_hits = hits[: self.rerank_candidate_top_k]
         try:
@@ -398,10 +440,10 @@ class HybridRetriever(Retriever):
                 self.rerank_model,
                 exc,
             )
-            return hits[:top_k]
+            return fallback(type(exc).__name__)
 
         if not reranked:
-            return hits[:top_k]
+            return fallback("empty_rerank_result")
 
         ordered: list[RetrievalHit] = []
         seen: set[int] = set()
@@ -414,6 +456,8 @@ class HybridRetriever(Retriever):
             metadata["rerank_score"] = item.score
             metadata["rerank_provider"] = self.rerank_provider
             metadata["rerank_model"] = self.rerank_model
+            metadata["rerank_status"] = "success"
+            metadata["score_source"] = "rerank"
             ordered.append(
                 RetrievalHit(
                     text=hit.text,
@@ -422,134 +466,20 @@ class HybridRetriever(Retriever):
                     node_id=hit.node_id,
                     category=hit.category,
                     collection=hit.collection,
+                    score_type="rerank",
                 )
             )
 
         if not ordered:
-            return hits[:top_k]
+            return fallback("invalid_rerank_result")
 
         for index, hit in enumerate(candidate_hits):
             if index in seen:
                 continue
             ordered.append(hit)
 
+        self.last_rerank_status = "success"
         return ordered[:top_k]
-
-    def _select_diverse_hits(
-        self,
-        hits: list[RetrievalHit],
-        *,
-        top_k: int,
-    ) -> list[RetrievalHit]:
-        if not hits:
-            return []
-
-        selected: list[RetrievalHit] = []
-        selected_keys: set[str] = set()
-        remaining = list(hits)
-        passes = (
-            {
-                "max_chunks_per_doc": 2,
-                "enforce_page_limit": True,
-                "enforce_adjacent_limit": True,
-            },
-            {
-                "max_chunks_per_doc": 2,
-                "enforce_page_limit": False,
-                "enforce_adjacent_limit": False,
-            },
-            {
-                "max_chunks_per_doc": None,
-                "enforce_page_limit": False,
-                "enforce_adjacent_limit": False,
-            },
-        )
-
-        for rules in passes:
-            if len(selected) >= top_k or not remaining:
-                break
-            next_remaining: list[RetrievalHit] = []
-            for hit in remaining:
-                if len(selected) >= top_k:
-                    next_remaining.append(hit)
-                    continue
-                hit_key = _hit_key(hit)
-                if hit_key in selected_keys:
-                    continue
-                if self._violates_diversity_rules(
-                    hit,
-                    selected,
-                    max_chunks_per_doc=rules["max_chunks_per_doc"],
-                    enforce_page_limit=rules["enforce_page_limit"],
-                    enforce_adjacent_limit=rules["enforce_adjacent_limit"],
-                ):
-                    next_remaining.append(hit)
-                    continue
-                selected.append(hit)
-                selected_keys.add(hit_key)
-            remaining = next_remaining
-
-        if len(selected) >= top_k:
-            return selected[:top_k]
-
-        for hit in remaining:
-            if len(selected) >= top_k:
-                break
-            hit_key = _hit_key(hit)
-            if hit_key in selected_keys:
-                continue
-            selected.append(hit)
-            selected_keys.add(hit_key)
-        return selected[:top_k]
-
-    def _violates_diversity_rules(
-        self,
-        candidate: RetrievalHit,
-        selected: list[RetrievalHit],
-        *,
-        max_chunks_per_doc: int | None,
-        enforce_page_limit: bool,
-        enforce_adjacent_limit: bool,
-    ) -> bool:
-        candidate_doc_id = _metadata_string(candidate.metadata, "doc_id")
-        candidate_page_num = _metadata_int(candidate.metadata, "page_num")
-        candidate_chunk_index = _metadata_int(candidate.metadata, "chunk_index")
-
-        if candidate_doc_id and max_chunks_per_doc is not None:
-            doc_hits = sum(
-                1
-                for hit in selected
-                if _metadata_string(hit.metadata, "doc_id") == candidate_doc_id
-            )
-            if doc_hits >= max_chunks_per_doc:
-                return True
-
-        if not candidate_doc_id:
-            return False
-
-        for hit in selected:
-            if _metadata_string(hit.metadata, "doc_id") != candidate_doc_id:
-                continue
-
-            if enforce_page_limit:
-                selected_page_num = _metadata_int(hit.metadata, "page_num")
-                if (
-                    candidate_page_num is not None
-                    and selected_page_num is not None
-                    and candidate_page_num == selected_page_num
-                ):
-                    return True
-
-            if enforce_adjacent_limit:
-                selected_chunk_index = _metadata_int(hit.metadata, "chunk_index")
-                if (
-                    candidate_chunk_index is not None
-                    and selected_chunk_index is not None
-                    and abs(candidate_chunk_index - selected_chunk_index) <= 1
-                ):
-                    return True
-
-        return False
 
 # 兼容旧名
 FAQRetriever = Retriever
@@ -639,6 +569,259 @@ def _hit_key(hit: RetrievalHit) -> str:
     ) or hit.text[:80]
 
 
+def _scale_vector_diversity_penalty(
+    penalty: float,
+    *,
+    quality_hit_count: int,
+    top_k: int,
+) -> float:
+    """高质量候选不足时，按可用质量候选比例降低多样性惩罚。"""
+    if top_k <= 0:
+        return 0.0
+    ratio = min(max(quality_hit_count / top_k, 0.0), 1.0)
+    return penalty * ratio
+
+
+def _select_vector_hits(hits: list[RetrievalHit], *, top_k: int) -> list[RetrievalHit]:
+    """在向量候选中保留相关性，同时根据当前候选分布软化文档重复。"""
+    if not hits or top_k <= 0:
+        return []
+
+    unique_hits: list[RetrievalHit] = []
+    seen_keys: set[str] = set()
+    for hit in hits:
+        key = _hit_key(hit)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        unique_hits.append(hit)
+
+    if len(unique_hits) <= top_k or not settings.VECTOR_DIVERSITY_ENABLED:
+        return unique_hits[:top_k]
+
+    doc_counts: dict[str, int] = {}
+    for hit in unique_hits:
+        doc_key = _vector_doc_key(hit)
+        doc_counts[doc_key] = doc_counts.get(doc_key, 0) + 1
+
+    candidate_count = len(unique_hits)
+    unique_doc_count = len(doc_counts)
+    if unique_doc_count < 2:
+        return unique_hits[:top_k]
+
+    duplicate_rate = 1.0 - unique_doc_count / candidate_count
+    target_rate = min(max(settings.VECTOR_DIVERSITY_TARGET_DUPLICATE_RATE, 0.0), 0.99)
+    pressure = max(0.0, duplicate_rate - target_rate) / max(1.0 - target_rate, 1e-6)
+    concentration = sum((count / candidate_count) ** 2 for count in doc_counts.values())
+    penalty = settings.VECTOR_DIVERSITY_STRENGTH * pressure * (1.0 + concentration)
+    penalty = min(max(penalty, 0.0), max(settings.VECTOR_DIVERSITY_MAX_PENALTY, 0.0))
+    if penalty <= 0.0:
+        return unique_hits[:top_k]
+
+    top_score = unique_hits[0].score
+    bottom_score = unique_hits[-1].score
+    score_span = top_score - bottom_score
+    quality_ratio = min(
+        max(settings.VECTOR_DIVERSITY_MIN_SCORE_RATIO, 0.0),
+        1.0,
+    )
+    quality_hit_count = top_k
+    if top_score > 0.0:
+        quality_hits = [
+            hit
+            for hit in unique_hits
+            if hit.score >= top_score * quality_ratio
+        ]
+        quality_hit_count = len(quality_hits)
+        if len(quality_hits) >= top_k:
+            unique_hits = quality_hits
+            bottom_score = unique_hits[-1].score
+            score_span = top_score - bottom_score
+
+    penalty = _scale_vector_diversity_penalty(
+        penalty,
+        quality_hit_count=quality_hit_count,
+        top_k=top_k,
+    )
+
+    scored_hits = [
+        (
+            hit,
+            1.0 if score_span <= 0 else (hit.score - bottom_score) / score_span,
+        )
+        for hit in unique_hits
+    ]
+
+    selected: list[RetrievalHit] = []
+    selected_counts: dict[str, int] = {}
+    remaining = list(scored_hits)
+    while remaining and len(selected) < top_k:
+        best_index = max(
+            range(len(remaining)),
+            key=lambda index: (
+                remaining[index][1]
+                - penalty * math.log1p(selected_counts.get(_vector_doc_key(remaining[index][0]), 0)),
+                remaining[index][0].score,
+            ),
+        )
+        hit, _ = remaining.pop(best_index)
+        selected.append(hit)
+        doc_key = _vector_doc_key(hit)
+        selected_counts[doc_key] = selected_counts.get(doc_key, 0) + 1
+
+    return selected
+
+
+def _vector_doc_key(hit: RetrievalHit) -> str:
+    doc_id = str(hit.metadata.get("doc_id") or "").strip()
+    return f"doc:{doc_id}" if doc_id else f"chunk:{_hit_key(hit)}"
+
+
+def _parent_merge_key(hit: RetrievalHit) -> str:
+    """优先使用 L2 父块；没有父块时退回根块或子块自身。"""
+    metadata = hit.metadata
+    parent_id = str(metadata.get("parent_chunk_id") or "").strip()
+    if parent_id:
+        return f"parent:{parent_id}"
+    root_id = str(metadata.get("root_chunk_id") or "").strip()
+    if root_id:
+        return f"root:{root_id}"
+    return f"child:{_hit_key(hit)}"
+
+
+def _auto_merge_parent_hits(
+    hits: list[RetrievalHit],
+    *,
+    top_k: int,
+) -> list[RetrievalHit]:
+    """读取 rerank top-k 对应父节点，并合并同父节点的子块证据。"""
+    if not hits or top_k <= 0:
+        return []
+
+    groups: dict[str, list[RetrievalHit]] = {}
+    order: list[str] = []
+    for hit in hits:
+        key = _parent_merge_key(hit)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(hit)
+
+    min_children = max(int(settings.AUTO_MERGE_MIN_CHILDREN or 2), 2)
+    mergeable_keys = {
+        key
+        for key, children in groups.items()
+        if len(children) >= min_children and key.startswith(("parent:", "root:"))
+    }
+    parent_ids = [
+        key.split(":", 1)[1]
+        for key in mergeable_keys
+    ]
+    parent_nodes = _load_parent_nodes(parent_ids)
+
+    merged: list[RetrievalHit] = []
+    for key in order:
+        children = groups[key]
+        if key not in mergeable_keys:
+            for child in children:
+                metadata = dict(child.metadata)
+                child_id = str(child.node_id or metadata.get("chunk_id") or "").strip()
+                metadata["auto_merged"] = False
+                metadata["child_chunk_ids"] = [child_id] if child_id else []
+                metadata["evidence_child_ids"] = [child_id] if child_id else []
+                metadata["auto_merge_child_count"] = 1
+                merged.append(
+                    RetrievalHit(
+                        text=child.text,
+                        score=child.score,
+                        metadata=metadata,
+                        node_id=child.node_id,
+                    category=child.category,
+                    collection=child.collection,
+                    score_type=child.score_type,
+                )
+                )
+            continue
+        representative = children[0]
+        child_ids = [
+            str(child.node_id or child.metadata.get("chunk_id") or "").strip()
+            for child in children
+        ]
+        child_ids = list(dict.fromkeys(child_id for child_id in child_ids if child_id))
+        metadata = dict(representative.metadata)
+        metadata["auto_merged"] = len(children) > 1
+        metadata["child_chunk_ids"] = child_ids
+        metadata["evidence_child_ids"] = child_ids
+        metadata["auto_merge_child_count"] = len(children)
+        metadata["auto_merge_child_scores"] = [child.score for child in children]
+        parent_id = key.split(":", 1)[1] if ":" in key else ""
+        parent_node = parent_nodes.get(parent_id)
+        if parent_node:
+            metadata.update(parent_node["metadata"])
+            metadata["parent_node_id"] = parent_id
+            text = parent_node["text"]
+        else:
+            text = "\n\n".join(
+                child.text.strip() for child in children if str(child.text or "").strip()
+            )
+        metadata["auto_merge_score"] = max(child.score for child in children)
+        score = metadata["auto_merge_score"] + AUTO_MERGE_SCORE_BONUS * math.log1p(
+            len(children) - 1
+        )
+        merged.append(
+            RetrievalHit(
+                text=text,
+                score=score,
+                metadata=metadata,
+                node_id=representative.node_id,
+                category=representative.category,
+                collection=representative.collection,
+                score_type=representative.score_type,
+            )
+        )
+
+    merged.sort(key=lambda hit: hit.score, reverse=True)
+    return merged[:top_k]
+
+
+def _load_parent_nodes(parent_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """批量读取父节点；数据库不可用时返回空结果，由调用方降级到子块文本。"""
+    if not parent_ids:
+        return {}
+    try:
+        import psycopg
+        from psycopg import sql
+
+        from retrieval.indexing.index import _pg_connection_strings
+        from retrieval.indexing.parent_store import RAG_SCHEMA
+
+        sync_url, _ = _pg_connection_strings()
+        nodes: dict[str, dict[str, Any]] = {}
+        with psycopg.connect(sync_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL(
+                        """
+                        SELECT chunk_id, text, metadata
+                        FROM {}.parent_chunks
+                        WHERE chunk_id = ANY(%s)
+                        """
+                    ).format(sql.Identifier(RAG_SCHEMA)),
+                    (list(dict.fromkeys(parent_ids)),),
+                )
+                for chunk_id, text, metadata in cur.fetchall():
+                    node_text = str(text or "").strip()
+                    if node_text:
+                        nodes[str(chunk_id)] = {
+                            "text": node_text,
+                            "metadata": _coerce_metadata(metadata),
+                        }
+        return nodes
+    except Exception as exc:
+        logger.warning("parent auto-merge lookup skipped error={}", exc)
+        return {}
+
+
 def _bm25_rerank_hits(
     query: str,
     hits: list[RetrievalHit],
@@ -656,14 +839,15 @@ def _bm25_rerank_hits(
         metadata["bm25_score"] = score
         metadata["bm25_backend"] = "local"
         ranked.append(
-            RetrievalHit(
+                RetrievalHit(
                 text=hit.text,
                 score=score,
                 metadata=metadata,
                 node_id=hit.node_id,
-                category=hit.category,
-                collection=hit.collection,
-            )
+                    category=hit.category,
+                    collection=hit.collection,
+                    score_type="bm25",
+                )
         )
     ranked.sort(key=lambda hit: hit.score, reverse=True)
     return ranked[:top_k]
@@ -693,6 +877,7 @@ def _rrf_fuse_hits(
         metadata = dict(hit.metadata)
         metadata["rrf_score"] = score
         metadata["hybrid_score"] = score
+        metadata["score_source"] = "rrf"
         list_ranks = ranks_by_key.get(key) or {}
         if "vector" in list_ranks:
             metadata["vector_rank"] = list_ranks["vector"]
@@ -706,6 +891,7 @@ def _rrf_fuse_hits(
                 node_id=hit.node_id,
                 category=hit.category,
                 collection=hit.collection,
+                score_type="rrf",
             )
         )
 
@@ -745,6 +931,7 @@ def _weighted_fuse_hits(
         if b_score is not None:
             metadata["bm25_score_norm"] = b_score
         metadata["hybrid_score"] = score
+        metadata["score_source"] = "weighted"
         fused.append(
             RetrievalHit(
                 text=hit.text,
@@ -753,6 +940,7 @@ def _weighted_fuse_hits(
                 node_id=hit.node_id,
                 category=hit.category,
                 collection=hit.collection,
+                score_type="weighted",
             )
         )
 
@@ -805,134 +993,6 @@ def _milvus_search_params(limit: int) -> dict[str, Any]:
 def _rerank_text(hit: RetrievalHit) -> str:
     text = str(hit.metadata.get("rerank_text") or "").strip()
     return text or hit.text
-
-
-def _build_rerank_text(leaf_text: str, parent_text: str) -> str:
-    leaf = " ".join(str(leaf_text or "").split())
-    parent = " ".join(str(parent_text or "").split())
-    if not parent or parent == leaf:
-        return leaf
-    excerpt = parent[:DEFAULT_RERANK_PARENT_EXCERPT_CHARS]
-    return f"{leaf}\n\n上下文摘录：\n{excerpt}"
-
-
-def _metadata_string(metadata: dict[str, Any], key: str) -> str:
-    value = metadata.get(key)
-    return str(value).strip() if value is not None else ""
-
-
-def _metadata_int(metadata: dict[str, Any], key: str) -> int | None:
-    value = metadata.get(key)
-    if value is None or value == "":
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _hydrate_hits_from_parent_store(hits: list[RetrievalHit]) -> list[RetrievalHit]:
-    if not hits:
-        return hits
-
-    chunk_ids = [
-        str(hit.node_id or hit.metadata.get("chunk_id") or "").strip()
-        for hit in hits
-    ]
-    chunk_ids = [chunk_id for chunk_id in chunk_ids if chunk_id]
-    if not chunk_ids:
-        return hits
-
-    contexts = _load_parent_contexts(chunk_ids)
-    if not contexts:
-        return hits
-
-    hydrated: list[RetrievalHit] = []
-    for hit in hits:
-        chunk_id = str(hit.node_id or hit.metadata.get("chunk_id") or "").strip()
-        context = contexts.get(chunk_id)
-        if context is None:
-            hydrated.append(hit)
-            continue
-
-        metadata = dict(hit.metadata)
-        metadata.update(context["leaf_metadata"])
-        leaf_text = hit.text
-        parent_text = str(context.get("context_text") or hit.text)
-        metadata["leaf_text"] = leaf_text
-        metadata["rerank_text"] = _build_rerank_text(leaf_text, parent_text)
-        metadata["context_chunk_id"] = context.get("context_chunk_id")
-        metadata["context_chunk_level"] = context.get("context_chunk_level")
-        metadata["context_section_path"] = context.get("context_section_path")
-        metadata["context_page_range"] = context.get("context_page_range")
-        hydrated.append(
-            RetrievalHit(
-                text=parent_text,
-                score=hit.score,
-                metadata=metadata,
-                node_id=hit.node_id,
-                category=hit.category,
-                collection=hit.collection,
-            )
-        )
-    return hydrated
-
-
-def _load_parent_contexts(chunk_ids: list[str]) -> dict[str, dict[str, Any]]:
-    import psycopg
-    from psycopg import sql
-
-    from retrieval.indexing.index import _pg_connection_strings
-    from retrieval.indexing.parent_store import RAG_SCHEMA
-
-    sync_url, _ = _pg_connection_strings()
-
-    contexts: dict[str, dict[str, Any]] = {}
-    with psycopg.connect(sync_url) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                sql.SQL(
-                    """
-                    SELECT
-                        cr.chunk_id,
-                        cr.metadata,
-                        pc.chunk_id,
-                        pc.chunk_level,
-                        pc.text,
-                        pc.section_path,
-                        pc.page_range,
-                        pc.metadata
-                    FROM {}.chunk_registry cr
-                    LEFT JOIN {}.parent_chunks pc
-                        ON pc.chunk_id = COALESCE(NULLIF(cr.parent_chunk_id, ''), NULLIF(cr.root_chunk_id, ''))
-                    WHERE cr.chunk_id = ANY(%s)
-                    """
-                ).format(
-                    sql.Identifier(RAG_SCHEMA),
-                    sql.Identifier(RAG_SCHEMA),
-                ),
-                (chunk_ids,),
-            )
-            for (
-                leaf_chunk_id,
-                leaf_metadata,
-                context_chunk_id,
-                context_chunk_level,
-                context_text,
-                context_section_path,
-                context_page_range,
-                context_metadata,
-            ) in cur.fetchall():
-                contexts[str(leaf_chunk_id)] = {
-                    "leaf_metadata": _coerce_metadata(leaf_metadata),
-                    "context_metadata": _coerce_metadata(context_metadata),
-                    "context_chunk_id": context_chunk_id,
-                    "context_chunk_level": context_chunk_level,
-                    "context_text": context_text,
-                    "context_section_path": context_section_path,
-                    "context_page_range": context_page_range,
-                }
-    return contexts
 
 
 def _load_pg_bm25_rows(category: str) -> list[RetrievalHit]:

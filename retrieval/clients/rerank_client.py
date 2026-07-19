@@ -68,6 +68,10 @@ def rerank_documents(
     return _rerank_dashscope(query=query, documents=documents, top_n=top_n)
 
 
+def _uses_compatible_rerank_api(url: str) -> bool:
+    return "compatible-api" in str(url or "").rstrip("/")
+
+
 def _rerank_dashscope(
     *,
     query: str,
@@ -75,13 +79,15 @@ def _rerank_dashscope(
     top_n: int,
 ) -> list[RerankResult]:
     api_key, url, model = _resolve_rerank_credentials()
-    response = httpx.post(
-        url,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
+    if _uses_compatible_rerank_api(url):
+        payload = {
+            "model": model,
+            "query": query,
+            "documents": documents,
+            "top_n": top_n,
+        }
+    else:
+        payload = {
             "model": model,
             "input": {
                 "query": query,
@@ -91,7 +97,14 @@ def _rerank_dashscope(
                 "return_documents": settings.RERANK_RETURN_DOCUMENTS,
                 "top_n": top_n,
             },
+        }
+    response = httpx.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
         },
+        json=payload,
         timeout=settings.RERANK_TIMEOUT_SEC,
     )
     response.raise_for_status()

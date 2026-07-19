@@ -42,6 +42,13 @@ class Citation(TypedDict, total=False):
     published_at: str
     source_type: str
     sub_task_id: str
+    parent_chunk_id: str
+    root_chunk_id: str
+    parent_node_id: str
+    child_chunk_ids: list[str]
+    evidence_child_ids: list[str]
+    auto_merged: bool
+    auto_merge_child_count: int
 
 
 class TaskResult(TypedDict, total=False):
@@ -55,6 +62,7 @@ class TaskResult(TypedDict, total=False):
     confidence: float      # 证据置信度（可选，检索分数等）
     fallback_to_web: bool  # 兼容旧字段；等价于 coverage == "uncovered"
     fallback_reason: str
+    rag_trace: dict[str, object]
 
 
 # ---------- 共享 Pydantic 模型（Planner / Supervisor 等共用）----------

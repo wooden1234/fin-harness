@@ -7,7 +7,7 @@ financial_query_agent 子图的状态在它自己的 state.py 里。
 from __future__ import annotations
 
 from operator import add
-from typing import Annotated, NotRequired
+from typing import Annotated, Any, NotRequired
 from typing_extensions import TypedDict
 
 from app.shared import Citation, SubTask, TaskResult
@@ -34,3 +34,4 @@ class WorkerOutputState(TypedDict):
     task_results: NotRequired[Annotated[list[TaskResult], add]]
     citations: NotRequired[Annotated[list[Citation], add]]
     summary: NotRequired[str]
+    rag_trace: NotRequired[dict[str, Any]]

@@ -1,0 +1,33 @@
+{
+  "version": "pdf_retrieval_quality_v1",
+  "source": "golden_set",
+  "models": {
+    "rerank": {
+      "score_type": "rerank",
+      "bias": -3.3754850958805065,
+      "score_weight": 0.6095079445317378,
+      "rank_weight": 1.1334227350883987,
+      "overlap_weight": 0.3351264975161873,
+      "samples": 2000,
+      "positives": 134
+    },
+    "rrf": {
+      "score_type": "rrf",
+      "bias": -3.1410551301558627,
+      "score_weight": 0.666655039276323,
+      "rank_weight": 0.9450222735330257,
+      "overlap_weight": 0.3351264975161873,
+      "samples": 1665,
+      "positives": 93
+    },
+    "bm25": {
+      "score_type": "bm25",
+      "bias": -3.4449107527024383,
+      "score_weight": -0.6616908593894062,
+      "rank_weight": 0.6525850882704713,
+      "overlap_weight": 0.3351264975161873,
+      "samples": 335,
+      "positives": 11
+    }
+  }
+}

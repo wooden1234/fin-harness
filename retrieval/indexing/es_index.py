@@ -35,7 +35,10 @@ def index_mapping(text_analyzer: str, search_analyzer: str) -> dict[str, Any]:
                 "category": {"type": "keyword"},
                 "collection": {"type": "keyword"},
                 "doc_id": {"type": "keyword"},
-                "source": {"type": "keyword"},
+                "source": {
+                    **text_field,
+                    "fields": {"keyword": {"type": "keyword"}},
+                },
                 "file": {"type": "keyword"},
                 "title": text_field,
                 "section": text_field,
@@ -47,6 +50,7 @@ def index_mapping(text_analyzer: str, search_analyzer: str) -> dict[str, Any]:
                 "year": {"type": "integer"},
                 "page_num": {"type": "integer"},
                 "chunk_index": {"type": "integer"},
+                "leaf_text": text_field,
                 "text": text_field,
                 "metadata": {"type": "object", "enabled": False},
             },
@@ -132,6 +136,7 @@ def build_document(
         "year": year,
         "page_num": to_int(metadata.get("page_num")),
         "chunk_index": to_int(metadata.get("chunk_index")),
+        "leaf_text": text,
         "text": text,
         "metadata": metadata,
     }

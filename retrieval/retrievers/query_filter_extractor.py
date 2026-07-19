@@ -1,0 +1,280 @@
+"""PDF 查询元数据提取：优先使用大模型，失败时不施加字段过滤。"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from typing import Any
+
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel, Field, ValidationError, field_validator
+
+from app.core.config import settings
+from app.core.logger import get_logger
+from retrieval.core.filters import (
+    MetadataFilters,
+    supported_filter_keys,
+)
+
+logger = get_logger(service="query_filter_extractor")
+
+_FIELDS = ("year", "ticker", "doc_id", "source", "issuer")
+_DOC_ID_PATTERN = re.compile(r"^PDF-[A-Z0-9-]+$", flags=re.IGNORECASE)
+_TICKER_PATTERN = re.compile(r"^\d{6}$")
+_GENERIC_SOURCE_PATTERN = re.compile(
+    r"^(报告|年报|年度报告|研报|研究报告|白皮书|政策|政策文件)$"
+)
+
+
+class QueryFilterDecision(BaseModel):
+    """大模型从用户问题中提取的候选过滤字段。"""
+
+    year: int | None = Field(default=None, ge=1900, le=2100)
+    ticker: str | None = None
+    doc_id: str | None = None
+    source: str | None = None
+    issuer: str | None = None
+    confidence: dict[str, float] = Field(default_factory=dict)
+
+    @field_validator("year", mode="before")
+    @classmethod
+    def _normalize_year(cls, value: Any) -> int | None:
+        try:
+            year = int(value)
+        except (TypeError, ValueError):
+            return None
+        return year if 1900 <= year <= 2100 else None
+
+    @field_validator("ticker", mode="before")
+    @classmethod
+    def _validate_ticker(cls, value: str | None) -> str | None:
+        if value is None or not isinstance(value, str):
+            return None
+        value = value.strip()
+        return value if _TICKER_PATTERN.fullmatch(value) else None
+
+    @field_validator("doc_id", mode="before")
+    @classmethod
+    def _validate_doc_id(cls, value: str | None) -> str | None:
+        if value is not None and isinstance(value, str):
+            value = value.strip().upper()
+            return value if _DOC_ID_PATTERN.fullmatch(value) else None
+        return None
+
+    @field_validator("source", "issuer", mode="before")
+    @classmethod
+    def _normalize_text(cls, value: str | None) -> str | None:
+        if value is None or not isinstance(value, str):
+            return None
+        value = value.strip()
+        return value if value and len(value) <= 128 else None
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def _reject_generic_source(cls, value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        return value if value and not _GENERIC_SOURCE_PATTERN.fullmatch(value) else None
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _normalize_confidence(cls, value: Any) -> dict[str, float]:
+        if not isinstance(value, dict):
+            return {}
+        result: dict[str, float] = {}
+        for key, raw_score in value.items():
+            try:
+                score = float(raw_score)
+            except (TypeError, ValueError):
+                continue
+            if 0.0 <= score <= 1.0:
+                result[str(key)] = score
+        return result
+
+
+@dataclass(frozen=True)
+class QueryFilterExtraction:
+    filters: MetadataFilters
+    used_llm: bool
+    reason: str
+
+
+def _system_prompt() -> str:
+    return """你是金融 PDF 知识库的查询元数据提取器。
+
+只从用户问题中提取明确出现或明确指代的过滤字段，不要根据常识、公司列表或知识库内容猜测。
+字段含义：
+- year：用于过滤文档的报告/财务年度；annual_reports 中出现“2024年营业收入/2025年研发费用”等明确财务年份时必须提取
+- year：不要提取“预计到2028年”“到2027年目标”“2026年市场规模预测”等正文预测/目标年份，除非问题明确询问该年份对应的报告版本
+- ticker：六位股票代码
+- doc_id：问题中明确出现的 PDF 文档 ID，格式通常为 PDF-...
+- source：问题中明确指定的具体来源、报告名称或文件名；“报告/年报/研报/白皮书”等通用词不能作为 source
+- issuer：问题中明确指定的发布机构、研究机构或发行方
+
+无法确定时返回 null。confidence 为每个非空字段给出 0 到 1 的置信度。
+不要输出 category；文档类型由另一个路由器处理。只输出 JSON。"""
+
+
+def _human_prompt(query: str, categories: tuple[str, ...]) -> str:
+    category_text = ", ".join(categories) if categories else "未确定"
+    return (
+        f"已确定的文档类别：{category_text}\n"
+        f"用户问题：\n{query}\n\n"
+        "请只提取适合作为文档元数据过滤条件的字段。"
+    )
+
+
+class QueryFilterExtractor:
+    def __init__(
+        self,
+        *,
+        llm: BaseChatModel | None = None,
+        min_confidence: float | None = None,
+    ) -> None:
+        self._llm = llm
+        self.min_confidence = (
+            settings.PDF_QUERY_FILTER_MIN_CONFIDENCE
+            if min_confidence is None
+            else min_confidence
+        )
+        self._cache: dict[tuple[str, tuple[str, ...]], QueryFilterExtraction] = {}
+
+    def _get_llm(self) -> BaseChatModel:
+        if self._llm is None:
+            from agents.llm import get_router_llm
+
+            self._llm = get_router_llm()
+        return self._llm
+
+    @staticmethod
+    def _parse_text(text: str) -> QueryFilterDecision:
+        raw = str(text or "").strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+            raw = re.sub(r"\s*```$", "", raw)
+        match = re.search(r"\{.*\}|\[.*\]", raw, flags=re.DOTALL)
+        payload = json.loads(match.group(0) if match else raw)
+        if isinstance(payload, list):
+            if len(payload) == 1 and isinstance(payload[0], dict):
+                payload = payload[0]
+            else:
+                payload = {
+                    str(item.get("field") or item.get("name")): item.get("value")
+                    for item in payload
+                    if isinstance(item, dict) and (item.get("field") or item.get("name"))
+                }
+        if not isinstance(payload, dict):
+            raise ValueError("query filter payload must be a JSON object")
+        nested_filters = payload.get("filters")
+        if isinstance(nested_filters, dict):
+            payload = {**nested_filters, **{k: v for k, v in payload.items() if k != "filters"}}
+        confidence = payload.setdefault("confidence", {})
+        if not isinstance(confidence, dict):
+            confidence = {}
+            payload["confidence"] = confidence
+        for field in _FIELDS:
+            value = payload.get(field)
+            if isinstance(value, dict):
+                if "confidence" in value:
+                    confidence[field] = value["confidence"]
+                payload[field] = value.get("value")
+        return QueryFilterDecision.model_validate(payload)
+
+    @staticmethod
+    def _response_text(response: Any) -> str:
+        content = getattr(response, "content", response)
+        if isinstance(content, dict):
+            return json.dumps(content, ensure_ascii=False)
+        if isinstance(content, list):
+            return "".join(
+                block.get("text", str(block)) if isinstance(block, dict) else str(block)
+                for block in content
+            )
+        return str(content)
+
+    def _invoke(self, query: str, categories: tuple[str, ...]) -> QueryFilterDecision:
+        llm = self._get_llm()
+        messages = [
+            SystemMessage(content=_system_prompt()),
+            HumanMessage(content=_human_prompt(query, categories)),
+        ]
+        try:
+            response = llm.invoke(messages)
+            return self._parse_text(self._response_text(response))
+        except Exception as exc:
+            detail = ""
+            if isinstance(exc, ValidationError):
+                detail = "; ".join(
+                    f"{'.'.join(str(item) for item in error.get('loc', ())) or 'root'}:{error.get('type', 'invalid')}"
+                    for error in exc.errors()
+                )
+            logger.warning(
+                "query_filter_extractor invoke or parse failed; use no metadata filters error={} detail={}",
+                type(exc).__name__,
+                detail or "unavailable",
+            )
+            raise
+
+    def _validated_filters(
+        self,
+        decision: QueryFilterDecision,
+        *,
+        knowledge_bases: list[str],
+    ) -> MetadataFilters:
+        allowed = supported_filter_keys(knowledge_bases or None)
+        result: MetadataFilters = {}
+        for field in _FIELDS:
+            value: Any = getattr(decision, field)
+            if value in (None, "") or field not in allowed:
+                continue
+            confidence = float(decision.confidence.get(field, 0.0))
+            if confidence < self.min_confidence:
+                continue
+            result[field] = value
+        return result
+
+    def extract(
+        self,
+        query: str,
+        *,
+        knowledge_bases: list[str] | None = None,
+    ) -> QueryFilterExtraction:
+        categories = tuple(str(value) for value in (knowledge_bases or []) if value)
+        key = (query.strip(), categories)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+
+        try:
+            decision = self._invoke(key[0], categories)
+            filters = self._validated_filters(decision, knowledge_bases=list(categories))
+            if filters:
+                result = QueryFilterExtraction(filters, True, "llm")
+            else:
+                result = QueryFilterExtraction(
+                    {},
+                    False,
+                    "llm_empty_or_low_confidence; no metadata filters",
+                )
+        except Exception as exc:
+            logger.warning(
+                "query_filter_extractor failed; use no metadata filters error={}",
+                type(exc).__name__,
+            )
+            result = QueryFilterExtraction({}, False, "llm_failed; no metadata filters")
+
+        self._cache[key] = result
+        return result
+
+
+_default_extractor: QueryFilterExtractor | None = None
+
+
+def get_query_filter_extractor() -> QueryFilterExtractor:
+    global _default_extractor
+    if _default_extractor is None:
+        _default_extractor = QueryFilterExtractor()
+    return _default_extractor

@@ -19,7 +19,8 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-ROOT_DIR = Path(__file__).resolve().parent.parent.parent
+# scripts -> indexing -> retrieval -> 项目根目录
+ROOT_DIR = Path(__file__).resolve().parents[3]
 BACKEND_DIR = ROOT_DIR / "app" / "backend"
 for path in (ROOT_DIR, BACKEND_DIR):
     if str(path) not in sys.path:

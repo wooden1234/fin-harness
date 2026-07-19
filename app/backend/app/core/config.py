@@ -47,6 +47,16 @@ class Settings(BaseSettings):
     ELASTICSEARCH_USERNAME: str = ""
     ELASTICSEARCH_PASSWORD: str = ""
     ELASTICSEARCH_ENABLED: bool = False
+    ES_BM25F_TEXT_WEIGHT: float = 1.5
+    ES_BM25F_LEAF_TEXT_WEIGHT: float = 1.0
+    ES_BM25F_TITLE_WEIGHT: float = 5.0
+    ES_BM25F_SECTION_WEIGHT: float = 4.0
+    ES_BM25F_SOURCE_WEIGHT: float = 2.0
+    ES_BM25F_TITLE_PHRASE_BOOST: float = 3.0
+    ES_BM25F_SECTION_PHRASE_BOOST: float = 2.5
+    ES_BM25F_MAX_PHRASE_QUERIES: int = 4
+    ES_BM25F_MIN_PHRASE_LENGTH: int = 2
+    ES_BM25_MODE: str = "combined_fields"
 
     # Milvus（向量检索）
     MILVUS_ENABLED: bool = False
@@ -65,15 +75,27 @@ class Settings(BaseSettings):
     MILVUS_M: int = 16
     MILVUS_EF_CONSTRUCTION: int = 200
     MILVUS_SEARCH_EF: int = 64
+    VECTOR_CANDIDATE_MULTIPLIER: int = 8
+    VECTOR_DIVERSITY_ENABLED: bool = True
+    VECTOR_DIVERSITY_TARGET_DUPLICATE_RATE: float = 0.70
+    VECTOR_DIVERSITY_STRENGTH: float = 0.10
+    VECTOR_DIVERSITY_MAX_PENALTY: float = 0.20
+    VECTOR_DIVERSITY_MIN_SCORE_RATIO: float = 0.85
+    AUTO_MERGE_MIN_CHILDREN: int = 2
 
     # LLM（W3+ Supervisor / Agent）
     DEEPSEEK_API_KEY: str = ""
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
     DEEPSEEK_MODEL: str = "deepseek-v4-flash"
     AGENT_ROUTER_TEMPERATURE: float = 0.0
+    PDF_QUERY_FILTER_MIN_CONFIDENCE: float = 0.85
+    PDF_KB_UNSUPPORTED_MIN_CONFIDENCE: float = 0.90
     AGENT_FAQ_TEMPERATURE: float = 0.3
     FAQ_MIN_RELEVANCE_SCORE: float = 0.35
     PDF_MIN_RELEVANCE_SCORE: float = 0.35
+    PDF_RETRIEVAL_QUALITY_MODEL_PATH: str = str(
+        PROJECT_ROOT / "retrieval/models/pdf_retrieval_quality.json"
+    )
 
     # Embedding（OpenAI 兼容：DashScope / 讯飞星辰 MaaS）
     EMBEDDING_PROVIDER: str = "dashscope"
@@ -87,10 +109,9 @@ class Settings(BaseSettings):
     RERANK_ENABLED: bool = False
     RERANK_PROVIDER: str = "dashscope"
     RERANK_API_KEY: str = ""
-    RERANK_MODEL: str = "gte-rerank-v2"
+    RERANK_MODEL: str = "qwen3-rerank"
     RERANK_BASE_URL: str = (
-        "https://dashscope.aliyuncs.com/api/v1/services/rerank/"
-        "text-rerank/text-rerank"
+        "https://dashscope.aliyuncs.com/compatible-api/v1/reranks"
     )
     RERANK_CANDIDATE_TOP_K: int = 20
     RERANK_TIMEOUT_SEC: float = 30.0
