@@ -309,6 +309,22 @@ def supported_filter_keys(categories: list[str] | None = None) -> set[str]:
     return {rule.filter_key for rule in rules_for_categories(categories)}
 
 
+def filters_for_category(
+    filters: MetadataFilters | None,
+    category: str,
+) -> MetadataFilters:
+    """按单个知识库契约裁剪过滤字段，避免跨库误下推字段。"""
+    category_name = str(category or "")
+    supported = supported_filter_keys([category_name])
+    result = {
+        field: value
+        for field, value in (filters or {}).items()
+        if field in supported or field == "category"
+    }
+    result["category"] = category_name
+    return result
+
+
 def compact_filters(filters: MetadataFilters | None) -> MetadataFilters:
     return {k: v for k, v in (filters or {}).items() if v not in (None, "", [], ())}
 

@@ -5,6 +5,7 @@ from retrieval.core.filters import (
     has_strict_filters,
     infer_pdf_field_filters,
     infer_pdf_metadata_filters,
+    filters_for_category,
     metadata_matches,
     routable_kb_ids,
     rules_for_categories,
@@ -37,6 +38,20 @@ def test_policy_supports_issuer_not_ticker():
     keys = supported_filter_keys(["policy"])
     assert {"year", "issuer", "doc_id"} <= keys
     assert "ticker" not in keys
+
+
+def test_research_reports_do_not_support_ticker_hard_filter():
+    keys = supported_filter_keys(["research_reports"])
+    assert {"year", "issuer", "doc_id"} <= keys
+    assert "ticker" not in keys
+
+
+def test_filters_for_category_drops_unsupported_ticker():
+    filters = filters_for_category(
+        {"category": ["annual_reports", "research_reports"], "ticker": "CATL", "year": 2026},
+        "research_reports",
+    )
+    assert filters == {"category": "research_reports", "year": 2026}
 
 
 def test_rules_for_categories_scopes_exact_keys():

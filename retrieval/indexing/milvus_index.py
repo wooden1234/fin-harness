@@ -40,6 +40,10 @@ def _ensure_collection(client: Any, category: str, *, rebuild: bool) -> str:
     schema.add_field("chunk_id", DataType.VARCHAR, is_primary=True, max_length=160)
     schema.add_field("embedding", DataType.FLOAT_VECTOR, dim=settings.MILVUS_DIM)
     schema.add_field("doc_id", DataType.VARCHAR, max_length=96)
+    schema.add_field("ticker", DataType.VARCHAR, max_length=32)
+    schema.add_field("issuer", DataType.VARCHAR, max_length=256)
+    schema.add_field("fiscal_year", DataType.INT64)
+    schema.add_field("year", DataType.INT64)
     schema.add_field("category", DataType.VARCHAR, max_length=64)
     schema.add_field("source", DataType.VARCHAR, max_length=512)
     schema.add_field("section_path", DataType.VARCHAR, max_length=1024)
@@ -77,10 +81,19 @@ def _chunk_record(chunk: Any, embedding: list[float]) -> dict[str, Any]:
     chunk_index = _to_int(metadata.get("chunk_index")) or 0
     chunk_id = str(metadata.get("chunk_id") or f"{doc_id}:L3:{chunk_index:06d}")
     text = str(getattr(chunk, "text", "") or "")
+    fiscal_year = _to_int(metadata.get("fiscal_year"))
+    effective_date = str(metadata.get("effective_date") or "")
+    year = fiscal_year
+    if year is None and len(effective_date) >= 4:
+        year = _to_int(effective_date[:4])
     return {
         "chunk_id": chunk_id,
         "embedding": embedding,
         "doc_id": doc_id,
+        "ticker": str(metadata.get("ticker") or ""),
+        "issuer": str(metadata.get("issuer") or ""),
+        "fiscal_year": fiscal_year or 0,
+        "year": year or 0,
         "category": str(metadata.get("category") or ""),
         "source": str(metadata.get("source") or ""),
         "section_path": str(metadata.get("section_path") or ""),

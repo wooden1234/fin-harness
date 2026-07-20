@@ -52,10 +52,6 @@ class Settings(BaseSettings):
     ES_BM25F_TITLE_WEIGHT: float = 5.0
     ES_BM25F_SECTION_WEIGHT: float = 4.0
     ES_BM25F_SOURCE_WEIGHT: float = 2.0
-    ES_BM25F_TITLE_PHRASE_BOOST: float = 3.0
-    ES_BM25F_SECTION_PHRASE_BOOST: float = 2.5
-    ES_BM25F_MAX_PHRASE_QUERIES: int = 4
-    ES_BM25F_MIN_PHRASE_LENGTH: int = 2
     ES_BM25_MODE: str = "combined_fields"
 
     # Milvus（向量检索）
@@ -114,6 +110,7 @@ class Settings(BaseSettings):
         "https://dashscope.aliyuncs.com/compatible-api/v1/reranks"
     )
     RERANK_CANDIDATE_TOP_K: int = 20
+    RERANK_MIN_SCORE: float = 0.0
     RERANK_TIMEOUT_SEC: float = 30.0
     RERANK_RETURN_DOCUMENTS: bool = True
 

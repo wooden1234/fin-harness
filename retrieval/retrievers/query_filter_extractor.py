@@ -17,6 +17,11 @@ from retrieval.core.filters import (
     MetadataFilters,
     supported_filter_keys,
 )
+from retrieval.retrievers.query_constraints import (
+    normalize_query_entity_filters,
+    parse_query_constraints,
+)
+from retrieval.retrievers.json_utils import parse_json_payload
 
 logger = get_logger(service="query_filter_extractor")
 
@@ -26,6 +31,16 @@ _TICKER_PATTERN = re.compile(r"^\d{6}$")
 _GENERIC_SOURCE_PATTERN = re.compile(
     r"^(报告|年报|年度报告|研报|研究报告|白皮书|政策|政策文件)$"
 )
+_DOCUMENT_YEAR_PATTERN = re.compile(
+    r"20\d{2}年?(?:第?[一二三四]季度)?(?:年报|年度报告|财报|研究报告|研报|白皮书|政策|规划|通知|办法|报告|版本|版)"
+)
+_YEAR_TARGET_PATTERN = re.compile(
+    r"20\d{2}年?(?:收入|营收|利润|GMV|市场规模|资本开支|不良贷款率|占比|数量|价格|采购单价)"
+)
+_YEAR_PREDICTION_PATTERN = re.compile(
+    r"(?:预计|预测|目标|达到|之后|以后).{0,12}20\d{2}年?(?:收入|营收|利润|GMV|市场规模|资本开支|占比|数量|价格|采购单价)"
+)
+_HISTORICAL_CUTOFF_YEAR_PATTERN = re.compile(r"截至\s*20\d{2}年?(?:底|年底|年末|年终)")
 
 
 class QueryFilterDecision(BaseModel):
@@ -109,12 +124,14 @@ def _system_prompt() -> str:
 字段含义：
 - year：用于过滤文档的报告/财务年度；annual_reports 中出现“2024年营业收入/2025年研发费用”等明确财务年份时必须提取
 - year：不要提取“预计到2028年”“到2027年目标”“2026年市场规模预测”等正文预测/目标年份，除非问题明确询问该年份对应的报告版本
+- year：不要提取“截至2024年底/截至2024年末”等正文事实时间边界；这不是文档报告年份
 - ticker：六位股票代码
 - doc_id：问题中明确出现的 PDF 文档 ID，格式通常为 PDF-...
 - source：问题中明确指定的具体来源、报告名称或文件名；“报告/年报/研报/白皮书”等通用词不能作为 source
 - issuer：问题中明确指定的发布机构、研究机构或发行方
 
 无法确定时返回 null。confidence 为每个非空字段给出 0 到 1 的置信度。
+字符串内部不要使用未转义的 ASCII 双引号，如需引用词语请使用中文引号“”。
 不要输出 category；文档类型由另一个路由器处理。只输出 JSON。"""
 
 
@@ -140,7 +157,7 @@ class QueryFilterExtractor:
             if min_confidence is None
             else min_confidence
         )
-        self._cache: dict[tuple[str, tuple[str, ...]], QueryFilterExtraction] = {}
+        self._cache: dict[tuple[str, tuple[str, ...], tuple[tuple[str, Any], ...]], QueryFilterExtraction] = {}
 
     def _get_llm(self) -> BaseChatModel:
         if self._llm is None:
@@ -155,8 +172,7 @@ class QueryFilterExtractor:
         if raw.startswith("```"):
             raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
             raw = re.sub(r"\s*```$", "", raw)
-        match = re.search(r"\{.*\}|\[.*\]", raw, flags=re.DOTALL)
-        payload = json.loads(match.group(0) if match else raw)
+        payload = parse_json_payload(raw)
         if isinstance(payload, list):
             if len(payload) == 1 and isinstance(payload[0], dict):
                 payload = payload[0]
@@ -187,6 +203,8 @@ class QueryFilterExtractor:
     def _response_text(response: Any) -> str:
         content = getattr(response, "content", response)
         if isinstance(content, dict):
+            if isinstance(content.get("text"), str):
+                return content["text"]
             return json.dumps(content, ensure_ascii=False)
         if isinstance(content, list):
             return "".join(
@@ -201,6 +219,7 @@ class QueryFilterExtractor:
             SystemMessage(content=_system_prompt()),
             HumanMessage(content=_human_prompt(query, categories)),
         ]
+        response: Any = None
         try:
             response = llm.invoke(messages)
             return self._parse_text(self._response_text(response))
@@ -211,24 +230,48 @@ class QueryFilterExtractor:
                     f"{'.'.join(str(item) for item in error.get('loc', ())) or 'root'}:{error.get('type', 'invalid')}"
                     for error in exc.errors()
                 )
+            else:
+                detail = str(exc)
             logger.warning(
-                "query_filter_extractor invoke or parse failed; use no metadata filters error={} detail={}",
+                "query_filter_extractor invoke or parse failed; use no metadata filters "
+                "error={} detail={} response_preview={!r}",
                 type(exc).__name__,
                 detail or "unavailable",
+                self._response_text(response)[:300] if response is not None else "",
             )
             raise
+
+    @staticmethod
+    def _allow_year_filter(query: str, knowledge_bases: list[str]) -> bool:
+        """仅在年份像文档版本时下推，避免误把正文事实年份当成文档年份。"""
+        if _YEAR_PREDICTION_PATTERN.search(query):
+            return False
+        if _DOCUMENT_YEAR_PATTERN.search(query):
+            return True
+        # “截至某年底”通常是正文事实的时间边界，不是文档版本年份。
+        if _HISTORICAL_CUTOFF_YEAR_PATTERN.search(query):
+            return False
+        categories = set(knowledge_bases)
+        if categories and categories <= {"annual_reports"}:
+            return True
+        if "research_reports" in categories and not _YEAR_TARGET_PATTERN.search(query):
+            return True
+        return False
 
     def _validated_filters(
         self,
         decision: QueryFilterDecision,
         *,
         knowledge_bases: list[str],
+        query: str,
     ) -> MetadataFilters:
         allowed = supported_filter_keys(knowledge_bases or None)
         result: MetadataFilters = {}
         for field in _FIELDS:
             value: Any = getattr(decision, field)
             if value in (None, "") or field not in allowed:
+                continue
+            if field == "year" and not self._allow_year_filter(query, knowledge_bases):
                 continue
             confidence = float(decision.confidence.get(field, 0.0))
             if confidence < self.min_confidence:
@@ -241,18 +284,44 @@ class QueryFilterExtractor:
         query: str,
         *,
         knowledge_bases: list[str] | None = None,
+        user_filters: MetadataFilters | None = None,
     ) -> QueryFilterExtraction:
         categories = tuple(str(value) for value in (knowledge_bases or []) if value)
-        key = (query.strip(), categories)
+        normalized_user_filters = tuple(
+            sorted((str(field), repr(value)) for field, value in (user_filters or {}).items())
+        )
+        key = (query.strip(), categories, normalized_user_filters)
         cached = self._cache.get(key)
         if cached is not None:
             return cached
 
+        rule_plan = parse_query_constraints(
+            key[0],
+            knowledge_bases=list(categories),
+            user_filters=user_filters,
+        )
+        rule_filters = dict(rule_plan.filters)
+
+        # L1 已得到明确硬约束且没有字段语义歧义时，不调用 LLM。
+        if rule_filters and not rule_plan.unresolved:
+            result = QueryFilterExtraction(rule_filters, False, "rules")
+            self._cache[key] = result
+            return result
+
         try:
             decision = self._invoke(key[0], categories)
-            filters = self._validated_filters(decision, knowledge_bases=list(categories))
+            filters = self._validated_filters(
+                decision,
+                knowledge_bases=list(categories),
+                query=key[0],
+            )
+            filters = normalize_query_entity_filters(
+                filters,
+                knowledge_bases=list(categories),
+            )
+            filters = {**filters, **rule_filters}
             if filters:
-                result = QueryFilterExtraction(filters, True, "llm")
+                result = QueryFilterExtraction(filters, True, "rules_then_llm")
             else:
                 result = QueryFilterExtraction(
                     {},

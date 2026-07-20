@@ -22,7 +22,9 @@ from retrieval.core.collections import (
 from retrieval.core.filters import (
     MetadataFilters,
     filter_categories,
+    filters_for_category,
     merge_filters,
+    metadata_matches,
 )
 from retrieval.core.kb_contract import RetrievalTrace, apply_on_empty_policy
 from retrieval.retrievers.bm25 import bm25_scores
@@ -144,29 +146,42 @@ class VectorRetriever(Retriever):
             if not self._client.has_collection(name):
                 logger.warning("milvus collection missing category={} collection={}", category, name)
                 continue
+            category_filters = filters_for_category(filters, category)
+            search_kwargs: dict[str, Any] = {
+                "collection_name": name,
+                "data": [query_embedding],
+                "limit": per_store_k,
+                "output_fields": [
+                    "chunk_id",
+                    "doc_id",
+                    "ticker",
+                    "issuer",
+                    "fiscal_year",
+                    "year",
+                    "category",
+                    "source",
+                    "section_path",
+                    "block_type",
+                    "parent_chunk_id",
+                    "root_chunk_id",
+                    "chunk_index",
+                    "page_num",
+                    "text",
+                    "metadata",
+                ],
+                "search_params": _milvus_search_params(per_store_k),
+            }
+            filter_expr = _milvus_filter_expr(category_filters)
+            if filter_expr:
+                search_kwargs["filter"] = filter_expr
             try:
-                results = self._client.search(
-                    collection_name=name,
-                    data=[query_embedding],
-                    limit=per_store_k,
-                    output_fields=[
-                        "chunk_id",
-                        "doc_id",
-                        "category",
-                        "source",
-                        "section_path",
-                        "block_type",
-                        "parent_chunk_id",
-                        "root_chunk_id",
-                        "chunk_index",
-                        "page_num",
-                        "text",
-                        "metadata",
-                    ],
-                    search_params=_milvus_search_params(per_store_k),
-                )
+                results = self._client.search(**search_kwargs)
             except Exception as exc:
-                logger.warning("milvus search failed category={} error={}", category, exc)
+                logger.warning(
+                    "milvus filtered search failed category={} error={}",
+                    category,
+                    type(exc).__name__,
+                )
                 continue
 
             for raw_hit in _flatten_milvus_results(results):
@@ -179,6 +194,10 @@ class VectorRetriever(Retriever):
                 metadata.setdefault("collection", name)
                 metadata.setdefault("chunk_id", entity.get("chunk_id") or raw_hit.get("id"))
                 metadata.setdefault("doc_id", entity.get("doc_id"))
+                metadata.setdefault("ticker", entity.get("ticker"))
+                metadata.setdefault("issuer", entity.get("issuer"))
+                metadata.setdefault("fiscal_year", entity.get("fiscal_year"))
+                metadata.setdefault("year", entity.get("year"))
                 metadata.setdefault("source", entity.get("source"))
                 metadata.setdefault("section_path", entity.get("section_path"))
                 metadata.setdefault("block_type", entity.get("block_type"))
@@ -186,6 +205,8 @@ class VectorRetriever(Retriever):
                 metadata.setdefault("root_chunk_id", entity.get("root_chunk_id"))
                 metadata.setdefault("chunk_index", entity.get("chunk_index"))
                 metadata.setdefault("page_num", entity.get("page_num"))
+                if not metadata_matches(metadata, category_filters):
+                    continue
                 metadata["vector_score"] = score
                 hits.append(
                     RetrievalHit(
@@ -214,7 +235,7 @@ class VectorRetriever(Retriever):
                 lexical_hits=0,
             )
             self.last_trace = trace
-            return hits
+        return hits
 
 
 class HybridRetriever(Retriever):
@@ -230,6 +251,7 @@ class HybridRetriever(Retriever):
         candidate_top_k: int | None = None,
         fusion_mode: str = "rrf",
         rrf_k: int = 60,
+        rerank_min_score: float | None = None,
     ):
         self.categories = categories or list(get_collection_registry().keys())
         self.top_k = top_k
@@ -248,8 +270,15 @@ class HybridRetriever(Retriever):
             int(settings.RERANK_CANDIDATE_TOP_K or 0),
             self.top_k,
         )
+        configured_min_score = (
+            settings.RERANK_MIN_SCORE
+            if rerank_min_score is None
+            else rerank_min_score
+        )
+        self.rerank_min_score = max(float(configured_min_score or 0.0), 0.0)
         self.last_rerank_status = "not_run"
         self.last_rerank_error = ""
+        self.last_rerank_hits: list[RetrievalHit] = []
         self.vector_retriever = VectorRetriever(
             categories=self.categories,
             top_k=self.candidate_top_k,
@@ -278,6 +307,7 @@ class HybridRetriever(Retriever):
         k = top_k or self.top_k
         self.last_rerank_status = "not_run"
         self.last_rerank_error = ""
+        self.last_rerank_hits = []
         filters = merge_filters(self.metadata_filters, metadata_filters)
         candidate_k = max(self.candidate_top_k, k * 4)
         active_categories = _filtered_categories(self.categories, filters)
@@ -288,12 +318,12 @@ class HybridRetriever(Retriever):
             top_k=candidate_k,
             metadata_filters=filters,
             enforce_on_empty=False,
-        )
+        ) or []
         lexical_hits = self._lexical_search(
             query,
             top_k=candidate_k,
             metadata_filters=filters,
-        )
+        ) or []
         fusion_top_k = max(k, self.rerank_candidate_top_k) if self.rerank_enabled else k
 
         if not vector_hits and not lexical_hits:
@@ -337,6 +367,8 @@ class HybridRetriever(Retriever):
             )
         # rerank 先确定最终 top-k，之后只对这些命中做父节点合并。
         hits = self._rerank_hits(query, hits, top_k=k)
+        # 评估需要使用 rerank 后的叶子 chunk，避免父节点合并改变 chunk/page 召回口径。
+        self.last_rerank_hits = list(hits)
         hits = _auto_merge_parent_hits(hits, top_k=k)
         hits, trace = apply_on_empty_policy(
             hits,
@@ -473,6 +505,14 @@ class HybridRetriever(Retriever):
         if not ordered:
             return fallback("invalid_rerank_result")
 
+        # 只在整个查询的最高相关度不足时拒绝返回，避免逐条截断破坏可回答问题的上下文召回。
+        if self.rerank_min_score > 0.0 and ordered[0].score < self.rerank_min_score:
+            self.last_rerank_status = "below_threshold"
+            self.last_rerank_error = (
+                f"top_score={ordered[0].score:.6f} min_score={self.rerank_min_score:.6f}"
+            )
+            return []
+
         for index, hit in enumerate(candidate_hits):
             if index in seen:
                 continue
@@ -495,6 +535,7 @@ def get_retriever(
     fusion_mode: str = "rrf",
     rrf_k: int = 60,
     vector_weight: float = 0.65,
+    rerank_min_score: float | None = None,
 ) -> Retriever:
     if hybrid:
         return HybridRetriever(
@@ -505,6 +546,7 @@ def get_retriever(
             fusion_mode=fusion_mode,
             rrf_k=rrf_k,
             vector_weight=vector_weight,
+            rerank_min_score=rerank_min_score,
         )
     return VectorRetriever(
         categories=categories,
@@ -532,6 +574,7 @@ def get_pdf_retriever(
     similarity_threshold: float | None = None,
     metadata_filters: MetadataFilters | None = None,
     hybrid: bool = True,
+    rerank_min_score: float | None = None,
 ) -> Retriever:
     """检索 PDF 切块集合（默认全部 PDF 类别，不含 FAQ）。"""
     return get_retriever(
@@ -540,6 +583,7 @@ def get_pdf_retriever(
         similarity_threshold=similarity_threshold,
         metadata_filters=metadata_filters,
         hybrid=hybrid,
+        rerank_min_score=rerank_min_score,
     )
 
 
@@ -865,6 +909,8 @@ def _rrf_fuse_hits(
     ranks_by_key: dict[str, dict[str, int]] = {}
 
     for list_name, ranked in ranked_lists:
+        if not ranked:
+            continue
         for rank, hit in enumerate(ranked, 1):
             key = _hit_key(hit)
             by_key.setdefault(key, hit)
@@ -988,6 +1034,40 @@ def _milvus_search_params(limit: int) -> dict[str, Any]:
         "metric_type": settings.MILVUS_METRIC_TYPE,
         "params": params,
     }
+
+
+def _milvus_filter_expr(filters: MetadataFilters | None) -> str:
+    """将可安全下推的精确字段转换为 Milvus 标量过滤表达式。"""
+    filters = filters or {}
+    clauses: list[str] = []
+
+    def values(value: Any) -> list[Any]:
+        if value in (None, "", [], ()):
+            return []
+        if isinstance(value, (list, tuple, set)):
+            return [item for item in value if item not in (None, "")]
+        return [value]
+
+    def quoted(value: Any) -> str:
+        return "'" + str(value).replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+    for field in ("doc_id", "ticker", "issuer"):
+        items = values(filters.get(field))
+        if items:
+            clauses.append(f"{field} in [{', '.join(quoted(item) for item in items)}]")
+
+    years = values(filters.get("year", filters.get("fiscal_year")))
+    if years:
+        normalized: list[str] = []
+        for value in years:
+            try:
+                normalized.append(str(int(value)))
+            except (TypeError, ValueError):
+                continue
+        if normalized:
+            clauses.append(f"year in [{', '.join(normalized)}]")
+
+    return " and ".join(clauses)
 
 
 def _rerank_text(hit: RetrievalHit) -> str:

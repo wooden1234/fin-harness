@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -18,8 +17,14 @@ from retrieval.retrievers.pdf_kb_router_prompts import (
     build_pdf_kb_route_human_prompt,
     build_pdf_kb_route_system_prompt,
 )
+from retrieval.retrievers.query_constraints import parse_query_constraints
+from retrieval.retrievers.json_utils import parse_json_payload
 
 logger = get_logger(service="pdf_kb_router")
+
+_RESEARCH_CUE_RE = re.compile(
+    r"研报|研究报告|券商|证券公司|机构观点|目标价|投资评级|估值方法|盈利预测"
+)
 
 
 class PdfKbRouteDecision(BaseModel):
@@ -145,6 +150,24 @@ class PdfKbRouter:
                 seen.add(value)
         return ordered
 
+    @staticmethod
+    def _augment_categories(query: str, categories: list[str]) -> list[str]:
+        """将高精度规则候选与模型候选合并，不覆盖模型判断。"""
+        annual_plan = parse_query_constraints(
+            query,
+            knowledge_bases=["annual_reports"],
+        )
+        has_annual_identity = bool(
+            annual_plan.filters.get("ticker") and annual_plan.filters.get("year")
+        )
+        if (
+            has_annual_identity
+            and not _RESEARCH_CUE_RE.search(query)
+            and "annual_reports" not in categories
+        ):
+            return ["annual_reports", *categories]
+        return categories
+
     def _build_messages(self, query: str) -> list[SystemMessage | HumanMessage]:
         return [
             SystemMessage(content=self._resolve_system_prompt()),
@@ -158,8 +181,9 @@ class PdfKbRouter:
         if raw.startswith("```"):
             raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
             raw = re.sub(r"\s*```$", "", raw)
-        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-        payload = json.loads(match.group(0) if match else raw)
+
+        # 使用 JSONDecoder 逐个尝试对象起点，避免贪婪正则跨越多个对象或正文中的大括号。
+        payload = parse_json_payload(raw)
         if not isinstance(payload, dict):
             raise ValueError("route payload must be a JSON object")
         return PdfKbRouteDecision.model_validate(payload)
@@ -168,24 +192,34 @@ class PdfKbRouter:
     def _response_text(response: Any) -> str:
         content = getattr(response, "content", response)
         if isinstance(content, dict):
+            if isinstance(content.get("text"), str):
+                return content["text"]
             return json.dumps(content, ensure_ascii=False)
         if isinstance(content, list):
-            return "".join(
-                block.get("text", str(block)) if isinstance(block, dict) else str(block)
-                for block in content
-            )
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, dict) and isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+                else:
+                    parts.append(str(block))
+            return "".join(parts)
         return str(content)
 
     def _invoke_decision(self, query: str) -> PdfKbRouteDecision:
         llm = self._get_llm()
         messages = self._build_messages(query)
+        response: Any = None
         try:
             response = llm.invoke(messages)
             return self._parse_decision_text(self._response_text(response))
         except Exception as exc:
+            response_text = self._response_text(response) if response is not None else ""
             logger.warning(
-                "pdf_kb_router invoke failed; fallback to all categories error={}",
+                "pdf_kb_router invoke failed; fallback to all categories "
+                "error={} detail={} response_preview={!r}",
                 type(exc).__name__,
+                str(exc),
+                response_text[:300],
             )
             return PdfKbRouteDecision(
                 categories=[],
@@ -229,6 +263,7 @@ class PdfKbRouter:
             )
 
         categories = self._normalize_categories(list(decision.categories or []))
+        categories = self._augment_categories(key, categories)
         uncertain = bool(decision.uncertain)
         fallback_all = False
         all_ids = list(routable_kb_ids())

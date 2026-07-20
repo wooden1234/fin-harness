@@ -1,0 +1,30 @@
+# PDF 查询实体别名词典；新增别名无需修改代码。
+version: "1.0"
+entities:
+  - field: ticker
+    value: CATL
+    aliases: [宁德时代, CATL]
+  - field: ticker
+    value: TCEHY
+    aliases: [腾讯, 腾讯控股, TCEHY]
+  - field: ticker
+    value: "688256"
+    aliases: [寒武纪, 寒武纪-U, 688256]
+  - field: ticker
+    value: "688047"
+    aliases: [龙芯中科, 688047]
+  - field: issuer
+    value: Guohai Securities
+    aliases: [国海证券, Guohai Securities]
+  - field: issuer
+    value: Orient Securities
+    aliases: [东方证券, Orient Securities]
+  - field: issuer
+    value: Soochow Securities
+    aliases: [东吴证券, Soochow Securities]
+  - field: issuer
+    value: Dongxing Securities
+    aliases: [东兴证券, Dongxing Securities]
+  - field: issuer
+    value: Schneider
+    aliases: [施耐德, 施耐德电气, Schneider, Schneider Electric]

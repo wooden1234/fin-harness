@@ -1,6 +1,7 @@
 from retrieval.retrievers.retriever import (
     HybridRetriever,
     RetrievalHit,
+    VectorRetriever,
     _auto_merge_parent_hits,
     _rrf_fuse_hits,
     _scale_vector_diversity_penalty,
@@ -51,6 +52,58 @@ def test_rrf_single_list_still_ranks_by_position():
     assert "bm25_rank" not in fused[0].metadata
 
 
+def test_rrf_tolerates_none_ranked_list():
+    vector_hits = [_hit("a", 0.9), _hit("b", 0.8)]
+
+    fused = _rrf_fuse_hits(
+        [("vector", vector_hits), ("lexical", None)],
+        top_k=2,
+        rrf_k=60,
+    )
+
+    assert [hit.node_id for hit in fused] == ["a", "b"]
+
+
+def test_vector_search_returns_list_when_enforce_on_empty_false(monkeypatch):
+    retriever = VectorRetriever.__new__(VectorRetriever)
+    retriever.top_k = 5
+    retriever.metadata_filters = {}
+    retriever.categories = ["annual_reports"]
+    retriever.similarity_threshold = None
+    retriever.candidate_multiplier = 1
+    retriever.diversify = False
+    retriever.last_trace = None
+    class FakeClient:
+        def has_collection(self, name):
+            return True
+
+        def search(self, **kwargs):
+            return [[{"id": "a", "distance": 0.1, "entity": {"text": "text-a", "chunk_id": "a"}}]]
+
+    retriever._client = FakeClient()
+    retriever._embed_model = type(
+        "EmbedModel",
+        (),
+        {"get_query_embedding": lambda self, query: [0.1, 0.2]},
+    )()
+
+    monkeypatch.setattr(retriever, "_ensure_milvus", lambda: True)
+    monkeypatch.setattr(
+        "retrieval.retrievers.retriever._filtered_categories",
+        lambda categories, filters: ["annual_reports"],
+    )
+    monkeypatch.setattr(
+        "retrieval.retrievers.retriever.collection_name",
+        lambda category: category,
+    )
+
+    hits = retriever.search("q", top_k=1, enforce_on_empty=False)
+
+    assert hits is not None
+    assert len(hits) == 1
+    assert hits[0].node_id == "a"
+
+
 def test_rerank_failure_keeps_fusion_score_and_marks_fallback(monkeypatch):
     retriever = HybridRetriever.__new__(HybridRetriever)
     retriever.rerank_enabled = True
@@ -78,6 +131,7 @@ def test_rerank_success_changes_score_type(monkeypatch):
     retriever.rerank_provider = "test"
     retriever.rerank_model = "test"
     retriever.rerank_candidate_top_k = 20
+    retriever.rerank_min_score = 0.0
     monkeypatch.setattr(
         "retrieval.retrievers.retriever.rerank_documents",
         lambda **_: [type("Result", (), {"index": 0, "score": 0.9})()],
@@ -88,6 +142,24 @@ def test_rerank_success_changes_score_type(monkeypatch):
     assert result[0].score_type == "rerank"
     assert result[0].metadata["rerank_status"] == "success"
     assert retriever.last_rerank_status == "success"
+
+
+def test_rerank_query_gate_returns_empty_when_top_score_is_too_low(monkeypatch):
+    retriever = HybridRetriever.__new__(HybridRetriever)
+    retriever.rerank_enabled = True
+    retriever.rerank_provider = "test"
+    retriever.rerank_model = "test"
+    retriever.rerank_candidate_top_k = 20
+    retriever.rerank_min_score = 0.7
+    monkeypatch.setattr(
+        "retrieval.retrievers.retriever.rerank_documents",
+        lambda **_: [type("Result", (), {"index": 0, "score": 0.69})()],
+    )
+
+    result = retriever._rerank_hits("q", [_hit("a", 0.016)], top_k=1)
+
+    assert result == []
+    assert retriever.last_rerank_status == "below_threshold"
 
 
 def test_weighted_fusion_kept_for_backward_compat():
