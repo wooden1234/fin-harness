@@ -19,14 +19,6 @@ ALLOWED_INTENTS = frozenset(
 ALLOWED_TASK_TYPES = frozenset({"faq", "pdf", "financial_query", "web_search"})
 MAX_SUBTASKS = 4
 
-# 兼容旧 planner 输出（type 维度）：按数据源反推最接近的意图
-_LEGACY_TYPE_TO_INTENT = {
-    "faq": "concept_explain",
-    "pdf": "document_qa",
-    "financial_query": "structured_metric",
-    "web_search": "market_event",
-}
-
 _WS_RE = re.compile(r"\s+")
 
 
@@ -59,18 +51,10 @@ def _resolve_intent(task: SubTask, issues: list[str]) -> str | None:
     intent = str(getattr(task, "intent", "") or "").strip()
     if intent in ALLOWED_INTENTS:
         return intent
-
-    task_type = str(task.type or "").strip()
     if intent:
         issues.append(f"unknown_intent:{intent}")
-        return None
-    # LLM 未输出 intent（如旧输出格式）：从 type 反推
-    if task_type in _LEGACY_TYPE_TO_INTENT:
-        return _LEGACY_TYPE_TO_INTENT[task_type]
-    if task_type == "general":
-        issues.append("forbidden_type:general")
-        return None
-    issues.append(f"unknown_type:{task_type or '<empty>'}")
+    else:
+        issues.append("missing_intent")
     return None
 
 

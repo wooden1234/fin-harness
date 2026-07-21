@@ -81,12 +81,11 @@ def _to_citations(results: list[WebSearchResult], *, sub_task_id: str = "") -> l
 
 
 def _format_sources(citations: list[Citation]) -> str:
+    """供内部 context 使用的来源摘要：只用标题，不拼原始 URL（避免 /goto? 脏链进回答）。"""
     lines = []
     for index, citation in enumerate(citations, start=1):
         title = citation.get("title") or citation.get("source") or "来源"
-        url = citation.get("url") or ""
-        suffix = f" - {url}" if url else ""
-        lines.append(f"[{index}] {title}{suffix}")
+        lines.append(f"[{index}] {title}")
     return "\n".join(lines)
 
 
@@ -150,19 +149,30 @@ async def search_web(query: str) -> WebSearchResponse:
     return await _search_tavily(query)
 
 
+def _is_chain_fallback(state: FinAgentState) -> bool:
+    """证据链降级到 web 时，不向 messages 推送中间答案，交给 summarize。"""
+    chain = [str(item) for item in (state.get("evidence_chain") or []) if str(item)]
+    return bool(chain) and chain[0] != "web_search"
+
+
+def _public_messages(answer: str, *, suppress: bool) -> list:
+    return [] if suppress else [AIMessage(content=answer)]
+
+
 async def web_search_agent(
     state: FinAgentState,
     config: RunnableConfig = None,
 ) -> dict:
     query = _query_from_state(state)
     sub_task_id = str(state.get("sub_task_id") or "")
+    suppress_messages = _is_chain_fallback(state)
 
     logger.info("web_search query={} sub_task_id={}", query[:80], sub_task_id)
 
     if not query:
         answer = WEB_SEARCH_NO_RESULT_ANSWER
         return {
-            "messages": [AIMessage(content=answer)],
+            "messages": [],
             "citations": [],
             "task_results": [
                 {
@@ -183,7 +193,7 @@ async def web_search_agent(
         logger.exception("web search failed")
         answer = WEB_SEARCH_BUSY_ANSWER
         return {
-            "messages": [AIMessage(content=answer)],
+            "messages": [],
             "citations": [],
             "task_results": [
                 {
@@ -209,19 +219,23 @@ async def web_search_agent(
     # 无搜索结果（未配置 / 无可靠来源）时明确 uncovered，交给 summarize 说明依据不足
     coverage = "covered" if citations else "uncovered"
 
+    # 引用交给 citations 字段给前端展示，不把 URL 列表塞进回答正文
+    context = f"[联网搜索] {answer}"
     if citations:
-        sources = _format_sources(citations)
-        answer = f"{answer}\n\n参考来源：\n{sources}"
+        context = f"{context}\n相关来源标题：\n{_format_sources(citations)}"
 
     return {
-        "messages": [AIMessage(content=answer)],
+        "messages": _public_messages(
+            answer,
+            suppress=suppress_messages or coverage == "uncovered",
+        ),
         "citations": citations,
         "task_results": [
             {
                 "sub_task_id": sub_task_id,
                 "question": query,
                 "type": "web_search",
-                "context": f"[联网搜索] {answer}",
+                "context": context,
                 "citations": citations,
                 "coverage": coverage,
                 **({} if citations else {"fallback_reason": "web_no_result"}),

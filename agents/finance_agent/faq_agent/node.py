@@ -6,7 +6,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
 from agents.llm import get_faq_llm
-from agents.finance_agent.faq_agent.prompts import FAQ_BUSY_ANSWER, FAQ_SYSTEM_PROMPT, NO_CONTEXT_ANSWER
+from agents.finance_agent.faq_agent.prompts import FAQ_BUSY_ANSWER, FAQ_SYSTEM_PROMPT
 from agents.states import Citation, FinAgentState
 from app.core.config import settings
 from app.core.logger import get_logger
@@ -68,7 +68,8 @@ async def faq_agent(
         # 未命中或弱相关命中都视为 uncovered：禁止用弱相关片段硬答
         logger.warning("faq_agent no_context hits={} top1_score={}", len(hits), hits[0].score if hits else None)
         return {
-            "messages": [AIMessage(content=NO_CONTEXT_ANSWER)],
+            # 拒答/降级：不推 AIMessage，避免「未找到…」流到前端；由 web/summarize 收口。
+            "messages": [],
             "citations": [],
             "task_results": [
                 {

@@ -69,11 +69,10 @@ async def agent_query(
     thread_config = make_thread_config(thread_id)
     graph = get_graph()
     input_payload = {"messages": [HumanMessage(content=query)]}
+    # 只流式输出最终答案节点：多子任务由 summarize 汇总后再推 token，
+    # 避免 faq/pdf/web 并行完成时先后刷出多段中间回答。
     STREAMABLE_NODES = frozenset({
-        "faq_agent",
-        "pdf_agent",
         "general_agent",
-        "web_search_agent",
         "summarize",
     })
     async def process_stream():

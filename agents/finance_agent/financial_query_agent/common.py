@@ -56,7 +56,8 @@ def financial_query_output(
     if coverage == "uncovered":
         task_result["fallback_to_web"] = True
     return {
-        "messages": [AIMessage(content=answer)],
+        # 拒答/降级：不推 AIMessage，避免中间文案流到前端；由 web/summarize 收口。
+        "messages": [] if coverage == "uncovered" else [AIMessage(content=answer)],
         "task_results": [task_result],
         "steps": [step],
     }

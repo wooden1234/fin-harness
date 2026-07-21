@@ -93,9 +93,6 @@ def route_after_dispatch_workers(state: FinAgentState) -> list[Send]:
     return sends
 
 
-route_after_supervisor = route_after_dispatch_workers
-
-
 def _result_unresolved(result: dict) -> bool:
     """worker 自评证据不足（coverage=uncovered 或旧 fallback_to_web）。"""
     if result.get("fallback_to_web"):
@@ -159,5 +156,4 @@ __all__ = [
     "dispatch_workers_node",
     "route_after_dispatch_workers",
     "route_after_retrieval_worker",
-    "route_after_supervisor",
 ]

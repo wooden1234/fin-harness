@@ -20,8 +20,18 @@ logger = get_logger(service="summarize")
 _COVERAGE_RANK = {"covered": 4, "partial": 3, "clarify": 2, "uncovered": 1}
 
 
+_SOURCE_LABEL = {
+    "faq": "知识库",
+    "pdf": "文档库",
+    "financial_query": "结构化财务数据",
+    "web_search": "公开网页",
+}
+
+
 def _coverage_of(result: TaskResult) -> str:
-    if result.get("fallback_to_web"):
+    # fallback_to_web 只表示该路准备降级，真正覆盖度看 coverage 字段
+    # （web 成功后 coverage=covered，不应再被当成 uncovered）
+    if result.get("fallback_to_web") and str(result.get("coverage") or "") != "covered":
         return "uncovered"
     return str(result.get("coverage") or "covered")
 
@@ -47,13 +57,18 @@ def _format_task_results(task_results: list[TaskResult]) -> str:
     parts = []
     for i, tr in enumerate(task_results, start=1):
         coverage = _coverage_of(tr)
+        source = _SOURCE_LABEL.get(str(tr.get("type") or ""), str(tr.get("type") or "未知"))
         parts.append(f"### 子任务 {i}：{tr.get('question', '未知')}")
-        parts.append(f"类型：{tr.get('type', 'faq')}")
+        parts.append(f"证据来源：{source}")
         parts.append(f"覆盖状态：{coverage}")
         if coverage == "uncovered":
-            parts.append("说明：证据不足，请勿编造，应明确告知用户无可靠依据")
+            parts.append("说明：证据不足，请勿编造；回复中轻说暂未查到即可，勿写长免责声明")
         elif coverage == "clarify":
             parts.append("说明：需向用户澄清，请转述澄清问题")
+        elif str(tr.get("type")) == "web_search":
+            parts.append("说明：公开网页信息，正文可轻提「根据公开信息」，勿写口径差异长段")
+        elif str(tr.get("type")) == "pdf":
+            parts.append("说明：文档库证据，可按公开披露口径陈述，勿说成网页搜索")
         parts.append(f"结果：{tr.get('context', '无结果')}")
         parts.append("")
     return "\n".join(parts) if parts else "无检索结果"
@@ -126,11 +141,12 @@ async def summarize_node(
                 return {"summary": UNCOVERED_SUMMARY if _coverage_of(tr) == "uncovered" else ""}
             if _coverage_of(tr) == "uncovered":
                 return {"summary": UNCOVERED_SUMMARY}
-            if tr.get("type") == "financial_query":
+            # faq/pdf 成功路径已是中文成稿，可直出；联网/财务数字需改写后再给用户
+            if tr.get("type") in {"faq", "pdf"} and not context.startswith("[联网搜索]"):
+                summary = context.removeprefix("[LLM 回答] ").strip() or context
+            else:
                 human = SINGLE_TASK_HUMAN_PROMPT.format(context=context)
                 summary = await _stream_llm_summary(risk_level, human, config)
-            else:
-                summary = context
         else:
             formatted = _format_task_results(task_results)
             human = MULTI_TASK_HUMAN_PROMPT.format(formatted=formatted)

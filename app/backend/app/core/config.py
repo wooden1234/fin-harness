@@ -89,6 +89,7 @@ class Settings(BaseSettings):
     AGENT_FAQ_TEMPERATURE: float = 0.3
     FAQ_MIN_RELEVANCE_SCORE: float = 0.35
     PDF_MIN_RELEVANCE_SCORE: float = 0.35
+    PDF_RETRIEVAL_TOP_K: int = 10
     PDF_RETRIEVAL_QUALITY_MODEL_PATH: str = str(
         PROJECT_ROOT / "retrieval/models/pdf_retrieval_quality.json"
     )

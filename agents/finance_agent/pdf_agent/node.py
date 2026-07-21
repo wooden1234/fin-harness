@@ -21,12 +21,6 @@ from retrieval import RetrievalHit
 
 logger = get_logger(service="pdf_agent")
 
-PDF_NO_CONTEXT_ANSWER = (
-    "抱歉，PDF 文档库中暂未找到与您问题直接相关的内容。"
-    "您可以尝试补充报告名称、年份、政策主题或关键词，或联系人工客服。"
-)
-PDF_BUSY_ANSWER = "抱歉，PDF 文档问答服务暂时繁忙，请稍后重试。"
-
 
 def _choose_strategy(query: str) -> str:
     abstract_markers = ("为什么", "为何", "原因", "如何", "影响", "机制", "趋势")
@@ -198,8 +192,9 @@ async def pdf_agent(state: FinAgentState, config: RunnableConfig = None) -> dict
         result = await get_pdf_agent_graph().ainvoke(internal, config=config)
     except Exception:
         logger.exception("pdf_agent graph invoke failed")
+        # 降级路径不向 messages 推送 AIMessage，避免流式污染前端；由 web/summarize 收口。
         return {
-            "messages": [AIMessage(content=PDF_BUSY_ANSWER)],
+            "messages": [],
             "citations": [],
             "task_results": [{
                 "sub_task_id": sub_task_id,
@@ -239,8 +234,8 @@ async def pdf_agent(state: FinAgentState, config: RunnableConfig = None) -> dict
             "rewrite_count": int(result.get("rewrite_count") or 0),
         })
         return {
-            "messages": [AIMessage(content=PDF_NO_CONTEXT_ANSWER)],
-            # 拒答路径未进入 answer 节点，不得透传引用。
+            # 拒答/降级：不推 AIMessage，避免「暂未找到…」流到前端；证据写入 task_results。
+            "messages": [],
             "citations": [],
             "task_results": [{
                 "sub_task_id": sub_task_id,
