@@ -7,7 +7,6 @@ from typing import cast
 
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
-from langgraph.types import Overwrite
 
 from agents.llm import get_router_llm
 from agents.states import PlannerOutput, SubTask
@@ -15,6 +14,7 @@ from agents.finance_agent.planner.prompts import (
     PLANNER_REPAIR_SYSTEM_PROMPT,
     PLANNER_SYSTEM_PROMPT,
 )
+from agents.turn_workspace import reset_worker_workspace
 from app.core.logger import get_logger
 
 logger = get_logger(service="finance_agent_supervisor")
@@ -34,12 +34,11 @@ def latest_user_query(messages: list) -> str:
 
 
 def begin_turn_workspace() -> dict:
-    """每轮用户提问开始时清空中间工作区，避免 checkpoint 跨轮污染。"""
-    return {
-        "task_results": Overwrite([]),
-        "citations": Overwrite([]),
-        "summary": "",
-    }
+    """兼容旧名：plan 路径只重置 worker 输出，不 Overwrite steps。
+
+    完整临时工作区重置见 ``agents.turn_workspace.begin_turn_workspace``（guardrails 入口）。
+    """
+    return reset_worker_workspace()
 
 
 def assign_task_ids(tasks: list[SubTask]) -> list[SubTask]:
@@ -51,7 +50,7 @@ def assign_task_ids(tasks: list[SubTask]) -> list[SubTask]:
 def empty_plan(*, step: str, reason: str) -> dict:
     logger.warning("planner empty_plan step={} reason={}", step, reason)
     return {
-        **begin_turn_workspace(),
+        **reset_worker_workspace(),
         "sub_tasks": [],
         "steps": [f"{step}:{reason}"],
     }
@@ -112,15 +111,14 @@ async def ainvoke_planner(
 
 
 async def plan_with_retry(
-    query: str,
+    human_prompt: str,
     config: RunnableConfig | None,
 ) -> PlannerOutput:
     """API/超时类错误重试一次；仍失败则抛出。"""
-    human = f"用户问题：{query}"
     try:
         return await ainvoke_planner(
             system_prompt=PLANNER_SYSTEM_PROMPT,
-            human_prompt=human,
+            human_prompt=human_prompt,
             config=config,
         )
     except Exception as exc:
@@ -132,7 +130,7 @@ async def plan_with_retry(
         )
         return await ainvoke_planner(
             system_prompt=PLANNER_SYSTEM_PROMPT,
-            human_prompt=human,
+            human_prompt=human_prompt,
             config=config,
         )
 
@@ -142,16 +140,23 @@ async def repair_plan(
     raw_tasks: list[SubTask],
     issues: list[str],
     config: RunnableConfig | None,
+    *,
+    conversation_summary: str = "",
+    rewritten_query: str = "",
 ) -> PlannerOutput:
     payload = PlannerOutput(tasks=raw_tasks).model_dump_json()
-    human = (
-        f"用户问题：{query}\n"
-        f"校验问题：{', '.join(issues)}\n"
-        f"待修正输出：{payload}"
-    )
+    parts = [
+        f"此前对话摘要：\n{conversation_summary.strip() or '无'}",
+        f"当前用户问题（原文）：\n{query}",
+    ]
+    rewritten = rewritten_query.strip()
+    if rewritten and rewritten != query.strip():
+        parts.append(f"改写后的完整问题：\n{rewritten}")
+    parts.append(f"校验问题：{', '.join(issues)}")
+    parts.append(f"待修正输出：{payload}")
     return await ainvoke_planner(
         system_prompt=PLANNER_REPAIR_SYSTEM_PROMPT,
-        human_prompt=human,
+        human_prompt="\n\n".join(parts),
         config=config,
     )
 

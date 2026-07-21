@@ -5,6 +5,7 @@ from __future__ import annotations
 from langchain_core.messages import AIMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
+from agents.context import conversation_messages
 from agents.llm import get_faq_llm
 from agents.general_agent.prompts import GENERAL_BUSY_ANSWER, GENERAL_SYSTEM_PROMPT
 from agents.states import FinAgentState
@@ -17,13 +18,11 @@ async def general_agent(
     state: FinAgentState,
     config: RunnableConfig = None,
 ) -> dict:
-    history = list(state.get("messages") or [])
-    logger.info("general_agent history_messages={}", len(history))
-
     llm_messages = [
         SystemMessage(content=GENERAL_SYSTEM_PROMPT),
-        *history,
+        *conversation_messages(state),
     ]
+    logger.info("general_agent history_messages={}", len(llm_messages) - 1)
 
     try:
         llm = get_faq_llm()

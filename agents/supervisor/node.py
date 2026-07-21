@@ -7,6 +7,7 @@ from typing import Literal, cast
 from langchain_core.messages import SystemMessage
 from langchain_core.runnables import RunnableConfig
 
+from agents.context import conversation_messages
 from agents.llm import get_router_llm
 from agents.supervisor.prompts import SUPERVISOR_SYSTEM_PROMPT
 from agents.states import FinAgentState, Router
@@ -26,11 +27,13 @@ async def analyze_and_route_query(
     使用 ``with_structured_output(Router)`` 约束 LLM 输出。
     """
     model = get_router_llm()
-    history = list(state.get("messages") or [])
-    messages = [SystemMessage(content=SUPERVISOR_SYSTEM_PROMPT), *history]
+    messages = [
+        SystemMessage(content=SUPERVISOR_SYSTEM_PROMPT),
+        *conversation_messages(state),
+    ]
 
     logger.info("----- Supervisor: analyze_and_route_query -----")
-    logger.info("history_messages={}", len(history))
+    logger.info("history_messages={}", len(messages) - 1)
 
     router = cast(
        Router,

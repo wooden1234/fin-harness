@@ -1,4 +1,4 @@
-"""主图编译：START → guardrails → context_compressor → supervisor → risk_triage → plan_agent → final_answer → END。
+"""主图编译：START → guardrails → context_compressor → query_rewrite → supervisor → risk_triage → plan_agent → final_answer → END。
 
 plan_agent 作为独立子图（planner → workers → join → summarize），主图只感知一个节点。
 """
@@ -15,6 +15,7 @@ from agents.final_answer import final_answer_node
 from agents.general_agent.node import general_agent
 from agents.finance_agent import finance_agent as _finance_agent_graph
 from agents.guardrails import guardrails_edge, guardrails_node
+from agents.query_rewrite import query_rewrite_node
 from agents.risk_triage import risk_triage_edge, risk_triage_node
 from agents.supervisor import analyze_and_route_query, route_query
 
@@ -27,6 +28,7 @@ def build_graph() -> StateGraph:
 
     builder.add_node("guardrails", guardrails_node)
     builder.add_node("context_compressor", compress_context)
+    builder.add_node("query_rewrite", query_rewrite_node)
     builder.add_node("supervisor", analyze_and_route_query)
     builder.add_node("risk_triage", risk_triage_node)
     builder.add_node("general_agent", general_agent)
@@ -44,8 +46,9 @@ def build_graph() -> StateGraph:
         },
     )
 
-    # Layer 2: context_compressor → supervisor
-    builder.add_edge("context_compressor", "supervisor")
+    # Layer 2: context_compressor → query_rewrite → supervisor
+    builder.add_edge("context_compressor", "query_rewrite")
+    builder.add_edge("query_rewrite", "supervisor")
     builder.add_conditional_edges(
         "supervisor",
         route_query,
@@ -56,13 +59,13 @@ def build_graph() -> StateGraph:
         },
     )
 
-    # Layer 3: risk_triage → plan_agent / END
+    # Layer 3: risk_triage → plan_agent / final_answer
     builder.add_conditional_edges(
         "risk_triage",
         risk_triage_edge,
         {
             "plan_agent": "plan_agent",
-            "__end__": END,
+            "final_answer": "final_answer",
         },
     )
 

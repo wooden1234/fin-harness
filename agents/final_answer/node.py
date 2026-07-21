@@ -8,10 +8,20 @@ from langgraph.types import Overwrite
 
 from agents.states import FinAgentState
 from app.core.logger import get_logger
+from compliance.policies import ComplianceDecision
+from compliance.review import review_answer
 
 logger = get_logger(service="final_answer")
 
 KNOWLEDGE_SOURCE_TYPES = frozenset({"faq", "pdf", "web"})
+COMPLIANCE_BLOCKED_ANSWER = (
+    "抱歉，我不能提供保证收益、确定涨跌或直接交易指令。"
+    "我可以继续为您整理相关公开信息、数据依据和风险因素。"
+)
+COMPLIANCE_REVIEW_ERROR_ANSWER = (
+    "抱歉，当前回答未能通过合规审查，请稍后重试或联系人工服务。"
+)
+COMPLIANCE_ESCALATED_ANSWER = "该问题需要人工进一步审核，请联系人工服务。"
 
 
 def _current_sub_task_ids(state: FinAgentState) -> set[str]:
@@ -35,36 +45,58 @@ def _filter_current_turn_citations(
     return filtered
 
 
+def _review_final_answer(answer: str) -> tuple[str, ComplianceDecision]:
+    """审查最终候选答案；审查服务异常时默认阻断。"""
+    try:
+        decision = review_answer(answer)
+    except Exception:
+        logger.exception("final answer compliance review failed")
+        decision = ComplianceDecision(
+            action="block",
+            reason_code="compliance_review_error",
+            reason="合规审查异常",
+        )
+        return COMPLIANCE_REVIEW_ERROR_ANSWER, decision
+
+    if decision.action == "pass":
+        return answer, decision
+    if decision.action == "rewrite":
+        if decision.safe_answer:
+            return decision.safe_answer, decision
+        logger.error("compliance rewrite missing safe_answer")
+        fallback = ComplianceDecision(
+            action="block",
+            reason_code="compliance_rewrite_empty",
+            reason="合规改写结果为空",
+        )
+        return COMPLIANCE_REVIEW_ERROR_ANSWER, fallback
+    if decision.action == "escalate":
+        return COMPLIANCE_ESCALATED_ANSWER, decision
+    return COMPLIANCE_BLOCKED_ANSWER, decision
+
+
 async def final_answer_node(
     state: FinAgentState,
     config: RunnableConfig = None,
 ) -> dict:
     """统一格式化最终回答，附加引用来源"""
 
+    force_empty_citations = False
+    forced_action = ""
+
     if state.get("guardrails_pass") is False:
         reason = state.get("guardrails_reason", "输入超出业务范围")
         answer = f"抱歉，{reason}。我只能回答金融相关的问题，请重新提问。"
-        return {"messages": [AIMessage(content=answer)], "citations": Overwrite([])}
-
-    if state.get("risk_needs_human", False):
+        force_empty_citations = True
+    elif state.get("risk_needs_human", False):
         answer = "您的问题已转人工处理，请稍候。"
-        return {"messages": [AIMessage(content=answer)], "citations": Overwrite([])}
-
-    route = state.get("route", "general")
-    answer = ""
-
-    if route == "general":
-        for msg in reversed(list(state.get("messages") or [])):
-            if isinstance(msg, AIMessage):
-                answer = (
-                    msg.content
-                    if isinstance(msg.content, str)
-                    else str(msg.content)
-                )
-                break
+        force_empty_citations = True
+        forced_action = "escalate"
     else:
-        answer = state.get("summary", "")
-        if not answer:
+        route = state.get("route", "general")
+        answer = ""
+
+        if route == "general":
             for msg in reversed(list(state.get("messages") or [])):
                 if isinstance(msg, AIMessage):
                     answer = (
@@ -73,9 +105,28 @@ async def final_answer_node(
                         else str(msg.content)
                     )
                     break
+        else:
+            answer = state.get("summary", "")
+            if not answer:
+                for msg in reversed(list(state.get("messages") or [])):
+                    if isinstance(msg, AIMessage):
+                        answer = (
+                            msg.content
+                            if isinstance(msg.content, str)
+                            else str(msg.content)
+                        )
+                        break
 
     if not answer:
         answer = "抱歉，我暂时无法回答您的问题，请稍后重试。"
+
+    answer, compliance_decision = _review_final_answer(answer)
+    if forced_action == "escalate" and compliance_decision.action == "pass":
+        compliance_decision = ComplianceDecision(
+            action="escalate",
+            reason_code="risk_requires_human",
+            reason=str(state.get("risk_reason") or "风险分级要求人工处理"),
+        )
 
     citations = _filter_current_turn_citations(state, list(state.get("citations") or []))
 
@@ -87,16 +138,29 @@ async def final_answer_node(
             seen.add(key)
             deduped.append(c)
 
+    if force_empty_citations or compliance_decision.action in {"block", "escalate"}:
+        deduped = []
+
     logger.info(
-        "final_answer route={} len={} citations={} deduped={}",
-        route,
+        "final_answer route={} len={} citations={} deduped={} compliance_action={} reason_code={}",
+        state.get("route", "general"),
         len(answer),
         len(citations),
         len(deduped),
+        compliance_decision.action,
+        compliance_decision.reason_code,
     )
 
     return {
         "messages": [AIMessage(content=answer)],
         "citations": Overwrite(deduped),
+        # summary：本轮候选答案，收口后清空。
+        # conversation_summary：多轮会话记忆，此处不得清空。
         "summary": "",
+        # 本轮派生字段收口清空，避免跨轮残留。
+        "rewritten_query": "",
+        "rewrite_status": "",
+        "compliance_action": compliance_decision.action,
+        "compliance_reason_code": compliance_decision.reason_code,
+        "compliance_reason": compliance_decision.reason,
     }

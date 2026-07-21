@@ -20,6 +20,9 @@ from app.services.conversation_service import ConversationService
 router = APIRouter(prefix="/agent", tags=["agent"])
 logger = get_logger(service="agent")
 
+# 候选答案在 general_agent / summarize 生成时尚未通过合规审查，禁止提前发送。
+STREAMABLE_ANSWER_NODES = frozenset({"final_answer"})
+
 def _sse(payload: dict) -> str:
     """格式化为 SSE 行：data: {...}\\n\\n"""
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -65,16 +68,28 @@ async def agent_query(
     query: str = Form(...),
     conversation_id: Optional[str] = Form(None),
     current_user: User = Depends(get_current_user)):
-    thread_id = conversation_id if conversation_id else str(uuid.uuid4())
-    thread_config = make_thread_config(thread_id)
+    conversation_pk: int | None = None
+    if conversation_id is not None:
+        try:
+            conversation_pk = int(conversation_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="conversation_id 格式错误") from exc
+
+        conversation = await ConversationService.get_owned_conversation(
+            conversation_pk,
+            current_user.id,
+        )
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="会话不存在或无权访问")
+
+    conversation_key = conversation_pk if conversation_pk is not None else uuid.uuid4()
+    thread_config = make_thread_config(
+        conversation_key,
+        user_id=current_user.id,
+    )
     graph = get_graph()
     input_payload = {"messages": [HumanMessage(content=query)]}
-    # 只流式输出最终答案节点：多子任务由 summarize 汇总后再推 token，
-    # 避免 faq/pdf/web 并行完成时先后刷出多段中间回答。
-    STREAMABLE_NODES = frozenset({
-        "general_agent",
-        "summarize",
-    })
+    # 只发送 final_answer 审查后的内容，避免候选答案先于合规结果泄露。
     async def process_stream():
         assistant_full_response = ""
         generating_answer_active = False
@@ -138,7 +153,7 @@ async def agent_query(
 
                 msg, metadata = data
                 node = metadata.get("langgraph_node")
-                if node not in STREAMABLE_NODES:
+                if node not in STREAMABLE_ANSWER_NODES:
                     continue
                 if not getattr(msg, "content", None):
                     continue
@@ -178,14 +193,16 @@ async def agent_query(
                 "citations": citations,
                 "route": values.get("route"),
                 "risk_level": values.get("risk_level"),
+                "compliance_action": values.get("compliance_action"),
+                "compliance_reason_code": values.get("compliance_reason_code"),
             })
 
             # 持久化消息到数据库
-            if conversation_id and assistant_full_response:
+            if conversation_pk is not None and assistant_full_response:
                 try:
                     await ConversationService.save_message(
                         user_id=current_user.id,
-                        conversation_id=int(conversation_id),
+                        conversation_id=conversation_pk,
                         messages=[{"role": "user", "content": query}],
                         response=assistant_full_response,
                     )
@@ -200,7 +217,8 @@ async def agent_query(
             logger.exception("agent_query stream error")
             yield _sse({"type": "error", "message": str(e)})
     response = StreamingResponse(process_stream(), media_type="text/event-stream")
-    response.headers["X-Conversation-ID"] = thread_id
+    # 对外仍返回业务会话 ID；内部 thread_id 只用于 checkpoint 隔离。
+    response.headers["X-Conversation-ID"] = str(conversation_key)
     response.headers["Cache-Control"] = "no-cache"
     return response
 

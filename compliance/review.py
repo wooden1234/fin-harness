@@ -10,8 +10,8 @@ def review_answer(answer: str) -> ComplianceDecision:
     violations = find_rule_violations(answer)
     if violations:
         return ComplianceDecision(
-            passed=False,
+            action="block",
+            reason_code="forbidden_investment_expression",
             reason=f"命中合规禁用表达：{', '.join(violations)}",
-            needs_human=True,
         )
-    return ComplianceDecision(passed=True)
+    return ComplianceDecision(action="pass")

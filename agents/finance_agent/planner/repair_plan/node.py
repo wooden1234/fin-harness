@@ -21,9 +21,18 @@ async def repair_plan_node(
     query = str(state.get("planner_query") or "")
     raw_tasks = list(state.get("planner_raw_tasks") or [])
     issues = list(state.get("planner_validation_issues") or [])
+    conversation_summary = str(state.get("conversation_summary") or "")
+    rewritten_query = str(state.get("rewritten_query") or "")
 
     try:
-        repaired = await repair_plan(query, raw_tasks, issues, config)
+        repaired = await repair_plan(
+            query,
+            raw_tasks,
+            issues,
+            config,
+            conversation_summary=conversation_summary,
+            rewritten_query=rewritten_query,
+        )
         validation = validate_and_normalize_tasks(repaired.tasks)
     except Exception:
         logger.exception("planner repair invoke failed")

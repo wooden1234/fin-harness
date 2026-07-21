@@ -52,11 +52,9 @@ async def delete_conversation(
     conversation_id: int,
     current_user: User = Depends(get_current_user),
 ):
-    """删除会话（P1：建议 service 里加 user_id 校验）"""
+    """删除当前用户的会话。"""
     try:
-        # 先验证归属，避免删别人的会话
-        await ConversationService.get_conversation_messages(conversation_id, current_user.id)
-        await ConversationService.delete_conversation(conversation_id)
+        await ConversationService.delete_conversation(conversation_id, current_user.id)
         return {"message": "会话已删除"}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -72,8 +70,11 @@ async def update_conversation_name(
 ):
     """修改会话标题"""
     try:
-        await ConversationService.get_conversation_messages(conversation_id, current_user.id)
-        await ConversationService.update_conversation_name(conversation_id, request.name)
+        await ConversationService.update_conversation_name(
+            conversation_id,
+            current_user.id,
+            request.name,
+        )
         return {"message": "会话名称已更新"}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))

@@ -185,6 +185,7 @@ async def pdf_agent(state: FinAgentState, config: RunnableConfig = None) -> dict
         "query": query,
         "sub_task_id": sub_task_id,
         "messages": list(state.get("messages") or []),
+        "conversation_summary": str(state.get("conversation_summary") or ""),
         "rewrite_count": 0,
     }
 

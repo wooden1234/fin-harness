@@ -39,6 +39,14 @@ class GuardrailsState(TypedDict):
     guardrails_reason: NotRequired[str]
 
 
+# ─── Compliance（最终输出审查）───
+class ComplianceState(TypedDict):
+    """最终答案合规审查结果。"""
+    compliance_action: NotRequired[str]
+    compliance_reason_code: NotRequired[str]
+    compliance_reason: NotRequired[str]
+
+
 # ─── Finance Agent 领域（两个 state 在组件目录下）───
 from agents.finance_agent.state import (  # noqa: E402
     PlannerState,
@@ -50,6 +58,7 @@ from agents.finance_agent.financial_query_agent.state import (  # noqa: E402
 
 
 __all__ = [
+    "ComplianceState",
     "FinancialQueryState",
     "GuardrailsState",
     "PlannerState",

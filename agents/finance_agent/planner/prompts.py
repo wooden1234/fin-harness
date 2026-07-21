@@ -23,7 +23,8 @@ PLANNER_SYSTEM_PROMPT = """你是 FinAgent 金融助手的任务分解 Agent。
 1. **独立性**：子任务之间不能相互依赖，每个应可独立回答
 2. **合并**：含义重叠或相互依赖的子问题合并为一条
 3. **单一有效问题返回 1 个元素**：即使只有一个子问题也返回 `[SubTask]`，标注 intent
-4. **question 改写**：每个子任务的 question 应是完整独立的查询问句
+4. **question 改写**：每个子任务的 question 应是完整独立的查询问句；若提供了「改写后的完整问题」，优先以其为意图与检索目标，但仍须对照「原文」理解用户真实说法，不得丢弃原文含义
+   若改写状态为 `uncertain`，禁止采用任何猜测出的公司、指标、时间或口径；无法形成明确子任务时返回空列表，交由下游澄清
 5. **意图只选最具体的一类**：数值查数选 `structured_metric`；文档原文依据选 `document_qa`；费率/收费/办理条件选 `product_policy`；概念术语选 `concept_explain`；最新/实时/近期变化选 `market_event`
 6. **数值题优先 structured_metric**：问「某公司某年某指标是多少/变化/对比/趋势」时用 `structured_metric`，即使问题里出现「年报」字样
 7. **数值 + 原因分析可拆分**：问题同时要财务数值和文档原因分析时，拆成 `structured_metric` + `document_qa`
@@ -45,6 +46,12 @@ PLANNER_SYSTEM_PROMPT = """你是 FinAgent 金融助手的任务分解 Agent。
 
 用户："宁德时代 2024 年营业收入是多少？"
 → {"tasks": [{"id": "t1", "question": "宁德时代 2024 年营业收入", "intent": "structured_metric"}]}
+
+此前对话摘要含「宁德时代 2024 年营业收入」，当前用户问题（原文）："那 2023 年呢？"，改写后的完整问题："宁德时代 2023 年营业收入"
+→ {"tasks": [{"id": "t1", "question": "宁德时代 2023 年营业收入", "intent": "structured_metric"}]}
+
+此前对话摘要含「用户在查询某公司去年（2024）营收」，当前用户问题（原文）："那去年呢？"
+→ 应结合摘要将子任务 question 补全为带公司与指标的完整查数问句（structured_metric）
 
 用户："近三年比亚迪营业收入趋势如何？"
 → {"tasks": [{"id": "t1", "question": "比亚迪近三年营业收入趋势", "intent": "structured_metric"}]}

@@ -26,7 +26,10 @@ async def run_agent(
 
     graph = get_graph()
     config = (
-        make_thread_config(conversation_id)
+        make_thread_config(
+            conversation_id,
+            user_id=run_context.user_id,
+        )
         if conversation_id is not None
         else {"configurable": {"thread_id": run_context.trace_id}}
     )

@@ -17,6 +17,7 @@ from app.shared import (
     AgentRoute,
     Citation,
     CoreState,
+    ConversationState,
     CoverageStatus,
     RiskLevel,
     SubTaskIntent,
@@ -25,6 +26,7 @@ from app.shared import (
 
 # ─── 各领域 State Mixin ───
 from app.state_mixins import (
+    ComplianceState,
     FinancialQueryState,
     GuardrailsState,
     PlannerState,
@@ -43,6 +45,7 @@ class FinAgentState(
     SupervisorState,
     RiskTriageState,
     GuardrailsState,
+    ComplianceState,
     PlannerState,
     FinancialQueryState,
     WorkerOutputState,
@@ -64,7 +67,9 @@ class FinAgentInput(TypedDict):
 __all__ = [
     "AgentRoute",
     "Citation",
+    "ComplianceState",
     "CoreState",
+    "ConversationState",
     "CoverageStatus",
     "FinAgentInput",
     "FinAgentState",

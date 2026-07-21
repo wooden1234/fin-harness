@@ -24,6 +24,7 @@ def build_combined_overview_graph() -> StateGraph:
     chain = (
         "guardrails",
         "context_compressor",
+        "query_rewrite",
         "supervisor",
         "risk_triage",
         "plan_tasks",

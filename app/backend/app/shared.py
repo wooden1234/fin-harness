@@ -114,8 +114,27 @@ class PlannerOutput(BaseModel):
     )
 
 
-# ---------- CoreState：所有图共享的基类 ----------
-class CoreState(TypedDict):
-    """所有子图的公共字段基类。"""
+# ---------- 会话状态与 CoreState ----------
+class ConversationState(TypedDict):
+    """会话级短期记忆，随 LangGraph checkpoint 跨轮保存。"""
+
     messages: Annotated[list[AnyMessage], add_messages]
+
+    # 会话级压缩记忆：此前多轮对话摘要，同一 conversation/thread 内长期保留。
+    # 由 context_compressor 增量更新；不要在 final_answer 清空。
+    conversation_summary: NotRequired[str]
+    conversation_summary_until: NotRequired[str]
+
+    # 本轮追问改写结果（压缩后、路由前写入；不进入 messages）。
+    # 生命周期：本轮有效 → final_answer 收口清空；下轮 query_rewrite 再检查兜底。
+    rewritten_query: NotRequired[str]
+    # 改写状态：success=完成补全，passthrough=无需补全，
+    # uncertain=上下文不足不可安全补全，fallback=模型异常回退原文。
+    rewrite_status: NotRequired[str]
+
+
+class CoreState(ConversationState):
+    """所有子图的公共字段基类。"""
+
+    # 本轮执行步骤日志；reducer=add 会累加，必须在 begin_turn_workspace 用 Overwrite([]) 重置。
     steps: NotRequired[Annotated[list[str], add]]

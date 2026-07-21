@@ -1,4 +1,4 @@
-"""LangGraph Checkpoint：PostgresSaver + thread_id = conversation_id（Week 3 Day 5）。"""
+"""LangGraph Checkpoint：按用户/租户隔离 thread_id。"""
 
 from __future__ import annotations
 
@@ -53,9 +53,45 @@ def checkpoint_dsn() -> str:
     return normalize_checkpoint_dsn(raw)
 
 
-def make_thread_config(conversation_id: str | int) -> RunnableConfig:
-    """LangGraph 多轮：``thread_id`` 与业务 ``conversation_id`` 一一对应。"""
-    return {"configurable": {"thread_id": str(conversation_id)}}
+def make_thread_id(
+    conversation_id: str | int,
+    *,
+    user_id: str | int | None = None,
+    tenant_id: str | int | None = None,
+) -> str:
+    """生成与创建时完全一致的 tenant-aware thread_id。
+
+    格式：
+    - ``tenant:{tenant_id}:conversation:{conversation_id}``
+    - ``user:{user_id}:conversation:{conversation_id}``
+    - ``anonymous:conversation:{conversation_id}``（仅本地/无身份）
+    """
+    if tenant_id is not None:
+        scope = f"tenant:{tenant_id}"
+    elif user_id is not None:
+        scope = f"user:{user_id}"
+    else:
+        scope = "anonymous"
+    return f"{scope}:conversation:{conversation_id}"
+
+
+def make_thread_config(
+    conversation_id: str | int,
+    *,
+    user_id: str | int | None = None,
+    tenant_id: str | int | None = None,
+) -> RunnableConfig:
+    """生成隔离的 LangGraph thread config。
+
+    API 请求必须传入 user_id；未传 user_id 的调用仅用于本地脚本或无身份
+    的内部运行，并使用独立 anonymous 命名空间，禁止再直接使用业务主键。
+    """
+    thread_id = make_thread_id(
+        conversation_id,
+        user_id=user_id,
+        tenant_id=tenant_id,
+    )
+    return {"configurable": {"thread_id": thread_id}}
 
 
 def _make_checkpoint_serde() -> JsonPlusSerializer:
@@ -114,3 +150,25 @@ def get_checkpointer() -> BaseCheckpointSaver:
             "Checkpointer 未初始化，请在应用 lifespan 或脚本中先 await init_checkpoint()"
         )
     return _checkpointer
+
+
+async def delete_thread_checkpoint(
+    conversation_id: str | int,
+    *,
+    user_id: str | int | None = None,
+    tenant_id: str | int | None = None,
+) -> str:
+    """按与创建时一致的 thread_id 删除该会话的全部 checkpoint / writes。
+
+    Returns:
+        实际删除使用的 ``thread_id``（便于审计日志）。
+    """
+    thread_id = make_thread_id(
+        conversation_id,
+        user_id=user_id,
+        tenant_id=tenant_id,
+    )
+    checkpointer = get_checkpointer()
+    await checkpointer.adelete_thread(thread_id)
+    logger.info("deleted checkpoint thread_id={}", thread_id)
+    return thread_id

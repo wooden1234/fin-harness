@@ -5,6 +5,7 @@ from __future__ import annotations
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
+from agents.context import conversation_messages
 from agents.llm import get_faq_llm
 from agents.finance_agent.faq_agent.prompts import FAQ_BUSY_ANSWER, FAQ_SYSTEM_PROMPT
 from agents.states import Citation, FinAgentState
@@ -87,9 +88,11 @@ async def faq_agent(
 
     context = _build_context(hits)
     citations = _hits_to_citations(hits, sub_task_id=sub_task_id)
-    history = list(state.get("messages") or [])
 
-    llm_messages = [SystemMessage(content=FAQ_SYSTEM_PROMPT.format(context=context)), *history]
+    llm_messages = [
+        SystemMessage(content=FAQ_SYSTEM_PROMPT.format(context=context)),
+        *conversation_messages(state),
+    ]
     try:
         llm = get_faq_llm()
         parts: list[str] = []

@@ -23,6 +23,7 @@ class PdfAgentState(TypedDict, total=False):
     rag_trace: dict[str, Any]
     answer: str
     messages: list[Any]
+    conversation_summary: str
     next_rewrite_strategy: str
     evidence_evaluation: dict[str, Any]
     evidence_evaluation_status: str

@@ -6,6 +6,7 @@ import re
 
 from langchain_core.messages import AIMessage, SystemMessage
 
+from agents.context import conversation_messages
 from agents.llm import get_pdf_llm
 
 from .prompt import PDF_GENERATION_PROMPT
@@ -32,7 +33,7 @@ async def answer_node(state: PdfAgentState, *, config=None) -> PdfAgentState:
                 context=state.get("context", ""),
             )
         ),
-        *(list(state.get("messages") or [])),
+        *conversation_messages(state),
     ]
     parts: list[str] = []
     async for chunk in get_pdf_llm().astream(llm_messages, config=config):

@@ -33,5 +33,7 @@ class WorkerOutputState(TypedDict):
     """Worker 并行输出 + Summarize 汇总结果"""
     task_results: NotRequired[Annotated[list[TaskResult], add]]
     citations: NotRequired[Annotated[list[Citation], add]]
+    # 当前一轮金融任务的候选答案；final_answer 采用后清空。
+    # 切勿与 conversation_summary（多轮会话压缩记忆）混用。
     summary: NotRequired[str]
     rag_trace: NotRequired[dict[str, Any]]

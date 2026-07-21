@@ -8,6 +8,7 @@ from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 
 from agents.states import FinAgentState
+from agents.turn_workspace import begin_turn_workspace
 from app.core.logger import get_logger
 
 logger = get_logger(service="guardrails")
@@ -72,19 +73,27 @@ async def guardrails_node(
     state: FinAgentState,
     config: RunnableConfig = None,
 ) -> dict:
-    """纯规则护栏校验，前置在 Supervisor 之前"""
+    """纯规则护栏校验，前置在 Supervisor 之前。
+
+    每轮入口先 Overwrite 重置临时工作区（含 steps），避免跨轮累加。
+    """
+    workspace = begin_turn_workspace()
     query = _latest_user_query(list(state.get("messages") or []))
     if not query:
-        return {"guardrails_pass": True}
+        return {**workspace, "guardrails_pass": True}
 
     for check_fn in [_check_injection, _check_pii, _check_harmful]:
         blocked, reason = check_fn(query)
         if blocked:
             logger.warning("guardrails blocked: {}", reason)
-            return {"guardrails_pass": False, "guardrails_reason": reason}
+            return {
+                **workspace,
+                "guardrails_pass": False,
+                "guardrails_reason": reason,
+            }
 
     logger.info("guardrails passed")
-    return {"guardrails_pass": True}
+    return {**workspace, "guardrails_pass": True}
 
 
 def guardrails_edge(state: FinAgentState) -> str:
