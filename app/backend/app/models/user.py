@@ -20,5 +20,6 @@ class User(Base):
     conversations = relationship(
         "Conversation",
         back_populates="user",
+        foreign_keys="Conversation.user_id",
         cascade="all, delete-orphan",
     )

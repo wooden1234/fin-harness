@@ -4,12 +4,26 @@ from pydantic import BaseModel, Field
 from app.core.security import get_current_user
 from app.models.user import User
 from app.services.conversation_service import ConversationService
+from app.services.privacy_service import PrivacyService
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 
 class UpdateConversationNameRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
+
+
+@router.get("/export")
+async def export_user_data(current_user: User = Depends(get_current_user)):
+    """导出当前用户的会话、消息和 Agent 运行数据。"""
+    return await PrivacyService.export_user_data(current_user.id)
+
+
+@router.delete("/data")
+async def request_user_data_delete(current_user: User = Depends(get_current_user)):
+    """请求删除当前用户数据，checkpoint 通过 outbox 异步清理。"""
+    count = await PrivacyService.request_user_data_delete(current_user.id)
+    return {"message": "数据删除请求已记录", "conversation_count": count}
 
 
 @router.post("")

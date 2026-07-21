@@ -15,6 +15,14 @@ from app.core.logger import get_logger
 from app.core.security import get_current_user
 from app.models.user import User
 from app.services.conversation_service import ConversationService
+from app.services.agent_run_service import AgentRunService
+from app.services.outbox_service import OutboxService
+from app.services.conversation_lock_service import (
+    ConversationBusyError,
+    ConversationLockService,
+)
+from app.services.checkpoint_rebuild_service import CheckpointRebuildService
+from app.services.checkpoint_registry_service import CheckpointRegistryService
 
 
 router = APIRouter(prefix="/agent", tags=["agent"])
@@ -63,10 +71,17 @@ async def agent_health(current_user: User = Depends(get_current_user)):
     """W3 前占位：验证 Agent 路由走 JWT"""
     return {"status": "agent module ready", "user_id": current_user.id}
 
+
+@router.get("/metrics")
+async def agent_metrics(current_user: User = Depends(get_current_user)):
+    """返回运行与 outbox 基础指标；生产环境应接入 Prometheus。"""
+    return await AgentRunService.metrics()
+
 @router.post("/query")
 async def agent_query(
     query: str = Form(...),
     conversation_id: Optional[str] = Form(None),
+    client_message_id: Optional[str] = Form(None),
     current_user: User = Depends(get_current_user)):
     conversation_pk: int | None = None
     if conversation_id is not None:
@@ -83,17 +98,63 @@ async def agent_query(
             raise HTTPException(status_code=404, detail="会话不存在或无权访问")
 
     conversation_key = conversation_pk if conversation_pk is not None else uuid.uuid4()
+    lock_token: str | None = None
+    if conversation_pk is not None:
+        try:
+            lock_token = await ConversationLockService.acquire(conversation_pk)
+        except ConversationBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     thread_config = make_thread_config(
         conversation_key,
         user_id=current_user.id,
     )
-    graph = get_graph()
+    run_id = str(uuid.uuid4())
+    client_message_id = client_message_id or str(uuid.uuid4())
+    try:
+        await AgentRunService.create_run(
+            run_id=run_id,
+            user_id=current_user.id,
+            conversation_id=conversation_pk,
+            thread_id=thread_config["configurable"]["thread_id"],
+            trace_id=run_id,
+        )
+        await AgentRunService.mark_running(run_id)
+        if conversation_pk is not None:
+            await ConversationService.save_user_message(
+                user_id=current_user.id,
+                conversation_id=conversation_pk,
+                content=query,
+                run_id=run_id,
+                client_message_id=client_message_id,
+            )
+    except Exception as start_err:
+        try:
+            await AgentRunService.mark_failed(run_id, error_message=str(start_err))
+        except Exception:
+            logger.exception("failed to mark startup run failed: {}", run_id)
+        if conversation_pk is not None and lock_token is not None:
+            await ConversationLockService.release(conversation_pk, lock_token)
+        raise
+    try:
+        graph = get_graph()
+    except Exception:
+        if conversation_pk is not None and lock_token is not None:
+            await ConversationLockService.release(conversation_pk, lock_token)
+        raise
     input_payload = {"messages": [HumanMessage(content=query)]}
     # 只发送 final_answer 审查后的内容，避免候选答案先于合规结果泄露。
     async def process_stream():
         assistant_full_response = ""
+        assistant_message_id: int | None = None
         generating_answer_active = False
         try:
+            if conversation_pk is not None:
+                await CheckpointRebuildService.rebuild_if_missing(
+                    conversation_id=conversation_pk,
+                    user_id=current_user.id,
+                    thread_config=thread_config,
+                    exclude_run_id=run_id,
+                )
             async for chunk in graph.astream(
                 input_payload,
                 config=thread_config,
@@ -178,6 +239,28 @@ async def agent_query(
             
             state = await graph.aget_state(thread_config)
             values = (state.values if state else {}) or {}
+            checkpoint_id = None
+            if state is not None:
+                checkpoint_id = (state.config or {}).get("configurable", {}).get("checkpoint_id")
+            await AgentRunService.mark_graph_completed(
+                run_id,
+                checkpoint_id=str(checkpoint_id) if checkpoint_id else None,
+                summary_snapshot={
+                    "content": _extract_final_response(values),
+                    "citations": values.get("citations") or [],
+                    "route": values.get("route"),
+                    "risk_level": values.get("risk_level"),
+                    "compliance_action": values.get("compliance_action"),
+                    "compliance_reason_code": values.get("compliance_reason_code"),
+                },
+            )
+            if conversation_pk is not None:
+                await CheckpointRegistryService.record(
+                    conversation_id=conversation_pk,
+                    user_id=current_user.id,
+                    thread_id=thread_config["configurable"]["thread_id"],
+                    checkpoint_id=str(checkpoint_id) if checkpoint_id else None,
+                )
             citations = values.get("citations") or []
             final_response = _extract_final_response(values)
             if not assistant_full_response and final_response:
@@ -187,8 +270,51 @@ async def agent_query(
                 if event:
                     yield _sse(event)
                 generating_answer_active = False
+            # 持久化消息到数据库
+            persistence_status = "not_required"
+            if conversation_pk is not None and assistant_full_response:
+                try:
+                    assistant_message = await ConversationService.save_assistant_message(
+                        user_id=current_user.id,
+                        conversation_id=conversation_pk,
+                        content=assistant_full_response,
+                        run_id=run_id,
+                    )
+                    assistant_message_id = assistant_message.id
+                    logger.info(
+                        "conversation saved: user={}, conv={}",
+                        current_user.id, conversation_id,
+                    )
+                    await AgentRunService.mark_persisted(
+                        run_id,
+                        response_message_id=assistant_message_id,
+                    )
+                    persistence_status = "persisted"
+                except Exception as save_err:
+                    logger.error("Failed to save conversation: {}", save_err)
+                    await AgentRunService.mark_persist_pending(
+                        run_id,
+                        error_message=str(save_err),
+                    )
+                    try:
+                        await OutboxService.enqueue_assistant_persist(
+                            run_id=run_id,
+                            user_id=current_user.id,
+                            conversation_id=conversation_pk,
+                            content=assistant_full_response,
+                        )
+                    except Exception:
+                        logger.exception("failed to enqueue assistant persistence: {}", run_id)
+                    persistence_status = "pending_retry"
+            elif conversation_pk is None:
+                # 无业务会话时，checkpoint 已保存运行态，消息留档由调用方后续关联。
+                persistence_status = "checkpoint_only"
+
             yield _sse({
                 "type": "done",
+                "run_id": run_id,
+                "message_id": assistant_message_id,
+                "persistence_status": persistence_status,
                 "content": final_response,
                 "citations": citations,
                 "route": values.get("route"),
@@ -197,28 +323,20 @@ async def agent_query(
                 "compliance_reason_code": values.get("compliance_reason_code"),
             })
 
-            # 持久化消息到数据库
-            if conversation_pk is not None and assistant_full_response:
-                try:
-                    await ConversationService.save_message(
-                        user_id=current_user.id,
-                        conversation_id=conversation_pk,
-                        messages=[{"role": "user", "content": query}],
-                        response=assistant_full_response,
-                    )
-                    logger.info(
-                        "conversation saved: user={}, conv={}",
-                        current_user.id, conversation_id,
-                    )
-                except Exception as save_err:
-                    logger.error("Failed to save conversation: {}", save_err)
-
         except Exception as e:
             logger.exception("agent_query stream error")
-            yield _sse({"type": "error", "message": str(e)})
+            try:
+                await AgentRunService.mark_failed(run_id, error_message=str(e))
+            except Exception:
+                logger.exception("failed to update agent run status: {}", run_id)
+            yield _sse({"type": "error", "run_id": run_id, "message": str(e)})
+        finally:
+            if conversation_pk is not None and lock_token is not None:
+                await ConversationLockService.release(conversation_pk, lock_token)
     response = StreamingResponse(process_stream(), media_type="text/event-stream")
     # 对外仍返回业务会话 ID；内部 thread_id 只用于 checkpoint 隔离。
     response.headers["X-Conversation-ID"] = str(conversation_key)
+    response.headers["X-Agent-Run-ID"] = run_id
     response.headers["Cache-Control"] = "no-cache"
     return response
 

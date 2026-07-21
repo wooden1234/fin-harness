@@ -22,8 +22,14 @@ class Conversation(Base):
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
     status = Column(String(20), default="ongoing")
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    deleted_by = Column(Integer, ForeignKey("app.users.id", ondelete="SET NULL"), nullable=True)
     dialogue_type = Column(Enum(DialogueType), nullable=False)
     
     # 关系
-    user = relationship("User", back_populates="conversations")
+    user = relationship(
+        "User",
+        back_populates="conversations",
+        foreign_keys=[user_id],
+    )
     messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")

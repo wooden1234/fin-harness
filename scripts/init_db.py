@@ -16,6 +16,8 @@ sys.path.insert(0, str(ROOT_DIR))
 from app.core.database import Base, engine
 from app.core.logger import get_logger
 from app.models import (  # noqa: F401 — 注册 ORM 到 metadata
+    AgentRun,
+    AgentRunStatus,
     AnnualFinancialFact,
     AnnualFinancialTable,
     AnnualReportDocument,
@@ -23,10 +25,14 @@ from app.models import (  # noqa: F401 — 注册 ORM 到 metadata
     CanonicalMetricAlias,
     CompanyMetricMapping,
     Conversation,
+    ConversationLock,
+    CheckpointRegistry,
+    AuditLog,
     FinancialCompany,
     FinancialMetric,
     Message,
     RawTableCell,
+    OutboxEvent,
     User,
 )
 
