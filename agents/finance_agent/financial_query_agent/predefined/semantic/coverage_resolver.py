@@ -25,7 +25,7 @@ from agents.finance_agent.financial_query_agent.predefined.semantic.reason_codes
     render_coverage_reasons,
 )
 from app.core.database import AsyncSessionLocal
-from app.models.annual_financial_fact import (
+from app.models.finance.annual_financial_fact import (
     AnnualFinancialFact,
     AnnualFinancialTable,
     AnnualReportDocument,

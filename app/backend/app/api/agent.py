@@ -6,6 +6,7 @@ from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
 from agents.checkpoint import make_thread_config
 from agents.graph import get_graph
+from agents.runtime_context import AgentRuntimeContext
 from app.api.agent_progress import (
     VISIBLE_TASK_NODES,
     build_public_step_event,
@@ -13,16 +14,18 @@ from app.api.agent_progress import (
 )
 from app.core.logger import get_logger
 from app.core.security import get_current_user
-from app.models.user import User
-from app.services.conversation_service import ConversationService
-from app.services.agent_run_service import AgentRunService
-from app.services.outbox_service import OutboxService
-from app.services.conversation_lock_service import (
+from app.models.identity.user import User
+from app.services.conversation.conversation_service import ConversationService
+from app.services.agent.agent_run_service import AgentRunService
+from app.services.persistence.outbox_service import OutboxService
+from app.services.conversation.conversation_lock_service import (
     ConversationBusyError,
     ConversationLockService,
 )
-from app.services.checkpoint_rebuild_service import CheckpointRebuildService
-from app.services.checkpoint_registry_service import CheckpointRegistryService
+from app.services.agent.checkpoint_rebuild_service import CheckpointRebuildService
+from app.services.agent.checkpoint_registry_service import CheckpointRegistryService
+from app.services.memory.memory_command import parse_memory_command
+from app.services.memory.memory_service import MemoryService
 
 
 router = APIRouter(prefix="/agent", tags=["agent"])
@@ -93,6 +96,7 @@ async def agent_query(
         conversation = await ConversationService.get_owned_conversation(
             conversation_pk,
             current_user.id,
+            current_user.tenant_id,
         )
         if conversation is None:
             raise HTTPException(status_code=404, detail="会话不存在或无权访问")
@@ -107,6 +111,7 @@ async def agent_query(
     thread_config = make_thread_config(
         conversation_key,
         user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
     )
     run_id = str(uuid.uuid4())
     client_message_id = client_message_id or str(uuid.uuid4())
@@ -115,17 +120,37 @@ async def agent_query(
             run_id=run_id,
             user_id=current_user.id,
             conversation_id=conversation_pk,
+            tenant_id=current_user.tenant_id,
             thread_id=thread_config["configurable"]["thread_id"],
             trace_id=run_id,
         )
         await AgentRunService.mark_running(run_id)
+        user_message = None
         if conversation_pk is not None:
-            await ConversationService.save_user_message(
+            user_message = await ConversationService.save_user_message(
                 user_id=current_user.id,
                 conversation_id=conversation_pk,
+                tenant_id=current_user.tenant_id,
                 content=query,
                 run_id=run_id,
                 client_message_id=client_message_id,
+            )
+        explicit_memory = parse_memory_command(query)
+        if explicit_memory is not None:
+            memory_key, memory_value = explicit_memory
+            await MemoryService.create(
+                tenant_id=current_user.tenant_id,
+                user_id=current_user.id,
+                memory_key=memory_key,
+                value=memory_value,
+                provenance={
+                    "source_type": "explicit_user_message",
+                    "conversation_id": conversation_pk,
+                    "message_id": user_message.id if user_message else None,
+                    "run_id": run_id,
+                    "excerpt": query[:500],
+                },
+                actor_id=str(current_user.id),
             )
     except Exception as start_err:
         try:
@@ -152,12 +177,16 @@ async def agent_query(
                 await CheckpointRebuildService.rebuild_if_missing(
                     conversation_id=conversation_pk,
                     user_id=current_user.id,
+                    tenant_id=current_user.tenant_id,
                     thread_config=thread_config,
                     exclude_run_id=run_id,
                 )
             async for chunk in graph.astream(
                 input_payload,
                 config=thread_config,
+                context=AgentRuntimeContext.from_user(
+                    current_user, conversation_id=conversation_key, run_id=run_id
+                ),
                 stream_mode=["messages", "tasks", "updates"],
                 subgraphs=True,
             ):
@@ -258,6 +287,7 @@ async def agent_query(
                 await CheckpointRegistryService.record(
                     conversation_id=conversation_pk,
                     user_id=current_user.id,
+                    tenant_id=current_user.tenant_id,
                     thread_id=thread_config["configurable"]["thread_id"],
                     checkpoint_id=str(checkpoint_id) if checkpoint_id else None,
                 )
@@ -279,6 +309,7 @@ async def agent_query(
                         conversation_id=conversation_pk,
                         content=assistant_full_response,
                         run_id=run_id,
+                        tenant_id=current_user.tenant_id,
                     )
                     assistant_message_id = assistant_message.id
                     logger.info(
@@ -302,6 +333,7 @@ async def agent_query(
                             user_id=current_user.id,
                             conversation_id=conversation_pk,
                             content=assistant_full_response,
+                            tenant_id=current_user.tenant_id,
                         )
                     except Exception:
                         logger.exception("failed to enqueue assistant persistence: {}", run_id)

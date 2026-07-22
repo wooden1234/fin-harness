@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from agents.checkpoint import close_checkpoint, init_checkpoint
+from app.services.memory.memory_store import close_memory_store, init_memory_store
 from app.api import api_router
 from app.core.config import settings
 from app.core.logger import get_logger
@@ -18,8 +19,10 @@ async def lifespan(app: FastAPI):
     logger.info("fin-agent-platform 启动中")
     logger.info(f"环境: {settings.APP_ENV}")
     await init_checkpoint()
+    await init_memory_store()
     yield
     await close_checkpoint()
+    await close_memory_store()
     logger.info("fin-agent-platform 正在关闭")
 
 

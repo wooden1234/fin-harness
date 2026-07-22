@@ -5,11 +5,11 @@ from __future__ import annotations
 from sqlalchemy import select, update, func
 
 from app.core.database import AsyncSessionLocal
-from app.models.audit_log import AuditLog
-from app.models.conversation import Conversation
-from app.models.message import Message
-from app.models.agent_run import AgentRun
-from app.models.outbox_event import OutboxEvent
+from app.models.persistence.audit_log import AuditLog
+from app.models.identity.conversation import Conversation
+from app.models.persistence.message import Message
+from app.models.agent.agent_run import AgentRun
+from app.models.persistence.outbox_event import OutboxEvent
 
 
 class PrivacyService:
@@ -56,11 +56,14 @@ class PrivacyService:
             }
 
     @staticmethod
-    async def request_user_data_delete(user_id: int) -> int:
+    async def request_user_data_delete(
+        user_id: int, tenant_id: str = "default"
+    ) -> int:
         async with AsyncSessionLocal() as db:
             conversations = (await db.execute(
                 select(Conversation).where(
                     Conversation.user_id == user_id,
+                    Conversation.tenant_id == tenant_id,
                     Conversation.deleted_at.is_(None),
                 )
             )).scalars().all()
@@ -72,7 +75,11 @@ class PrivacyService:
                     event_key=f"conversation_checkpoint_delete:{conversation.id}",
                     event_type="conversation.checkpoint_delete",
                     aggregate_id=str(conversation.id),
-                    payload={"conversation_id": conversation.id, "user_id": user_id},
+                    payload={
+                        "conversation_id": conversation.id,
+                        "user_id": user_id,
+                        "tenant_id": conversation.tenant_id,
+                    },
                     status="pending",
                 ))
             db.add(AuditLog(
@@ -81,4 +88,3 @@ class PrivacyService:
             ))
             await db.commit()
             return len(conversations)
-

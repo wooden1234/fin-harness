@@ -1,5 +1,5 @@
-from app.models.conversation import Conversation, DialogueType
-from app.models.annual_financial_fact import (
+from app.models.identity.conversation import Conversation, DialogueType
+from app.models.finance.annual_financial_fact import (
     AnnualFinancialFact,
     AnnualFinancialTable,
     AnnualReportDocument,
@@ -10,13 +10,15 @@ from app.models.annual_financial_fact import (
     FinancialMetric,
     RawTableCell,
 )
-from app.models.message import Message
-from app.models.agent_run import AgentRun, AgentRunStatus
-from app.models.outbox_event import OutboxEvent
-from app.models.conversation_lock import ConversationLock
-from app.models.checkpoint_registry import CheckpointRegistry
-from app.models.audit_log import AuditLog
-from app.models.user import User
+from app.models.persistence.message import Message
+from app.models.agent.agent_run import AgentRun, AgentRunStatus
+from app.models.persistence.outbox_event import OutboxEvent
+from app.models.agent.conversation_lock import ConversationLock
+from app.models.agent.checkpoint_registry import CheckpointRegistry
+from app.models.persistence.audit_log import AuditLog
+from app.models.identity.user import User
+from app.models.memory.memory_record import MemoryRecord
+from app.models.memory.memory_event import MemoryEvent
 
 __all__ = [
     "User",
@@ -38,4 +40,6 @@ __all__ = [
     "CompanyMetricMapping",
     "RawTableCell",
     "AnnualFinancialFact",
+    "MemoryRecord",
+    "MemoryEvent",
 ]

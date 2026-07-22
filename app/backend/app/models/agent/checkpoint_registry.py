@@ -13,6 +13,7 @@ class CheckpointRegistry(Base):
     )
 
     id = Column(Integer, primary_key=True)
+    tenant_id = Column(String(36), nullable=False, default="default", index=True)
     conversation_id = Column(Integer, ForeignKey("app.conversations.id", ondelete="CASCADE"), nullable=False)
     user_id = Column(Integer, ForeignKey("app.users.id", ondelete="CASCADE"), nullable=False)
     thread_id = Column(String(255), nullable=False)
@@ -22,4 +23,3 @@ class CheckpointRegistry(Base):
     archived_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
-

@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT_DIR))
 
 from app.core.database import AsyncSessionLocal  # noqa: E402
 from app.core.logger import get_logger  # noqa: E402
-from app.models.annual_financial_fact import (  # noqa: E402
+from app.models.finance.annual_financial_fact import (  # noqa: E402
     AnnualFinancialFact,
     AnnualFinancialTable,
     AnnualReportDocument,

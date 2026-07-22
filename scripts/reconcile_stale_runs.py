@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
-from app.services.agent_run_service import AgentRunService
+from app.services.agent.agent_run_service import AgentRunService
 
 
 async def main() -> None:

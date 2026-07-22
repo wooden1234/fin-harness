@@ -8,23 +8,26 @@ from sqlalchemy import select
 
 from agents.checkpoint import delete_thread_checkpoint
 from app.core.database import AsyncSessionLocal
-from app.models.checkpoint_registry import CheckpointRegistry
+from app.models.agent.checkpoint_registry import CheckpointRegistry
 
 
 class CheckpointRegistryService:
     @staticmethod
     async def record(
-        *, conversation_id: int, user_id: int, thread_id: str,
+        *, conversation_id: int, user_id: int, tenant_id: str = "default", thread_id: str,
         checkpoint_id: str | None, ttl_seconds: int = 30 * 24 * 3600
     ) -> None:
         async with AsyncSessionLocal() as db:
             row = await db.scalar(
                 select(CheckpointRegistry).where(
-                    CheckpointRegistry.conversation_id == conversation_id
+                    CheckpointRegistry.conversation_id == conversation_id,
+                    CheckpointRegistry.user_id == user_id,
+                    CheckpointRegistry.tenant_id == tenant_id,
                 )
             )
             values = {
                 "user_id": user_id,
+                "tenant_id": tenant_id,
                 "thread_id": thread_id,
                 "checkpoint_id": checkpoint_id,
                 "status": "active",
@@ -49,9 +52,10 @@ class CheckpointRegistryService:
                 ).limit(limit)
             )).scalars().all()
             for row in rows:
-                await delete_thread_checkpoint(row.conversation_id, user_id=row.user_id)
+                await delete_thread_checkpoint(
+                    row.conversation_id, user_id=row.user_id, tenant_id=row.tenant_id
+                )
                 row.status = "archived"
                 row.archived_at = now
             await db.commit()
             return len(rows)
-

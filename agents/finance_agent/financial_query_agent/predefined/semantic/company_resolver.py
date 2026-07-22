@@ -9,7 +9,7 @@ from agents.finance_agent.financial_query_agent.services.entity_resolver import 
     EntityResolver,
 )
 from app.core.database import AsyncSessionLocal
-from app.models.annual_financial_fact import FinancialCompany
+from app.models.finance.annual_financial_fact import FinancialCompany
 
 
 class ResolvedCompany(BaseModel):

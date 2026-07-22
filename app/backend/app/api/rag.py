@@ -4,7 +4,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
 from app.core.security import get_current_user
-from app.models.user import User
+from app.models.identity.user import User
 from retrieval import get_retriever
 from retrieval.core.filters import compact_filters
 from app.schemas.rag import RagHitItem, RagSearchResponse

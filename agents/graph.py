@@ -10,6 +10,9 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from agents.states import FinAgentInput, FinAgentState
+from agents.runtime_context import AgentRuntimeContext
+from agents.memory_recall import memory_recall_node
+from langgraph.store.base import BaseStore
 from agents.context_compressor import compress_context
 from agents.final_answer import final_answer_node
 from agents.general_agent.node import general_agent
@@ -24,9 +27,14 @@ _compiled_graph = None
 
 def build_graph() -> StateGraph:
     """构建未编译的 StateGraph（便于单测与 export）。"""
-    builder = StateGraph(FinAgentState, input_schema=FinAgentInput)
+    builder = StateGraph(
+        FinAgentState,
+        input_schema=FinAgentInput,
+        context_schema=AgentRuntimeContext,
+    )
 
     builder.add_node("guardrails", guardrails_node)
+    builder.add_node("memory_recall", memory_recall_node)
     builder.add_node("context_compressor", compress_context)
     builder.add_node("query_rewrite", query_rewrite_node)
     builder.add_node("supervisor", analyze_and_route_query)
@@ -36,7 +44,8 @@ def build_graph() -> StateGraph:
     builder.add_node("final_answer", final_answer_node)
 
     # Layer 1: START → guardrails
-    builder.add_edge(START, "guardrails")
+    builder.add_edge(START, "memory_recall")
+    builder.add_edge("memory_recall", "guardrails")
     builder.add_conditional_edges(
         "guardrails",
         guardrails_edge,
@@ -77,8 +86,11 @@ def build_graph() -> StateGraph:
     return builder
 
 
-def compile_graph(checkpointer: BaseCheckpointSaver | None):
-    return build_graph().compile(checkpointer=checkpointer)
+def compile_graph(
+    checkpointer: BaseCheckpointSaver | None,
+    store: BaseStore | None = None,
+):
+    return build_graph().compile(checkpointer=checkpointer, store=store)
 
 
 def reset_graph_cache() -> None:
@@ -99,8 +111,9 @@ def get_graph(*, with_checkpointer: bool = True):
 
     if _compiled_graph is None:
         from agents.checkpoint import get_checkpointer
+        from app.services.memory.memory_store import get_memory_store
 
-        _compiled_graph = compile_graph(get_checkpointer())
+        _compiled_graph = compile_graph(get_checkpointer(), get_memory_store())
     return _compiled_graph
 
 

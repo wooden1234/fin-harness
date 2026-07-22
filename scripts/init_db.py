@@ -10,6 +10,8 @@ import asyncio
 import sys
 from pathlib import Path
 
+from sqlalchemy import text
+
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
@@ -34,6 +36,8 @@ from app.models import (  # noqa: F401 — 注册 ORM 到 metadata
     RawTableCell,
     OutboxEvent,
     User,
+    MemoryRecord,
+    MemoryEvent,
 )
 
 logger = get_logger(service="init_db")
@@ -43,6 +47,8 @@ async def init_db(reset: bool = False) -> None:
     try:
         logger.info("Connecting to database...")
         async with engine.begin() as conn:
+            for schema in ("app", "fin_core", "rag", "runtime"):
+                await conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema}"))
             if reset:
                 logger.warning("Dropping all tables...")
                 await conn.run_sync(Base.metadata.drop_all)

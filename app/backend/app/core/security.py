@@ -6,7 +6,7 @@ from jose import JWTError, jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import get_db
-from app.services.user_service import UserService
+from app.services.identity.user_service import UserService
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/token")
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
@@ -39,5 +39,8 @@ async def get_current_user(
     user_service = UserService(db)
     user = await user_service.get_user_by_email(email)
     if user is None:
+        raise credentials_exception
+    # tenant_id 必须来自服务端用户记录，而不是客户端请求参数。
+    if not getattr(user, "tenant_id", None):
         raise credentials_exception
     return user

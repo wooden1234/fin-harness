@@ -34,6 +34,7 @@ class AgentRun(Base):
     )
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    tenant_id = Column(String(36), nullable=False, default="default", index=True)
     user_id = Column(
         ForeignKey("app.users.id", ondelete="CASCADE"), nullable=False, index=True
     )

@@ -138,3 +138,6 @@ class CoreState(ConversationState):
 
     # 本轮执行步骤日志；reducer=add 会累加，必须在 begin_turn_workspace 用 Overwrite([]) 重置。
     steps: NotRequired[Annotated[list[str], add]]
+
+    # 跨会话长期偏好；每轮从权威表重新召回，不写入 messages。
+    memory_context: NotRequired[dict[str, object]]

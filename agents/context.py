@@ -15,11 +15,25 @@ def conversation_messages(
     """组装模型调用上下文：有摘要则临时前置 SystemMessage，不写入 checkpoint。"""
     history = list(state.get("messages") or [])
     summary = str(state.get("conversation_summary") or "").strip()
+    memory_context = state.get("memory_context") or {}
 
-    if not summary:
+    if not summary and not memory_context:
         return history
 
-    return [
-        SystemMessage(content=f"[{summary_prefix}]\n{summary}"),
-        *history,
-    ]
+    system_messages: list[SystemMessage] = []
+    if summary:
+        system_messages.append(SystemMessage(content=f"[{summary_prefix}]\n{summary}"))
+    if memory_context:
+        preferences = "\n".join(
+            f"- {key}={value}" for key, value in sorted(memory_context.items())
+        )
+        system_messages.append(
+            SystemMessage(
+                content=(
+                    "[用户长期偏好]\n"
+                    f"{preferences}\n"
+                    "仅在当前请求未明确指定时参考长期偏好；当前轮用户要求优先。"
+                )
+            )
+        )
+    return [*system_messages, *history]

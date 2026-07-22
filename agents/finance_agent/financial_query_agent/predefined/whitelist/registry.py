@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import func, or_, select
 
 from app.core.database import AsyncSessionLocal
-from app.models.annual_financial_fact import FinancialCompany, FinancialMetric
+from app.models.finance.annual_financial_fact import FinancialCompany, FinancialMetric
 from agents.finance_agent.financial_query_agent.predefined.intent import (
     FinancialQueryIntent,
 )

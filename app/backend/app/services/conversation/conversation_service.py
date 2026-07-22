@@ -1,9 +1,9 @@
 from typing import List, Dict
 from app.core.database import AsyncSessionLocal
-from app.models.conversation import Conversation, DialogueType
-from app.models.message import Message
-from app.models.outbox_event import OutboxEvent
-from app.models.audit_log import AuditLog
+from app.models.identity.conversation import Conversation, DialogueType
+from app.models.persistence.message import Message
+from app.models.persistence.outbox_event import OutboxEvent
+from app.models.persistence.audit_log import AuditLog
 from app.core.logger import get_logger
 from sqlalchemy import func, select
 
@@ -18,6 +18,7 @@ class ConversationService:
         content: str,
         run_id: str,
         client_message_id: str,
+        tenant_id: str = "default",
     ) -> Message:
         """在 Agent 开始执行前写入用户消息，确保请求事实先落档。"""
         async with AsyncSessionLocal() as db:
@@ -25,6 +26,7 @@ class ConversationService:
                 select(Conversation).where(
                     Conversation.id == conversation_id,
                     Conversation.user_id == user_id,
+                    Conversation.tenant_id == tenant_id,
                 )
             )
             if conversation is None:
@@ -62,7 +64,7 @@ class ConversationService:
 
     @staticmethod
     async def save_assistant_message(
-        *, user_id: int, conversation_id: int, content: str, run_id: str
+        *, user_id: int, conversation_id: int, content: str, run_id: str, tenant_id: str = "default"
     ) -> Message:
         """保存已完成运行的助手消息，并与 agent_run 关联。"""
         async with AsyncSessionLocal() as db:
@@ -70,6 +72,7 @@ class ConversationService:
                 select(Conversation).where(
                     Conversation.id == conversation_id,
                     Conversation.user_id == user_id,
+                    Conversation.tenant_id == tenant_id,
                 )
             )
             if conversation is None:
@@ -105,12 +108,14 @@ class ConversationService:
     async def get_owned_conversation(
         conversation_id: int,
         user_id: int,
+        tenant_id: str = "default",
     ) -> Conversation | None:
         """按会话 ID 和用户 ID 查询，统一执行归属校验。"""
         async with AsyncSessionLocal() as db:
             stmt = select(Conversation).where(
                 Conversation.id == conversation_id,
                 Conversation.user_id == user_id,
+                Conversation.tenant_id == tenant_id,
                 Conversation.deleted_at.is_(None),
             )
             result = await db.execute(stmt)
@@ -134,11 +139,12 @@ class ConversationService:
         return title if title else "新会话"
 
     @staticmethod
-    async def create_conversation(user_id: int) -> int:
+    async def create_conversation(user_id: int, tenant_id: str = "default") -> int:
         """创建新会话"""
         async with AsyncSessionLocal() as db:
             conversation = Conversation(
                 user_id=user_id,
+                tenant_id=tenant_id,
                 title="新会话",
                 dialogue_type=DialogueType.NORMAL
             )
@@ -212,13 +218,16 @@ class ConversationService:
             raise
 
     @staticmethod
-    async def get_user_conversations(user_id: int) -> List[Dict]:
+    async def get_user_conversations(
+        user_id: int, tenant_id: str = "default"
+    ) -> List[Dict]:
         """获取用户的所有会话"""
         try:
             async with AsyncSessionLocal() as db:
                 # 查询用户的所有会话，排除未使用的新会话
                 stmt = select(Conversation).where(
                     Conversation.user_id == user_id,
+                    Conversation.tenant_id == tenant_id,
                     Conversation.title != "新会话",
                     Conversation.deleted_at.is_(None),
                 ).order_by(Conversation.created_at.desc())
@@ -242,14 +251,17 @@ class ConversationService:
             raise
 
     @staticmethod
-    async def get_conversation_messages(conversation_id: int, user_id: int) -> List[Dict]:
+    async def get_conversation_messages(
+        conversation_id: int, user_id: int, tenant_id: str = "default"
+    ) -> List[Dict]:
         """获取会话的所有消息"""
         try:
             async with AsyncSessionLocal() as db:
                 # 首先验证会话属于该用户
                 stmt = select(Conversation).where(
                     Conversation.id == conversation_id,
-                    Conversation.user_id == user_id
+                    Conversation.user_id == user_id,
+                    Conversation.tenant_id == tenant_id,
                 )
                 result = await db.execute(stmt)
                 conversation = result.scalar_one_or_none()
@@ -284,13 +296,16 @@ class ConversationService:
             raise
 
     @staticmethod
-    async def delete_conversation(conversation_id: int, user_id: int):
+    async def delete_conversation(
+        conversation_id: int, user_id: int, tenant_id: str = "default"
+    ):
         """软删除会话，并通过 outbox 异步清理 checkpoint。"""
         try:
             async with AsyncSessionLocal() as db:
                 stmt = select(Conversation).where(
                     Conversation.id == conversation_id,
                     Conversation.user_id == user_id,
+                    Conversation.tenant_id == tenant_id,
                     Conversation.deleted_at.is_(None),
                 )
                 result = await db.execute(stmt)
@@ -307,7 +322,11 @@ class ConversationService:
                         event_key=f"conversation_checkpoint_delete:{conversation_id}",
                         event_type="conversation.checkpoint_delete",
                         aggregate_id=str(conversation_id),
-                        payload={"conversation_id": conversation_id, "user_id": user_id},
+                        payload={
+                            "conversation_id": conversation_id,
+                            "user_id": user_id,
+                            "tenant_id": tenant_id,
+                        },
                         status="pending",
                     )
                 )

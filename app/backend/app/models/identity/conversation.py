@@ -18,6 +18,7 @@ class Conversation(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("app.users.id", ondelete="CASCADE"))
+    tenant_id = Column(String(36), nullable=False, default="default", index=True)
     title = Column(String(100), nullable=False)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

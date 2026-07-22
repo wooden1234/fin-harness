@@ -8,7 +8,8 @@ from langchain_core.messages import AIMessage, HumanMessage
 from agents.graph import get_graph
 from agents.checkpoint import delete_thread_checkpoint
 from app.core.database import AsyncSessionLocal
-from app.models.message import Message
+from app.models.persistence.message import Message
+from app.models.identity.conversation import Conversation
 
 
 class CheckpointRebuildService:
@@ -17,6 +18,7 @@ class CheckpointRebuildService:
         *,
         conversation_id: int,
         user_id: int,
+        tenant_id: str = "default",
         thread_config: dict,
         exclude_run_id: str | None = None,
     ) -> bool:
@@ -28,7 +30,10 @@ class CheckpointRebuildService:
 
         async with AsyncSessionLocal() as db:
             stmt = select(Message).where(
-                Message.conversation_id == conversation_id
+                Message.conversation_id == conversation_id,
+                Conversation.id == Message.conversation_id,
+                Conversation.user_id == user_id,
+                Conversation.tenant_id == tenant_id,
             )
             if exclude_run_id:
                 stmt = stmt.where(Message.run_id != exclude_run_id)
@@ -44,7 +49,8 @@ class CheckpointRebuildService:
         if not messages:
             return False
 
-        await delete_thread_checkpoint(conversation_id, user_id=user_id)
+        await delete_thread_checkpoint(
+            conversation_id, user_id=user_id, tenant_id=tenant_id
+        )
         await graph.aupdate_state(thread_config, {"messages": messages})
         return True
-

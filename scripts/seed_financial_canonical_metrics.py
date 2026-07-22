@@ -28,7 +28,7 @@ from app.agents.finance_agent.financial_query_agent.services.entity_resolver imp
 )
 from app.core.database import AsyncSessionLocal  # noqa: E402
 from app.core.logger import get_logger  # noqa: E402
-from app.models.annual_financial_fact import (  # noqa: E402
+from app.models.finance.annual_financial_fact import (  # noqa: E402
     AnnualFinancialFact,
     AnnualFinancialTable,
     AnnualReportDocument,

@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from app.models.annual_financial_fact import AnnualFinancialFact
+from app.models.finance.annual_financial_fact import AnnualFinancialFact
 from agents.finance_agent.financial_query_agent.services.fact_search_executor import FinancialFactSearchExecutor
 from agents.finance_agent.financial_query_agent.services.query_router import FinancialQueryRouter, FinancialQueryTemplate
 from agents.finance_agent.financial_query_agent.services.schemas import FinancialQueryIntent, FinancialSqlResultRow

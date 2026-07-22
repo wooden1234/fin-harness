@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.core.database import AsyncSessionLocal
-from app.models.conversation_lock import ConversationLock
+from app.models.agent.conversation_lock import ConversationLock
 
 
 class ConversationBusyError(RuntimeError):
@@ -62,4 +62,3 @@ class ConversationLockService:
             if lock is not None:
                 await db.delete(lock)
                 await db.commit()
-

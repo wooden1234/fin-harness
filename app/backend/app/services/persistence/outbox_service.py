@@ -10,9 +10,10 @@ from sqlalchemy import or_, select
 
 from app.core.database import AsyncSessionLocal
 from app.core.logger import get_logger
-from app.models.outbox_event import OutboxEvent
-from app.services.agent_run_service import AgentRunService
-from app.services.conversation_service import ConversationService
+from app.models.persistence.outbox_event import OutboxEvent
+from app.services.agent.agent_run_service import AgentRunService
+from app.services.conversation.conversation_service import ConversationService
+from app.services.memory.memory_index_service import MemoryIndexService
 from agents.checkpoint import delete_thread_checkpoint
 
 logger = get_logger(service="outbox")
@@ -28,12 +29,14 @@ class OutboxService:
         user_id: int,
         conversation_id: int,
         content: str,
+        tenant_id: str = "default",
     ) -> OutboxEvent:
         event_key = f"assistant_message:{run_id}"
         payload = {
             "run_id": run_id,
             "user_id": user_id,
             "conversation_id": conversation_id,
+            "tenant_id": tenant_id,
             "content": content,
         }
         async with AsyncSessionLocal() as db:
@@ -118,12 +121,19 @@ class OutboxService:
                     conversation_id=int(payload["conversation_id"]),
                     content=str(payload["content"]),
                     run_id=str(payload["run_id"]),
+                    tenant_id=str(payload.get("tenant_id") or "default"),
                 )
                 await AgentRunService.mark_persisted(str(payload["run_id"]))
             elif event.event_type == "conversation.checkpoint_delete":
                 await delete_thread_checkpoint(
-                    int(payload["conversation_id"]), user_id=int(payload["user_id"])
+                    int(payload["conversation_id"]),
+                    user_id=int(payload["user_id"]),
+                    tenant_id=str(payload.get("tenant_id") or "default"),
                 )
+            elif event.event_type == "memory.index.upsert":
+                await MemoryIndexService.upsert_from_event(payload)
+            elif event.event_type == "memory.index.delete":
+                await MemoryIndexService.delete_from_event(payload)
             else:
                 raise ValueError(f"未知 outbox event_type: {event.event_type}")
             await cls._finish(event.id, success=True)

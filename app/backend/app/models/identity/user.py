@@ -9,6 +9,8 @@ class User(Base):
     __table_args__ = {"schema": "app"}
 
     id = Column(Integer, primary_key=True, index=True)
+    # 旧数据迁移到 default 租户；新认证主体必须携带真实租户 ID。
+    tenant_id = Column(String(36), nullable=False, default="default", index=True)
     username = Column(String(50), unique=True, nullable=False)
     email = Column(String(100), unique=True, nullable=False)
     password_hash = Column(String(255), nullable=False)

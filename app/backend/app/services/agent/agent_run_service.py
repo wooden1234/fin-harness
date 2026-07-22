@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import func, or_, select
 
 from app.core.database import AsyncSessionLocal
-from app.models.agent_run import AgentRun, AgentRunStatus
+from app.models.agent.agent_run import AgentRun, AgentRunStatus
 
 
 class AgentRunService:
@@ -20,6 +20,7 @@ class AgentRunService:
         user_id: int,
         conversation_id: int | None,
         thread_id: str,
+        tenant_id: str = "default",
         trace_id: str | None = None,
         run_id: str | None = None,
     ) -> AgentRun:
@@ -27,6 +28,7 @@ class AgentRunService:
             run = AgentRun(
                 id=run_id,
                 user_id=user_id,
+                tenant_id=tenant_id,
                 conversation_id=conversation_id,
                 thread_id=thread_id,
                 trace_id=trace_id,
@@ -98,7 +100,7 @@ class AgentRunService:
 
     @staticmethod
     async def metrics() -> dict[str, int]:
-        from app.models.outbox_event import OutboxEvent
+        from app.models.persistence.outbox_event import OutboxEvent
 
         async with AsyncSessionLocal() as db:
             run_rows = (await db.execute(

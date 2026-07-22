@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.hashing import get_password_hash, verify_password
 from app.core.logger import get_logger
-from app.models.user import User
+from app.models.identity.user import User
 from app.schemas.user import UserCreate
 
 logger = get_logger(service="user_service")
