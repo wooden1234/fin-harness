@@ -18,6 +18,7 @@ class User(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
     last_login = Column(DateTime, nullable=True)
     status = Column(String(20), default="active")
+    role = Column(String(32), nullable=False, default="user", index=True)
 
     conversations = relationship(
         "Conversation",

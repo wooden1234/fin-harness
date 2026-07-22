@@ -38,6 +38,10 @@ class MemoryUpdate(BaseModel):
     expected_version: int | None = Field(default=None, ge=1)
 
 
+class MemoryCorrection(MemoryUpdate):
+    reason: str = Field(..., min_length=1, max_length=500)
+
+
 class EpisodicMemoryCreate(BaseModel):
     event_key: str = Field(..., min_length=1, max_length=128)
     value: dict[str, Any]
@@ -78,3 +82,15 @@ class MemoryResponse(BaseModel):
             created_at=record.created_at,
             updated_at=record.updated_at,
         )
+
+
+class ProfileResponse(BaseModel):
+    user_id: int
+    tenant_id: str
+    preferences: list[MemoryResponse]
+
+
+class MemorySyncResponse(BaseModel):
+    items: list[MemoryResponse]
+    deleted_ids: list[str]
+    next_cursor: datetime | None

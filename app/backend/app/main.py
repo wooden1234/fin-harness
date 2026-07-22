@@ -1,4 +1,12 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# # LangSmith / LangChain 从 os.environ 读追踪开关；pydantic Settings 不会把
+# # 未声明字段写入环境变量，因此这里显式 load，保证 LANGSMITH_* 生效。
+# _PROJECT_ROOT = Path(__file__).resolve().parents[3]
+# load_dotenv(_PROJECT_ROOT / ".env", override=False)
 
 from fastapi import FastAPI
 

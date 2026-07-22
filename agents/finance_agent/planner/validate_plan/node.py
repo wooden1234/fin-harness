@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from langchain_core.runnables import RunnableConfig
+from langgraph.types import Overwrite
 
 from agents.states import FinAgentState
 from agents.finance_agent.planner.common import assign_task_ids, logger
@@ -20,6 +21,8 @@ async def validate_plan_node(
     if state.get("planner_error_reason") in {"empty_query", "api_error", "unexpected_error"}:
         return {
             "sub_tasks": [],
+            # 空计划不应继承上一轮并行 worker 的结果。
+            "task_results": Overwrite([]),
             "planner_needs_repair": False,
             "planner_validation_issues": preset_issues,
             "steps": ["validate_plan:skip"],
@@ -27,6 +30,7 @@ async def validate_plan_node(
     if any(str(issue).startswith("schema_error:") for issue in preset_issues):
         return {
             "sub_tasks": [],
+            "task_results": Overwrite([]),
             "planner_validation_issues": preset_issues,
             "planner_needs_repair": True,
             "steps": ["validate_plan:needs_repair"],
@@ -56,6 +60,8 @@ async def validate_plan_node(
         )
         return {
             "sub_tasks": [],
+            # reducer 默认是追加，必须显式覆盖才能清理旧结果。
+            "task_results": Overwrite([]),
             "planner_validation_issues": issues,
             "planner_needs_repair": False,
             "planner_error_reason": reason,

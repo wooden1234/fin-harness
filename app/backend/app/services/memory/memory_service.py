@@ -43,6 +43,44 @@ class MemoryService:
             return list(result.scalars().all())
 
     @staticmethod
+    async def profile(*, tenant_id: str, user_id: int) -> list[MemoryRecord]:
+        """返回用户画像视图所需的 active 偏好。"""
+        return await MemoryService.list(tenant_id=tenant_id, user_id=user_id)
+
+    @staticmethod
+    async def sync(
+        *,
+        tenant_id: str,
+        user_id: int,
+        since: datetime | None = None,
+        limit: int = 100,
+    ) -> tuple[list[MemoryRecord], list[str], datetime | None]:
+        """按更新时间返回当前用户的记忆增量和失效记录。"""
+        async with AsyncSessionLocal() as db:
+            statement = MemoryService._scope(
+                select(MemoryRecord),
+                tenant_id,
+                user_id,
+            )
+            if since is not None:
+                statement = statement.where(MemoryRecord.updated_at > since)
+            rows = list(
+                (
+                    await db.execute(
+                        statement.order_by(MemoryRecord.updated_at.asc()).limit(limit)
+                    )
+                ).scalars().all()
+            )
+        changed = [row for row in rows if row.status in {"active", "pending"}]
+        deleted = [
+            row.id
+            for row in rows
+            if row.status in {"revoked", "expired", "rejected", "superseded", "deleted"}
+        ]
+        next_cursor = max((row.updated_at for row in rows if row.updated_at), default=since)
+        return changed, deleted, next_cursor
+
+    @staticmethod
     async def expire_due(*, limit: int = 100) -> int:
         """标记过期记录并生成删除索引事件。"""
         now = datetime.now(timezone.utc)
@@ -172,6 +210,8 @@ class MemoryService:
                 expires_at=expires_at,
             )
             db.add(record)
+            # 事件通过外键引用新记录，先 flush 确保父记录已写入当前事务。
+            await db.flush()
             event_type = "memory.index.upsert"
             db.add(
                 OutboxEvent(
@@ -233,6 +273,8 @@ class MemoryService:
             version=1,
         )
         db.add(record)
+        # pending 记录同样被事件引用，必须先完成 flush 再插入审计事件。
+        await db.flush()
         db.add(
             MemoryEvent(
                 id=str(uuid4()),
@@ -471,6 +513,7 @@ class MemoryService:
         display_text: str | None = None,
         ttl_days: int | None = None,
         expected_version: int | None = None,
+        reason: str | None = None,
         actor_id: str | None = None,
     ) -> MemoryRecord | None:
         async with AsyncSessionLocal() as db:
@@ -523,7 +566,11 @@ class MemoryService:
                     memory_id=record.id,
                     event_type="updated",
                     event_key=f"memory:{record.id}:v:{record.version}:updated",
-                    payload_json={"memory_key": record.memory_key, "value": next_value},
+                    payload_json={
+                        "memory_key": record.memory_key,
+                        "value": next_value,
+                        "reason": reason,
+                    },
                     actor_type="user",
                     actor_id=actor_id,
                 )

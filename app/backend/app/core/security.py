@@ -44,3 +44,15 @@ async def get_current_user(
     if not getattr(user, "tenant_id", None):
         raise credentials_exception
     return user
+
+
+async def require_compliance_user(
+    current_user=Depends(get_current_user),
+):
+    if getattr(current_user, "role", "user") not in {
+        "tenant_admin",
+        "compliance_operator",
+        "platform_admin",
+    }:
+        raise HTTPException(status_code=403, detail="需要管理员合规权限")
+    return current_user

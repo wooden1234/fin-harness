@@ -17,6 +17,7 @@ import {
 import { useAuthStore } from '@/stores/useAuthStore'
 import { useChatStore, type Message } from '@/stores/useChatStore'
 import type { Conversation } from '@/types/api'
+import { MemoryProfilePanel } from './MemoryProfilePanel'
 
 function formatTitle(conversation: Conversation): string {
   return conversation.title || `会话 ${conversation.conversation_id?.slice(0, 8) ?? conversation.id}`
@@ -172,6 +173,8 @@ export function Sidebar({
           新会话
         </button>
       </div>
+
+      <MemoryProfilePanel />
 
       <div className="flex-1 overflow-y-auto px-2 pb-2">
         {loadingList ? (

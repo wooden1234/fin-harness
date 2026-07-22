@@ -8,12 +8,56 @@ from app.schemas.memory import (
     EpisodicMemoryCreate,
     MemoryCreate,
     MemoryResponse,
+    MemoryCorrection,
+    MemorySyncResponse,
+    ProfileResponse,
     MemoryUpdate,
 )
 from app.services.memory.memory_service import MemoryService
 from app.services.memory.memory_metrics import snapshot
 
 router = APIRouter(prefix="/memories", tags=["memories"])
+
+
+@router.get("/profile", response_model=ProfileResponse)
+async def get_memory_profile(current_user: User = Depends(get_current_user)):
+    records = await MemoryService.profile(
+        tenant_id=current_user.tenant_id,
+        user_id=current_user.id,
+    )
+    return ProfileResponse(
+        user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+        preferences=[MemoryResponse.from_record(record) for record in records],
+    )
+
+
+@router.get("/sync", response_model=MemorySyncResponse)
+async def sync_memories(
+    since: str | None = None,
+    limit: int = 100,
+    current_user: User = Depends(get_current_user),
+):
+    parsed_since = None
+    if since:
+        try:
+            from datetime import datetime
+
+            parsed_since = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="since 格式错误") from exc
+    limit = max(1, min(limit, 500))
+    records, deleted_ids, next_cursor = await MemoryService.sync(
+        tenant_id=current_user.tenant_id,
+        user_id=current_user.id,
+        since=parsed_since,
+        limit=limit,
+    )
+    return MemorySyncResponse(
+        items=[MemoryResponse.from_record(record) for record in records],
+        deleted_ids=deleted_ids,
+        next_cursor=next_cursor,
+    )
 
 
 @router.get("/metrics")
@@ -140,6 +184,31 @@ async def update_memory(
             display_text=payload.display_text,
             ttl_days=payload.ttl_days,
             expected_version=payload.expected_version,
+            actor_id=str(current_user.id),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if record is None:
+        raise HTTPException(status_code=404, detail="记忆不存在或无权访问")
+    return MemoryResponse.from_record(record)
+
+
+@router.post("/{memory_id}/correct", response_model=MemoryResponse)
+async def correct_memory(
+    memory_id: str,
+    payload: MemoryCorrection,
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        record = await MemoryService.update(
+            tenant_id=current_user.tenant_id,
+            user_id=current_user.id,
+            memory_id=memory_id,
+            value=payload.value,
+            display_text=payload.display_text,
+            ttl_days=payload.ttl_days,
+            expected_version=payload.expected_version,
+            reason=payload.reason,
             actor_id=str(current_user.id),
         )
     except ValueError as exc:
