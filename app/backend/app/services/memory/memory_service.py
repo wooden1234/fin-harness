@@ -13,6 +13,8 @@ from app.models.memory.memory_event import MemoryEvent
 from app.models.memory.memory_record import MemoryRecord
 from app.models.persistence.outbox_event import OutboxEvent
 from app.services.memory.memory_policy import validate_preference
+from app.services.memory.memory_conflict import values_conflict
+from app.core.config import settings
 
 
 class MemoryService:
@@ -107,6 +109,20 @@ class MemoryService:
                 )
             )
             if current is not None:
+                if values_conflict((current.value_json or {}).get("value"), value):
+                    return await MemoryService._create_pending_record(
+                        db=db,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        memory_key=memory_key,
+                        value=value,
+                        provenance={
+                            **(provenance or {}),
+                            "conflict_with": current.id,
+                        },
+                        actor_id=actor_id,
+                        event_type="conflict_detected",
+                    )
                 current.status = "superseded"
                 current.updated_at = now
                 db.add(
@@ -145,6 +161,7 @@ class MemoryService:
                 memory_key=memory_key,
                 value_json={"value": value},
                 display_text=display_text or f"{memory_key}={value}",
+                search_text=f"{memory_key} {display_text or value}",
                 provenance_json=provenance or {"source_type": "explicit_user_command"},
                 confidence=1.0,
                 consent_status="granted",
@@ -189,6 +206,262 @@ class MemoryService:
             return record
 
     @staticmethod
+    async def _create_pending_record(
+        *,
+        db: Any,
+        tenant_id: str,
+        user_id: int,
+        memory_key: str,
+        value: Any,
+        provenance: dict[str, Any],
+        actor_id: str | None,
+        event_type: str = "candidate_created",
+    ) -> MemoryRecord:
+        record = MemoryRecord(
+            id=str(uuid4()),
+            tenant_id=tenant_id,
+            user_id=user_id,
+            memory_type="preference",
+            memory_key=memory_key,
+            value_json={"value": value},
+            display_text=f"{memory_key}={value}",
+            search_text=f"{memory_key} {value}",
+            provenance_json=provenance,
+            confidence=0.7,
+            consent_status="pending",
+            status="pending",
+            version=1,
+        )
+        db.add(record)
+        db.add(
+            MemoryEvent(
+                id=str(uuid4()),
+                tenant_id=tenant_id,
+                user_id=user_id,
+                memory_id=record.id,
+                event_type=event_type,
+                event_key=f"memory:{record.id}:{event_type}",
+                payload_json={"memory_key": memory_key, "value": value},
+                actor_type="system" if event_type == "conflict_detected" else "user",
+                actor_id=actor_id,
+            )
+        )
+        await db.commit()
+        await db.refresh(record)
+        return record
+
+    @staticmethod
+    async def create_candidate(
+        *,
+        tenant_id: str,
+        user_id: int,
+        memory_key: str,
+        value: Any,
+        provenance: dict[str, Any] | None = None,
+        actor_id: str | None = None,
+    ) -> MemoryRecord:
+        validate_preference(memory_key, value)
+        now = datetime.now(timezone.utc)
+        async with AsyncSessionLocal() as db:
+            existing = await db.scalar(
+                MemoryService._scope(
+                    select(MemoryRecord).where(
+                        MemoryRecord.memory_type == "preference",
+                        MemoryRecord.memory_key == memory_key,
+                        MemoryRecord.status == "pending",
+                    ),
+                    tenant_id,
+                    user_id,
+                )
+            )
+            if existing is not None:
+                return existing
+            active = await db.scalar(
+                MemoryService._scope(
+                    select(MemoryRecord).where(
+                        MemoryRecord.memory_type == "preference",
+                        MemoryRecord.memory_key == memory_key,
+                        MemoryRecord.status == "active",
+                    ),
+                    tenant_id,
+                    user_id,
+                )
+            )
+            if active is not None:
+                return active
+            record = await MemoryService._create_pending_record(
+                db=db,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                memory_key=memory_key,
+                value=value,
+                provenance=provenance or {"source_type": "candidate_extractor"},
+                actor_id=actor_id,
+            )
+            return record
+
+    @staticmethod
+    async def create_episodic(
+        *,
+        tenant_id: str,
+        user_id: int,
+        event_key: str,
+        value: dict[str, Any],
+        display_text: str,
+        expires_at: datetime | None = None,
+        source_conversation_id: int | None = None,
+        source_message_id: int | None = None,
+        source_run_id: str | None = None,
+        provenance: dict[str, Any] | None = None,
+        actor_id: str | None = None,
+    ) -> MemoryRecord:
+        now = datetime.now(timezone.utc)
+        # episodic memory 默认保留 30～90 天范围内的配置值，允许调用方显式覆盖。
+        ttl_days = max(30, min(90, settings.EPISODIC_MEMORY_TTL_DAYS))
+        effective_expires_at = expires_at or (now + timedelta(days=ttl_days))
+        async with AsyncSessionLocal() as db:
+            record = MemoryRecord(
+                id=str(uuid4()),
+                tenant_id=tenant_id,
+                user_id=user_id,
+                memory_type="episodic",
+                memory_key=event_key,
+                value_json=value,
+                display_text=display_text,
+                search_text=f"{event_key} {display_text}",
+                provenance_json={
+                    **(provenance or {"source_type": "episodic_event"}),
+                    "conversation_id": source_conversation_id,
+                    "message_id": source_message_id,
+                    "run_id": source_run_id,
+                },
+                confidence=1.0,
+                consent_status="granted",
+                consented_at=now,
+                status="active",
+                expires_at=effective_expires_at,
+                source_conversation_id=source_conversation_id,
+                source_message_id=source_message_id,
+                source_run_id=source_run_id,
+            )
+            db.add(record)
+            db.add(
+                OutboxEvent(
+                    event_key=f"memory:index:upsert:{record.id}:v:1",
+                    event_type="memory.index.upsert",
+                    aggregate_id=record.id,
+                    payload={
+                        "memory_id": record.id,
+                        "tenant_id": tenant_id,
+                        "user_id": user_id,
+                        "memory_type": "episodic",
+                        "version": 1,
+                    },
+                    status="pending",
+                )
+            )
+            await db.commit()
+            await db.refresh(record)
+            return record
+
+    @staticmethod
+    async def list_episodic(*, tenant_id: str, user_id: int) -> list[MemoryRecord]:
+        now = datetime.now(timezone.utc)
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                MemoryService._scope(
+                    select(MemoryRecord).where(
+                        MemoryRecord.memory_type == "episodic",
+                        MemoryRecord.status == "active",
+                        (MemoryRecord.expires_at.is_(None) | (MemoryRecord.expires_at > now)),
+                    ),
+                    tenant_id,
+                    user_id,
+                ).order_by(MemoryRecord.created_at.desc())
+            )
+            return list(result.scalars().all())
+
+    @staticmethod
+    async def list_candidates(*, tenant_id: str, user_id: int) -> list[MemoryRecord]:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                MemoryService._scope(
+                    select(MemoryRecord).where(
+                        MemoryRecord.memory_type == "preference",
+                        MemoryRecord.status == "pending",
+                    ),
+                    tenant_id,
+                    user_id,
+                ).order_by(MemoryRecord.created_at.desc())
+            )
+            return list(result.scalars().all())
+
+    @staticmethod
+    async def decide_candidate(
+        *,
+        tenant_id: str,
+        user_id: int,
+        memory_id: str,
+        decision: str,
+        actor_id: str,
+    ) -> MemoryRecord | None:
+        async with AsyncSessionLocal() as db:
+            record = await db.scalar(
+                MemoryService._scope(
+                    select(MemoryRecord).where(
+                        MemoryRecord.id == memory_id,
+                        MemoryRecord.status == "pending",
+                    ),
+                    tenant_id,
+                    user_id,
+                )
+            )
+            if record is None:
+                return None
+            now = datetime.now(timezone.utc)
+            if decision == "confirm":
+                record.status = "active"
+                record.consent_status = "granted"
+                record.consented_at = now
+                db.add(
+                    OutboxEvent(
+                        event_key=f"memory:index:upsert:{record.id}:v:{record.version}",
+                        event_type="memory.index.upsert",
+                        aggregate_id=record.id,
+                        payload={
+                            "memory_id": record.id,
+                            "tenant_id": tenant_id,
+                            "user_id": user_id,
+                            "memory_type": record.memory_type,
+                            "version": record.version,
+                        },
+                        status="pending",
+                    )
+                )
+                event_type = "activated"
+            else:
+                record.status = "rejected"
+                record.consent_status = "denied"
+                event_type = "rejected"
+            record.updated_at = now
+            db.add(
+                MemoryEvent(
+                    id=str(uuid4()),
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    memory_id=record.id,
+                    event_type=event_type,
+                    event_key=f"memory:{record.id}:{event_type}",
+                    payload_json={"decision": decision},
+                    actor_type="user",
+                    actor_id=actor_id,
+                )
+            )
+            await db.commit()
+            await db.refresh(record)
+            return record
+
+    @staticmethod
     async def update(
         *,
         tenant_id: str,
@@ -218,6 +491,7 @@ class MemoryService:
             next_value = value if value is not None else record.value_json["value"]
             rule = validate_preference(record.memory_key, next_value)
             record.value_json = {"value": next_value}
+            record.search_text = f"{record.memory_key} {display_text or next_value}"
             if display_text is not None:
                 record.display_text = display_text
             if ttl_days is not None:

@@ -20,6 +20,7 @@ class MemoryRecord(Base):
     memory_key = Column(String(64), nullable=False)
     value_json = Column(JSON, nullable=False)
     display_text = Column(Text, nullable=False)
+    search_text = Column(Text, nullable=False)
     provenance_json = Column(JSON, nullable=False)
     confidence = Column(Numeric(4, 3), nullable=False, default=1.0)
     consent_status = Column(String(16), nullable=False, default="granted")

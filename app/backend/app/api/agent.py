@@ -24,7 +24,10 @@ from app.services.conversation.conversation_lock_service import (
 )
 from app.services.agent.checkpoint_rebuild_service import CheckpointRebuildService
 from app.services.agent.checkpoint_registry_service import CheckpointRegistryService
-from app.services.memory.memory_command import parse_memory_command
+from app.services.memory.memory_command import (
+    extract_memory_candidate,
+    parse_memory_command,
+)
 from app.services.memory.memory_service import MemoryService
 
 
@@ -152,6 +155,24 @@ async def agent_query(
                 },
                 actor_id=str(current_user.id),
             )
+        else:
+            candidate = extract_memory_candidate(query)
+            if candidate is not None:
+                candidate_key, candidate_value = candidate
+                await MemoryService.create_candidate(
+                    tenant_id=current_user.tenant_id,
+                    user_id=current_user.id,
+                    memory_key=candidate_key,
+                    value=candidate_value,
+                    provenance={
+                        "source_type": "candidate_extractor",
+                        "conversation_id": conversation_pk,
+                        "message_id": user_message.id if user_message else None,
+                        "run_id": run_id,
+                        "excerpt": query[:500],
+                    },
+                    actor_id=str(current_user.id),
+                )
     except Exception as start_err:
         try:
             await AgentRunService.mark_failed(run_id, error_message=str(start_err))

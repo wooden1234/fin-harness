@@ -40,6 +40,7 @@ class MemoryIndexService:
             memory_type=record.memory_type,
             memory_key=record.memory_key,
             value=(record.value_json or {}).get("value"),
+            search_text=record.search_text,
             version=record.version,
         )
 

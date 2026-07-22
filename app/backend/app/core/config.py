@@ -100,6 +100,9 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = "text-embedding-v2"
     EMBEDDING_BASE_URL: str = ""
     EMBEDDING_BATCH_SIZE: int = 0
+    MEMORY_RECALL_TOP_K: int = 8
+    MEMORY_RECALL_TOKEN_BUDGET: int = 512
+    EPISODIC_MEMORY_TTL_DAYS: int = 60
     QWEN_API_KEY: str = ""
     DASHSCOPE_API_KEY: str = ""
     QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"

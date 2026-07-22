@@ -38,6 +38,16 @@ class MemoryUpdate(BaseModel):
     expected_version: int | None = Field(default=None, ge=1)
 
 
+class EpisodicMemoryCreate(BaseModel):
+    event_key: str = Field(..., min_length=1, max_length=128)
+    value: dict[str, Any]
+    display_text: str = Field(..., min_length=1, max_length=1000)
+    expires_at: datetime | None = None
+    source_conversation_id: int | None = None
+    source_message_id: int | None = None
+    source_run_id: str | None = Field(default=None, max_length=36)
+
+
 class MemoryResponse(BaseModel):
     id: str
     memory_type: str
@@ -45,6 +55,7 @@ class MemoryResponse(BaseModel):
     value: Any
     display_text: str
     consent_status: str
+    confidence: float
     status: str
     version: int
     expires_at: datetime | None
@@ -60,6 +71,7 @@ class MemoryResponse(BaseModel):
             value=(record.value_json or {}).get("value"),
             display_text=record.display_text,
             consent_status=record.consent_status,
+            confidence=float(record.confidence or 0),
             status=record.status,
             version=record.version,
             expires_at=record.expires_at,

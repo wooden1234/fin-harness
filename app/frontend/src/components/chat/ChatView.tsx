@@ -5,6 +5,13 @@ import { HitlBanner } from './HitlBanner'
 import { AgentStepsPanel } from './AgentStepsPanel'
 import { useChatStore } from '@/stores/useChatStore'
 import { useAgentChat } from '@/hooks/useAgentChat'
+import { MemoryCandidateBanner } from './MemoryCandidateBanner'
+import {
+  confirmMemoryCandidate,
+  listMemoryCandidates,
+  rejectMemoryCandidate,
+  type MemoryCandidate,
+} from '@/services/api/memories'
 
 const quickPrompts = [
   '信用卡年费怎么收？',
@@ -16,11 +23,26 @@ export function ChatView() {
   const { messages, isGenerating, hitlPending, hitlMessage, agentSteps } = useChatStore()
   const { sendQuery, resumeAgent, cancelStream } = useAgentChat()
   const [input, setInput] = useState('')
+  const [candidates, setCandidates] = useState<MemoryCandidate[]>([])
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, isGenerating, hitlPending, agentSteps])
+
+  useEffect(() => {
+    void listMemoryCandidates().then(setCandidates).catch(() => setCandidates([]))
+  }, [messages.length])
+
+  const decideCandidate = async (id: string, confirm: boolean) => {
+    try {
+      if (confirm) await confirmMemoryCandidate(id)
+      else await rejectMemoryCandidate(id)
+      setCandidates((items) => items.filter((item) => item.id !== id))
+    } catch {
+      // 失败时保留候选，下一次请求会重新获取。
+    }
+  }
 
   const handleSend = () => {
     const text = input.trim()
@@ -89,6 +111,12 @@ export function ChatView() {
           disabled={isGenerating}
         />
       )}
+
+      <MemoryCandidateBanner
+        candidates={candidates}
+        onConfirm={(id) => void decideCandidate(id, true)}
+        onReject={(id) => void decideCandidate(id, false)}
+      />
 
       <ChatInput
         value={input}
