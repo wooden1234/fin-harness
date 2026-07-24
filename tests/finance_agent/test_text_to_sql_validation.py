@@ -1,5 +1,8 @@
 """text_to_sql SQL 校验单元测试。"""
 
+import pytest
+
+from agents.finance_agent.financial_query_agent.services import sql_executor as sql_executor_module
 from agents.finance_agent.financial_query_agent.text_to_sql.validation import (
     validate_generated_sql,
 )
@@ -127,3 +130,113 @@ def test_validate_generated_sql_allows_metadata_query_without_canonical_path():
     )
 
     assert result.ok
+
+
+def test_validate_generated_sql_rejects_select_into():
+    result = validate_generated_sql("SELECT 1 INTO fin_core.generated_table")
+
+    assert not result.ok
+    assert "SELECT INTO" in result.error
+
+
+def test_validate_generated_sql_rejects_dangerous_function():
+    result = validate_generated_sql("SELECT pg_sleep(:seconds)", params={"seconds": 1})
+
+    assert not result.ok
+    assert "危险函数" in result.error
+
+
+def test_validate_generated_sql_rejects_locking_query():
+    result = validate_generated_sql(
+        "SELECT company.id FROM fin_core.financial_companies AS company FOR UPDATE"
+    )
+
+    assert not result.ok
+    assert "锁语句" in result.error
+
+
+def test_validate_generated_sql_rejects_mutating_cte():
+    result = validate_generated_sql(
+        """
+        WITH deleted AS (
+            DELETE FROM fin_core.financial_companies RETURNING id
+        )
+        SELECT * FROM deleted
+        """
+    )
+
+    assert not result.ok
+    assert "数据修改" in result.error
+
+
+def test_validate_generated_sql_rejects_excessive_literal_limit():
+    result = validate_generated_sql(
+        "SELECT company.id FROM fin_core.financial_companies AS company LIMIT 1000000"
+    )
+
+    assert not result.ok
+    assert "LIMIT" in result.error
+
+
+def test_validate_generated_sql_rejects_excessive_parameter_limit():
+    result = validate_generated_sql(
+        "SELECT company.id FROM fin_core.financial_companies AS company LIMIT :limit",
+        params={"limit": 1000000},
+    )
+
+    assert not result.ok
+    assert "LIMIT" in result.error
+
+
+def test_validate_generated_sql_ignores_limit_word_in_literal():
+    result = validate_generated_sql(
+        "SELECT 'limit' AS marker FROM fin_core.financial_companies"
+    )
+
+    assert result.ok
+    assert "LIMIT :__system_limit" in result.validated_sql
+
+
+@pytest.mark.asyncio
+async def test_sql_execution_uses_readonly_transaction_and_timeout(monkeypatch):
+    statements: list[str] = []
+
+    class FakeResult:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return []
+
+    class FakeSession:
+        async def execute(self, statement, params=None):
+            del params
+            statements.append(str(statement))
+            return FakeResult()
+
+        async def rollback(self):
+            statements.append("ROLLBACK")
+
+    class FakeSessionContext:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            del exc_type, exc, traceback
+
+    monkeypatch.setattr(
+        sql_executor_module,
+        "FinancialQuerySessionLocal",
+        lambda: FakeSessionContext(),
+    )
+
+    await sql_executor_module.FinancialSqlExecutor.execute(
+        "SELECT company.id FROM fin_core.financial_companies AS company",
+        params={},
+        limit=5,
+    )
+
+    assert statements[0] == "SET TRANSACTION READ ONLY"
+    assert "statement_timeout" in statements[1]
+    assert statements[2].startswith("SELECT company.id")
+    assert statements[-1] == "ROLLBACK"

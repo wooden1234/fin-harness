@@ -9,7 +9,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from agents.finance_agent.pdf_agent.evaluation import evaluate_evidence_node
-from agents.finance_agent.pdf_agent.generation import answer_node, extract_citation_indices
+from agents.finance_agent.pdf_agent.generation import extract_citation_indices
 from agents.finance_agent.pdf_agent.query_rewrite.answer_mismatch import answer_mismatch_node
 from agents.finance_agent.pdf_agent.query_rewrite.hyde import hyde_node
 from agents.finance_agent.pdf_agent.query_rewrite.step_back import step_back_node
@@ -45,7 +45,7 @@ def route_after_select_rewrite(state: PdfAgentState) -> str:
 def route_after_evaluation(state: PdfAgentState) -> str:
     route = str(state.get("evidence_route") or "web_search")
     if route == "answer":
-        return "answer"
+        return "end"
     if route in {"rewrite", "answer_mismatch"} and int(state.get("rewrite_count") or 0) < 1:
         return "select_rewrite"
     return "end"
@@ -58,7 +58,6 @@ def build_pdf_agent_graph():
     builder.add_node("step_back", step_back_node)
     builder.add_node("hyde", hyde_node)
     builder.add_node("answer_mismatch", answer_mismatch_node)
-    builder.add_node("answer", answer_node)
     builder.add_node("evidence_evaluate", evaluate_evidence_node)
     builder.add_edge(START, "retrieve")
     builder.add_edge("retrieve", "evidence_evaluate")
@@ -72,9 +71,8 @@ def build_pdf_agent_graph():
     builder.add_conditional_edges(
         "evidence_evaluate",
         route_after_evaluation,
-        {"select_rewrite": "select_rewrite", "answer": "answer", "end": END},
+        {"select_rewrite": "select_rewrite", "end": END},
     )
-    builder.add_edge("answer", END)
     return builder.compile()
 
 

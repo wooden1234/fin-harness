@@ -25,6 +25,7 @@ from agents.finance_agent.financial_query_agent.predefined.semantic.registry_see
 from agents.finance_agent.financial_query_agent.services.entity_resolver import (
     EntityResolver,
 )
+from agents.finance_agent.financial_query_agent.services.errors import classify_exception
 from app.core.database import AsyncSessionLocal
 from app.models.finance.annual_financial_fact import (
     AnnualFinancialFact,
@@ -166,9 +167,10 @@ class CanonicalMetricRegistry:
                 )
                 row = (await session.execute(name_stmt)).first()
                 return (row.code, row.name) if row is not None else None
-        except SQLAlchemyError:
-            # 数据库迁移尚未执行时保持旧 seed 路径可用，避免部署顺序导致服务不可用。
-            return None
+        except SQLAlchemyError as exc:
+            # 数据库异常不能伪装成“未命中”，交由上层按基础设施故障降级并告警。
+            failure = classify_exception(exc, source="canonical_metric_registry")
+            raise RuntimeError(failure.code) from exc
 
     @classmethod
     async def _resolve_company_mapping(
@@ -210,9 +212,10 @@ class CanonicalMetricRegistry:
                         ),
                     )
                 row = (await session.execute(stmt.limit(1))).first()
-        except SQLAlchemyError:
-            # 语义治理表未上线时继续使用旧公司覆盖规则。
-            return None
+        except SQLAlchemyError as exc:
+            # 语义治理表异常不能静默退回旧覆盖规则。
+            failure = classify_exception(exc, source="company_metric_mapping")
+            raise RuntimeError(failure.code) from exc
 
         if row is None:
             return None

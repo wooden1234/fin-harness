@@ -5,6 +5,8 @@ from __future__ import annotations
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agents.states import Citation, FinAgentState
+from agents.finance_agent.financial_query_agent.state import FinancialQueryCoverage
+from agents.finance_agent.financial_query_agent.services.errors import FailureCategory
 
 
 def latest_user_query(messages: list) -> str:
@@ -32,9 +34,12 @@ def financial_query_output(
     answer: str,
     context: str | None = None,
     step: str,
-    coverage: str = "covered",
+    coverage: FinancialQueryCoverage = "covered",
     fallback_reason: str = "",
     citations: list[Citation] | None = None,
+    failure_category: FailureCategory | None = None,
+    failure_code: str = "",
+    failure_retryable: bool = False,
 ) -> dict:
     """结构化 SQL 查询输出，并透传 PDF 数据血缘。
 
@@ -58,13 +63,22 @@ def financial_query_output(
         task_result["fallback_reason"] = fallback_reason
     if coverage == "uncovered":
         task_result["fallback_to_web"] = True
-    return {
+    updates = {
         # 拒答/降级：不推 AIMessage，避免中间文案流到前端；由 web/summarize 收口。
         "messages": [] if coverage == "uncovered" else [AIMessage(content=answer)],
         "citations": resolved_citations,
         "task_results": [task_result],
         "steps": [step],
     }
+    if failure_category is not None:
+        updates.update(
+            {
+                "financial_query_failure_category": failure_category,
+                "financial_query_failure_code": failure_code,
+                "financial_query_failure_retryable": failure_retryable,
+            }
+        )
+    return updates
 
 
 def database_failure_output(state: FinAgentState, *, step: str) -> dict:
@@ -75,6 +89,9 @@ def database_failure_output(state: FinAgentState, *, step: str) -> dict:
         step=step,
         coverage="uncovered",
         fallback_reason="financial_query_db_failure",
+        failure_category="database_unavailable",
+        failure_code="financial_query_db_failure",
+        failure_retryable=True,
     )
 
 

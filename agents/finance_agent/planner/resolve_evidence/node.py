@@ -18,8 +18,8 @@ INTENT_TO_EVIDENCE_CHAIN: dict[str, list[str]] = {
     "concept_explain": ["faq", "web_search"],
     "product_policy": ["faq", "web_search"],
     "document_qa": ["pdf", "web_search"],
-    # 数字类禁止降级到 faq 编数；SQL 查无时由联网补充公开口径并标注来源
-    "structured_metric": ["financial_query", "web_search"],
+    # 数字类禁止降级到 faq 编数；SQL 查无时先回年报，再由联网补充公开口径
+    "structured_metric": ["financial_query", "pdf", "web_search"],
     "market_event": ["web_search"],
 }
 

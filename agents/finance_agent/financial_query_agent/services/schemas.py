@@ -10,6 +10,7 @@ from agents.finance_agent.financial_query_agent.predefined.intent import (
     FinancialFactQuery,
     FinancialQueryIntent,
 )
+from agents.finance_agent.financial_query_agent.services.errors import FailureCategory
 
 
 class FinancialSqlResultRow(BaseModel):
@@ -23,6 +24,7 @@ class FinancialSqlResultRow(BaseModel):
     period_label: str = Field(default="")
     period_type: str = Field(default="")
     metric_name: str = Field(default="未知指标")
+    canonical_code: str = Field(default="")
     raw_value: str = Field(default="")
     value: str = Field(default="")
     unit: str = Field(default="")
@@ -36,6 +38,22 @@ class FinancialSqlResultRow(BaseModel):
     section: str = Field(default="")
 
 
+class QueryContract(BaseModel):
+    """SQL 结果应满足的查询语义契约。"""
+
+    companies: list[str] = Field(default_factory=list, description="期望的公司名、简称或股票代码")
+    years: list[int] = Field(default_factory=list, description="期望的报告年份")
+    metrics: list[str] = Field(default_factory=list, description="期望的 canonical_code 列表")
+    period_type: Literal["annual", "quarter", "half_year", "unknown"] = Field(
+        default="unknown",
+        description="期望的期间类型",
+    )
+    operation: Literal["point_lookup", "list", "compare", "trend", "aggregate", "unknown"] = Field(
+        default="unknown",
+        description="查询操作类型",
+    )
+
+
 class GeneratedFinancialSql(BaseModel):
     """复杂查询生成的只读 SQL。"""
 
@@ -47,6 +65,16 @@ class GeneratedFinancialSql(BaseModel):
         description="若信息不足则要求补充，否则执行 SQL。",
     )
     missing_fields: list[str] = Field(default_factory=list, description="复杂查询仍缺失的字段。")
+    query_contract: QueryContract | None = Field(
+        default=None,
+        description="SQL 执行结果必须满足的公司、年份、指标和期间契约。",
+    )
+    failure_category: FailureCategory | None = Field(
+        default=None,
+        description="仅供内部监控使用的生成失败分类，不直接展示给用户。",
+    )
+    failure_code: str = Field(default="", description="仅供内部监控使用的稳定错误码。")
+    failure_retryable: bool = Field(default=False, description="该失败是否允许基础设施重试。")
 
     @field_validator("route", mode="before")
     @classmethod
@@ -62,4 +90,5 @@ __all__ = [
     "FinancialQueryIntent",
     "FinancialSqlResultRow",
     "GeneratedFinancialSql",
+    "QueryContract",
 ]

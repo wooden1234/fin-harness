@@ -14,6 +14,7 @@ from agents.finance_agent.financial_query_agent.predefined.intent import (
     FinancialQueryIntent,
 )
 from agents.finance_agent.financial_query_agent.workflows.predefined import (
+    _select_tool_node,
     predefined_workflow,
 )
 from agents.finance_agent.financial_query_agent.predefined.semantic.models import (
@@ -60,6 +61,36 @@ async def test_predefined_tool_selection_failure_fallbacks_to_text_to_sql():
     assert result["financial_query_plan_route"] == "text_to_sql"
     assert result["financial_query_next_action_sql"] == "fallback_to_text_to_sql"
     assert result["steps"] == ["predefined_tool_selection_failed"]
+
+
+@pytest.mark.asyncio
+async def test_predefined_reuses_planner_selection_without_second_llm_call():
+    state = {
+        **_base_state("腾讯2024年营业收入"),
+        "financial_query_template_id": "exact_metric_lookup",
+        "financial_query_intent": FinancialQueryIntent(
+            companies=["腾讯"],
+            years=[2024],
+            metrics=["营业收入"],
+            operation="lookup",
+        ),
+    }
+    select_tool = AsyncMock()
+
+    with patch(
+        f"{WORKFLOW_MODULE}.select_predefined_tool",
+        new=select_tool,
+    ):
+        result = await _select_tool_node(
+            {
+                "source_state": state,
+                "question": "腾讯2024年营业收入",
+            }
+        )
+
+    select_tool.assert_not_awaited()
+    assert result["template_id"] == "exact_metric_lookup"
+    assert result["intent"] is state["financial_query_intent"]
 
 
 @pytest.mark.asyncio

@@ -5,10 +5,13 @@ from __future__ import annotations
 from typing import Any, NotRequired
 from typing_extensions import Literal, TypedDict
 
-from agents.finance_agent.financial_query_agent.services.schemas import FinancialSqlResultRow
+from agents.finance_agent.financial_query_agent.services.schemas import (
+    FinancialSqlResultRow,
+    QueryContract,
+)
+from agents.finance_agent.financial_query_agent.services.errors import FailureCategory
 
 TextToSqlNextStep = Literal[
-    "clarify_before_generate",
     "generate_sql",
     "clarify_after_generate",
     # 规则门：简单危险错误（safety/schema/parameter）
@@ -47,6 +50,7 @@ class TextToSqlState(TypedDict):
     sql_route: NotRequired[str]
     route_reason: NotRequired[str]
     missing_fields: NotRequired[list[str]]
+    query_contract: NotRequired[QueryContract | None]
     validated_sql: NotRequired[str]
     validation_error: NotRequired[str]
     validation_error_type: NotRequired[str]
@@ -66,6 +70,9 @@ class TextToSqlState(TypedDict):
     halt_answer: NotRequired[str]
     answer: NotRequired[str]
     final_status: NotRequired[TextToSqlFinalStatus]
+    failure_category: NotRequired[FailureCategory | None]
+    failure_code: NotRequired[str]
+    failure_retryable: NotRequired[bool]
 
 
 __all__ = ["TextToSqlFinalStatus", "TextToSqlNextStep", "TextToSqlState"]

@@ -6,11 +6,8 @@
 
 from __future__ import annotations
 
-from typing import cast
-
 from langchain_core.runnables import RunnableConfig
 
-from agents.llm import get_router_llm
 from agents.finance_agent.financial_query_agent.services.schemas import (
     GeneratedFinancialSql,
 )
@@ -20,18 +17,6 @@ from agents.finance_agent.financial_query_agent.text_to_sql.middleware.base impo
 from agents.finance_agent.financial_query_agent.text_to_sql.state import (
     TextToSqlState,
 )
-from app.core.logger import get_logger
-
-logger = get_logger(service="financial_query")
-
-FINANCIAL_QUERY_TEXT_TO_SQL_CLARIFICATION_PROMPT = """你是复杂结构化查询补问助手。请根据用户问题和当前缺失字段，生成一句简洁中文追问。
-
-要求：
-1. 只追问当前仍不足以生成 SQL 的关键信息
-2. 一句话即可，不解释系统实现
-3. 优先点名需要补充的字段或口径
-"""
-
 FINANCIAL_QUERY_TEXT_TO_SQL_NEEDS_CLARIFICATION_ANSWER = (
     "当前问题中的查询条件还不够明确。请补充更具体的公司名称、财务指标、统计年份或计算口径。"
 )
@@ -59,36 +44,6 @@ def _fallback_clarification(missing_fields: list[str]) -> str:
 def _is_empty_or_invalid_question(question: str) -> bool:
     """仅拦截空输入或几乎无内容的问题。"""
     return len(question.strip()) < _MIN_QUESTION_CHARS
-
-
-async def _build_clarification_answer(
-    *,
-    question: str,
-    missing_fields: list[str],
-    route_reason: str,
-    config: RunnableConfig | None = None,
-) -> str:
-    fallback = _fallback_clarification(missing_fields)
-    try:
-        llm = get_router_llm()
-        result = cast(
-            str,
-            await llm.ainvoke(
-                [
-                    ("system", FINANCIAL_QUERY_TEXT_TO_SQL_CLARIFICATION_PROMPT),
-                    (
-                        "human",
-                        f"用户问题：{question}\n缺失字段：{missing_fields}\n原因：{route_reason}",
-                    ),
-                ],
-                config=config,
-            ),
-        )
-        content = getattr(result, "content", result)
-        return str(content).strip() or fallback
-    except Exception:
-        logger.exception("text_to_sql clarification middleware failed")
-        return fallback
 
 
 class ClarificationMiddleware:
@@ -122,12 +77,8 @@ class ClarificationMiddleware:
     ) -> MiddlewareResult | None:
         if generated.route != "clarify":
             return None
-        answer = await _build_clarification_answer(
-            question=state["question"],
-            missing_fields=list(generated.missing_fields),
-            route_reason=generated.reason,
-            config=config,
-        )
+        del state, config
+        answer = _fallback_clarification(list(generated.missing_fields))
         return MiddlewareResult(
             halt=True,
             halt_reason="clarify",

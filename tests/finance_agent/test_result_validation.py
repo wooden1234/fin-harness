@@ -1,6 +1,9 @@
 """text_to_sql 结果校验单元测试。"""
 
-from agents.finance_agent.financial_query_agent.services.schemas import FinancialSqlResultRow
+from agents.finance_agent.financial_query_agent.services.schemas import (
+    FinancialSqlResultRow,
+    QueryContract,
+)
 from agents.finance_agent.financial_query_agent.text_to_sql.validation import (
     validate_generated_sql,
     validate_query_result,
@@ -88,3 +91,56 @@ def test_validate_query_result_accepts_complete_fact_rows():
     )
 
     assert result.ok
+
+
+def test_validate_query_result_contract_accepts_company_year_metric_period():
+    result = validate_query_result(
+        question="宁德时代 2024 年营业收入是多少",
+        sql=_FACT_SQL,
+        rows=[
+            FinancialSqlResultRow(
+                company_name="CATL",
+                period_year=2024,
+                period_type="annual",
+                metric_name="营业收入",
+                canonical_code="REVENUE",
+                raw_value="4,000,000",
+            )
+        ],
+        contract=QueryContract(
+            companies=["宁德时代"],
+            years=[2024],
+            metrics=["REVENUE"],
+            period_type="annual",
+            operation="point_lookup",
+        ),
+    )
+
+    assert result.ok
+
+
+def test_validate_query_result_contract_rejects_wrong_company_and_period():
+    result = validate_query_result(
+        question="宁德时代 2024 年营业收入是多少",
+        sql=_FACT_SQL,
+        rows=[
+            FinancialSqlResultRow(
+                company_name="Tencent",
+                period_year=2024,
+                period_type="quarter",
+                metric_name="营业收入",
+                canonical_code="REVENUE",
+                raw_value="4,000,000",
+            )
+        ],
+        contract=QueryContract(
+            companies=["宁德时代"],
+            years=[2024],
+            metrics=["REVENUE"],
+            period_type="annual",
+            operation="point_lookup",
+        ),
+    )
+
+    assert not result.ok
+    assert result.error_type == "semantic"

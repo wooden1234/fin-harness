@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from agents.llm import get_router_llm
 from agents.finance_agent.financial_query_agent.services.schemas import FinancialSqlResultRow
+from agents.finance_agent.financial_query_agent.services.errors import classify_exception
 from agents.finance_agent.financial_query_agent.text_to_sql.validation.result import ResultValidation
 from app.core.config import settings
 from app.core.logger import get_logger
@@ -92,9 +93,14 @@ async def validate_query_result_with_llm(
                 config=config,
             ),
         )
-    except Exception:
+    except Exception as exc:
         logger.exception("text_to_sql llm result validation failed")
-        return ResultValidation.passed()
+        failure = classify_exception(exc, source="llm_result_validation")
+        return ResultValidation.passed(
+            failure_category=failure.category,
+            failure_code=failure.code,
+            failure_retryable=failure.retryable,
+        )
 
     if decision.verdict == "ok":
         return ResultValidation.passed()

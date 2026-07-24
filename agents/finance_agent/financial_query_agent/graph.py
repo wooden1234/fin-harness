@@ -5,14 +5,12 @@ planner → predefined / text_to_sql；predefined 失败时可降级到 text_to_
 
 from __future__ import annotations
 
-from typing import Literal
-
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from agents.states import FinAgentState
+from agents.finance_agent.financial_query_agent.state import FinancialQueryRoute
 
-FinancialQueryRoute = Literal["predefined", "text_to_sql"]
 
 
 async def planner_node(

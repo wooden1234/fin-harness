@@ -20,6 +20,8 @@ class Settings(BaseSettings):
 
     APP_ENV: str
     DATABASE_URL: str
+    FINANCIAL_QUERY_DATABASE_URL: str = ""
+    FINANCIAL_QUERY_STATEMENT_TIMEOUT_MS: int = 5000
     PGVECTOR_DATABASE_URL: str = ""
     PGVECTOR_TABLE_NAME: str = ""
     PGVECTOR_COLLECTION_FAQ: str = "faq_md_vectors"

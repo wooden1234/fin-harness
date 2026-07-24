@@ -19,6 +19,7 @@ __all__ = [
     "FinancialFactQuery",
     "FinancialFactSearchExecutor",
     "FinancialFactService",
+    "FinancialCitationBuilder",
     "FinancialQueryIntent",
     "FinancialQueryRouter",
     "FinancialQueryTemplate",
@@ -26,12 +27,25 @@ __all__ = [
     "FinancialSqlResultRow",
     "FinancialSqlTemplateRegistry",
     "FinancialTemplateExecutor",
+    "FinancialResultFormatter",
     "GeneratedFinancialSql",
     "SqlValidationError",
 ]
 
 
 def __getattr__(name: str):
+    if name == "FinancialCitationBuilder":
+        from agents.finance_agent.financial_query_agent.services.citation_builder import (
+            FinancialCitationBuilder,
+        )
+
+        return FinancialCitationBuilder
+    if name == "FinancialResultFormatter":
+        from agents.finance_agent.financial_query_agent.services.result_formatter import (
+            FinancialResultFormatter,
+        )
+
+        return FinancialResultFormatter
     if name in {"FinancialFactSearchExecutor"}:
         from agents.finance_agent.financial_query_agent.services.fact_search_executor import (
             FinancialFactSearchExecutor,

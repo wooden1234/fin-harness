@@ -20,6 +20,10 @@ from agents.finance_agent.financial_query_agent.predefined.tool_selection.prompt
     PREDEFINED_TOOL_SELECTION_PROMPT,
 )
 from app.core.logger import get_logger
+from agents.finance_agent.financial_query_agent.services.errors import (
+    FailureCategory,
+    classify_exception,
+)
 
 logger = get_logger(service="financial_query")
 
@@ -32,6 +36,9 @@ class PredefinedToolSelectionResult:
     template_id: str
     slots: PredefinedSlotExtraction | None
     error: str = ""
+    failure_category: FailureCategory | None = None
+    failure_code: str = ""
+    failure_retryable: bool = False
 
 
 def _operation_for_template(template_id: str) -> str:
@@ -60,12 +67,12 @@ async def select_predefined_tool(
     config: RunnableConfig = None,
 ) -> PredefinedToolSelectionResult:
     """LLM 选择白名单模板并提取参数，失败时返回可兜底的错误状态。"""
-    llm = get_router_llm()
-    chain = (
-        llm.bind_tools(tools=[predefined_sql])
-        | PydanticToolsParser(tools=[predefined_sql], first_tool_only=True)
-    )
     try:
+        llm = get_router_llm()
+        chain = (
+            llm.bind_tools(tools=[predefined_sql])
+            | PydanticToolsParser(tools=[predefined_sql], first_tool_only=True)
+        )
         tool_call = cast(
             predefined_sql,
             await chain.ainvoke(
@@ -76,13 +83,17 @@ async def select_predefined_tool(
                 config=config,
             ),
         )
-    except Exception:
+    except Exception as exc:
         logger.exception("predefined tool_selection failed")
+        failure = classify_exception(exc, source="predefined_tool_selection")
         return PredefinedToolSelectionResult(
             success=False,
             template_id="",
             slots=None,
             error="tool_selection_failed",
+            failure_category=failure.category,
+            failure_code=failure.code,
+            failure_retryable=failure.retryable,
         )
 
     if not isinstance(tool_call, predefined_sql):

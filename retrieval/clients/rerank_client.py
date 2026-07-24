@@ -68,6 +68,21 @@ def rerank_documents(
     return _rerank_dashscope(query=query, documents=documents, top_n=top_n)
 
 
+async def arerank_documents(
+    *,
+    query: str,
+    documents: list[str],
+    top_n: int,
+) -> list[RerankResult]:
+    """异步重排入口，供异步 PDF 检索链路使用。"""
+    if not documents:
+        return []
+    provider = _provider()
+    if provider == "xfyun":
+        return await _arerank_xfyun(query=query, documents=documents, top_n=top_n)
+    return await _arerank_dashscope(query=query, documents=documents, top_n=top_n)
+
+
 def _uses_compatible_rerank_api(url: str) -> bool:
     return "compatible-api" in str(url or "").rstrip("/")
 
@@ -131,6 +146,53 @@ def _rerank_xfyun(
         },
         timeout=settings.RERANK_TIMEOUT_SEC,
     )
+    response.raise_for_status()
+    parsed = _parse_rerank_results(response.json())
+    parsed.sort(key=lambda item: item.score, reverse=True)
+    return parsed[:top_n]
+
+
+async def _arerank_dashscope(
+    *,
+    query: str,
+    documents: list[str],
+    top_n: int,
+) -> list[RerankResult]:
+    api_key, url, model = _resolve_rerank_credentials()
+    if _uses_compatible_rerank_api(url):
+        payload = {"model": model, "query": query, "documents": documents, "top_n": top_n}
+    else:
+        payload = {
+            "model": model,
+            "input": {"query": query, "documents": documents},
+            "parameters": {
+                "return_documents": settings.RERANK_RETURN_DOCUMENTS,
+                "top_n": top_n,
+            },
+        }
+    async with httpx.AsyncClient(timeout=settings.RERANK_TIMEOUT_SEC) as client:
+        response = await client.post(
+            url,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+        )
+    response.raise_for_status()
+    return _parse_rerank_results(response.json())
+
+
+async def _arerank_xfyun(
+    *,
+    query: str,
+    documents: list[str],
+    top_n: int,
+) -> list[RerankResult]:
+    api_key, url, model = _resolve_rerank_credentials()
+    async with httpx.AsyncClient(timeout=settings.RERANK_TIMEOUT_SEC) as client:
+        response = await client.post(
+            url,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": model, "query": query, "documents": documents},
+        )
     response.raise_for_status()
     parsed = _parse_rerank_results(response.json())
     parsed.sort(key=lambda item: item.score, reverse=True)

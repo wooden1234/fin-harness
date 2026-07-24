@@ -9,6 +9,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from agents.llm import get_pdf_llm
+from agents.finance_agent.pdf_agent.generation import extract_citation_indices
 
 from ..state import PdfAgentState
 from ..trace import append_trace
@@ -51,6 +52,7 @@ def _parse_evaluation(content: Any) -> dict[str, Any]:
         "strategy_reason": str(payload.get("strategy_reason") or ""),
         "web_reason": str(payload.get("web_reason") or ""),
         "confidence": confidence,
+        "answer": str(payload.get("answer") or "").strip(),
     }
 
 
@@ -66,12 +68,25 @@ async def evaluate_evidence_node(state: PdfAgentState, *, config=None) -> PdfAge
     prompt = PDF_EVIDENCE_EVALUATION_PROMPT.format(question=question, context=context)
     try:
         response = await get_pdf_llm().ainvoke(
-            [SystemMessage(content=prompt), HumanMessage(content=question)],
+            [
+                SystemMessage(content=prompt),
+                HumanMessage(content="请返回证据判断与答案的 JSON 结果。"),
+            ],
             config=config,
         )
         evaluation = _parse_evaluation(response.content)
         if not evaluation:
             raise ValueError("证据评判返回无法解析")
+        answer = evaluation["answer"] if evaluation["route"] == "answer" else ""
+        if evaluation["route"] == "answer" and not answer:
+            evaluation = {
+                **evaluation,
+                "route": "web_search",
+                "answerable": False,
+                "reason": evaluation["reason"] or "模型未生成有效答案",
+                "web_reason": evaluation["web_reason"] or "PDF 证据无法形成有效答案",
+            }
+        citation_indices = extract_citation_indices(answer, len(state.get("hits") or []))
         trace_update = append_trace(
             state,
             "evidence_evaluate",
@@ -86,12 +101,16 @@ async def evaluate_evidence_node(state: PdfAgentState, *, config=None) -> PdfAge
             strategy_reason=evaluation["strategy_reason"],
             web_reason=evaluation["web_reason"],
             confidence=evaluation["confidence"],
+            answer_chars=len(answer),
+            citation_count=len(citation_indices),
         )
         return {
             "evidence_evaluation": evaluation,
             "evidence_evaluation_status": "ok",
             "evidence_route": evaluation["route"],
             "next_rewrite_strategy": evaluation["next_strategy"],
+            "answer": answer,
+            "citation_indices": citation_indices,
             **trace_update,
         }
     except Exception as exc:

@@ -2,133 +2,117 @@
 
 from __future__ import annotations
 
+import re
+
 from agents.finance_agent.financial_query_agent.text_to_sql.retrievers.sql_examples import (
     FinancialSqlExampleRetriever,
 )
 
 _EXAMPLE_RETRIEVER = FinancialSqlExampleRetriever()
 
-FINANCIAL_SQL_SCHEMA_PROMPT = """\
-表 fin_core.financial_companies：
-- id: 公司主键
-- company_key: 公司规范化标识
-- name: 公司名称
-- ticker: 股票代码
+_QUARTER_RE = re.compile(r"季度|半年度|半年报|单季|Q[1-4]|一季报|三季报", re.IGNORECASE)
+_MAPPING_RE = re.compile(
+    r"对比|比较|排名|排行|前十|前\d+|哪些公司|筛选|大于|小于|不少于|不超过|"
+    r"最高|最低|平均|合计|汇总|同比|环比|增速|占比"
+)
+_RAW_CELL_RE = re.compile(
+    r"原文|原始表格|单元格|行列|表头|附注|明细|账面余额|计提比例|坏账准备"
+)
 
-表 fin_core.annual_report_documents：
-- id: 文档主键
-- doc_id: 文档唯一标识
-- company_id: 对应公司主键，关联 financial_companies.id
-- title: 文档标题
-- fiscal_year: 财年
-- source: 原始文件名或来源
+_CORE_SCHEMA = """\
+仅允许 PostgreSQL fin_core schema，表和列如下：
 
-表 fin_core.annual_financial_tables：
-- id: 表格主键
-- document_id: 对应年报文档主键，关联 annual_report_documents.id
-- chunk_index: 文档内表格序号
-- page_num: 页码
-- section: 所在章节
-- table_kind: 报表类别
+financial_companies company：
+id, company_key, name, ticker
 
-表 fin_core.financial_metrics：
-- id: 指标主键
-- canonical_name: PDF 抽取出的 source metric 原始指标名，不等同于统一业务口径
-- aliases: 原始抽取别名，可能为空
-- statement_type: 原始表格或章节类型
+annual_report_documents document：
+id, doc_id, company_id, title, fiscal_year, source
 
-表 fin_core.canonical_metrics：
-- code: 统一指标编码，例如 REVENUE、NET_INCOME_ATTR_PARENT
-- name: 统一指标名称
-- statement_type: 统一指标所属报表类型
-- value_type: amount / ratio / count
-- description: 指标口径说明
-- is_active: 是否启用
+annual_financial_tables table_ctx：
+id, document_id, page_num, section, table_kind
 
-表 fin_core.canonical_metric_aliases：
-- id: 别名主键
-- canonical_code: 对应 canonical_metrics.code
-- alias: 用户可能输入的指标词
-- normalized_alias: 归一化别名
-- priority: 匹配优先级
-- is_active: 是否启用
+financial_metrics metric：
+id, canonical_name, aliases, statement_type
 
-表 fin_core.company_metric_mappings：
-- id: 映射主键
-- company_id: 公司主键
-- canonical_code: 统一指标编码
-- source_metric_id: 对应 financial_metrics.id
-- source_metric_name: 该公司报表里的实际指标名
-- valid_from_year / valid_to_year: 适用年份范围
-- confidence: 映射置信度
-- review_status: approved 才可作为可信映射
-- is_active: 是否启用
+canonical_metrics canonical_metric：
+code, name, statement_type, value_type, is_active
 
-表 fin_core.annual_financial_facts：
-- id: 事实主键
-- table_id: 对应财务表主键，关联 annual_financial_tables.id
-- metric_id: 对应指标主键，关联 financial_metrics.id
-- canonical_code: 统一指标编码；有值时优先用该字段做口径查询
-- source_cell_id: 来源单元格证据，关联 raw_table_cells.id
-- row_index: 原始表格行号
-- period_label: 原始期间标签
-- period_year: 标准化年份
-- period_type: 期间类型
-- value: 标准化数值
-- raw_value: 原始文本值
-- unit: 单位
-- currency: 币种
-- raw_row: 原始行文本
-- quality_status: pending / passed / failed / reviewed
-- review_status: unreviewed / approved / rejected
-- is_published: 是否发布给 agent 精确查询
+annual_financial_facts fact：
+id, table_id, metric_id, canonical_code, source_cell_id, row_index,
+period_label, period_year, period_type, value, raw_value, unit, currency,
+raw_row, quality_status, review_status, is_published
+
+标准 Join：
+fact.table_id = table_ctx.id
+table_ctx.document_id = document.id
+fact.metric_id = metric.id
+document.company_id = company.id
+fact.canonical_code = canonical_metric.code
 
 常用 canonical_code：
-- 营业收入 / 营收 / 收入: REVENUE
-- 归属于上市公司股东的净利润 / 归母净利润 / 净利润: NET_INCOME_ATTR_PARENT
-- 营业利润 / 经营利润: OPERATING_PROFIT
-- 经营活动产生的现金流量净额 / 经营现金流净额: OPERATING_CASHFLOW_NET
-- 研发费用 / 研发支出: RND_EXPENSE
-- 毛利率: GROSS_MARGIN
-- 总资产 / 资产总计: TOTAL_ASSETS
-- 总负债 / 负债合计: TOTAL_LIABILITIES
-- 基本每股收益 / EPS: EPS_BASIC
+REVENUE=营业收入；NET_INCOME_ATTR_PARENT=归母净利润；
+OPERATING_PROFIT=营业利润；OPERATING_CASHFLOW_NET=经营现金流净额；
+RND_EXPENSE=研发费用；GROSS_MARGIN=毛利率；TOTAL_ASSETS=总资产；
+TOTAL_LIABILITIES=总负债；EPS_BASIC=基本每股收益。
 
-表 fin_core.raw_table_cells：
-- id: 单元格主键
-- table_id: 表格主键
-- document_id: 文档主键
-- row_index / col_index: 单元格位置
-- row_header / col_header: 行列头
-- cell_text: 原始单元格文本
-- normalized_value: 标准化数值
-- confidence: 抽取置信度
+事实查询优先过滤 fact.canonical_code，并优先使用已发布或已审核数据。
+"""
 
-推荐 Join 路径：
-fin_core.annual_financial_facts AS fact
-JOIN fin_core.annual_financial_tables AS table_ctx ON table_ctx.id = fact.table_id
-JOIN fin_core.annual_report_documents AS document ON document.id = table_ctx.document_id
-JOIN fin_core.financial_metrics AS metric ON metric.id = fact.metric_id
-LEFT JOIN fin_core.financial_companies AS company ON company.id = document.company_id
-LEFT JOIN fin_core.canonical_metrics AS canonical_metric ON canonical_metric.code = fact.canonical_code
+_MAPPING_SCHEMA = """\
+跨公司、筛选或公司特定指标可使用 company_metric_mappings mapping：
+company_id, canonical_code, source_metric_id, source_metric_name,
+valid_from_year, valid_to_year, review_status, is_active
 
-查询约束：
-- 精确财务指标查询优先使用 fact.canonical_code 或 company_metric_mappings，不要把 financial_metrics.canonical_name 当统一口径。
-- 跨公司或公司特定指标查询优先使用 company_metric_mappings，并要求 mapping.is_active = true、mapping.review_status = 'approved'。
-- 当数据库完成发布状态回填后，优先筛选 fact.is_published = true 或 fact.review_status = 'approved'。
-- predefined 模板仅覆盖年报（period_type=annual）；text_to_sql 需自行处理季度/半年度问题。
-- 季度查询使用 fact.period_type = 'quarter'，并结合 period_year、period_label（如 第一季度/Q1/三季度）过滤；不要误用 annual 条件。
-- 全年各季度趋势查询保留 period_label、period_type 列，按期间标签排序展示。
+Join：mapping.company_id = document.company_id 且 mapping.source_metric_id = fact.metric_id。
+必须过滤 mapping.is_active = true、mapping.review_status = 'approved'。
+"""
+
+_QUARTER_SCHEMA = """\
+期间规则：
+季度/半年度查询使用 fact.period_type，并结合 fact.period_year、fact.period_label；
+季度必须使用 period_type = 'quarter'，不得替换成 annual；
+各季度趋势需返回 period_label、period_type，并按实际期间排序。
+"""
+
+_RAW_CELL_SCHEMA = """\
+原始单元格表 raw_table_cells cell：
+id, table_id, document_id, row_index, col_index, row_header, col_header,
+cell_text, normalized_value, confidence
+
+Join：cell.id = fact.source_cell_id；仅在问题明确要求原文、单元格或附注明细时使用。
+"""
+
+_PROVENANCE_SCHEMA = """\
+查询 annual_financial_facts 时必须返回这些标准别名：
+company_id, company_name, ticker, fiscal_year, period_year, period_label,
+period_type, metric_name, canonical_code, raw_value, value, unit, currency,
+source, page_num, doc_id, document_id, table_id, source_cell_id, section。
 """
 
 
-def build_schema_prompt() -> str:
-    """集中维护 Schema 文本，避免生成与修正阶段口径不一致。"""
-    return FINANCIAL_SQL_SCHEMA_PROMPT
+def build_schema_prompt(question: str = "") -> str:
+    """按问题形态选择 Schema 片段，同时始终保留事实与 PDF 溯源链。"""
+    normalized = question.strip()
+    parts = [_CORE_SCHEMA, _PROVENANCE_SCHEMA]
+    if not normalized:
+        return "\n".join(
+            [*parts, _MAPPING_SCHEMA, _QUARTER_SCHEMA, _RAW_CELL_SCHEMA]
+        )
+    if _MAPPING_RE.search(normalized):
+        parts.append(_MAPPING_SCHEMA)
+    if _QUARTER_RE.search(normalized):
+        parts.append(_QUARTER_SCHEMA)
+    if _RAW_CELL_RE.search(normalized):
+        parts.append(_RAW_CELL_SCHEMA)
+    return "\n".join(parts)
+
+
+# 保留旧导出契约；实际生成路径使用带 question 的动态版本。
+FINANCIAL_SQL_SCHEMA_PROMPT = build_schema_prompt()
 
 
 def build_fewshot_examples(question: str, *, k: int = 1) -> str:
-    """先按规则检索 few-shot，后续可无缝替换成向量检索。"""
+    """按规则检索一个最相关 few-shot。"""
     examples = _EXAMPLE_RETRIEVER.get_examples(question, k=k)
     return _EXAMPLE_RETRIEVER.format_examples(examples)
 

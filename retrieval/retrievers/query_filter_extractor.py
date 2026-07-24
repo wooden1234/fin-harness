@@ -213,7 +213,7 @@ class QueryFilterExtractor:
             )
         return str(content)
 
-    def _invoke(self, query: str, categories: tuple[str, ...]) -> QueryFilterDecision:
+    async def _ainvoke(self, query: str, categories: tuple[str, ...]) -> QueryFilterDecision:
         llm = self._get_llm()
         messages = [
             SystemMessage(content=_system_prompt()),
@@ -221,7 +221,7 @@ class QueryFilterExtractor:
         ]
         response: Any = None
         try:
-            response = llm.invoke(messages)
+            response = await llm.ainvoke(messages)
             return self._parse_text(self._response_text(response))
         except Exception as exc:
             detail = ""
@@ -237,6 +237,28 @@ class QueryFilterExtractor:
                 "error={} detail={} response_preview={!r}",
                 type(exc).__name__,
                 detail or "unavailable",
+                self._response_text(response)[:300] if response is not None else "",
+            )
+            raise
+
+    def _invoke(self, query: str, categories: tuple[str, ...]) -> QueryFilterDecision:
+        """保留同步兼容入口，异步图应使用 ``_ainvoke``。"""
+        llm = self._get_llm()
+        messages = [
+            SystemMessage(content=_system_prompt()),
+            HumanMessage(content=_human_prompt(query, categories)),
+        ]
+        response: Any = None
+        try:
+            response = llm.invoke(messages)
+            return self._parse_text(self._response_text(response))
+        except Exception as exc:
+            detail = str(exc)
+            logger.warning(
+                "query_filter_extractor invoke or parse failed; use no metadata filters "
+                "error={} detail={} response_preview={!r}",
+                type(exc).__name__,
+                detail,
                 self._response_text(response)[:300] if response is not None else "",
             )
             raise
@@ -335,6 +357,52 @@ class QueryFilterExtractor:
             )
             result = QueryFilterExtraction({}, False, "llm_failed; no metadata filters")
 
+        self._cache[key] = result
+        return result
+
+    async def aextract(
+        self,
+        query: str,
+        *,
+        knowledge_bases: list[str] | None = None,
+        user_filters: MetadataFilters | None = None,
+    ) -> QueryFilterExtraction:
+        """异步提取入口，避免异步检索节点调用同步 LLM。"""
+        categories = tuple(str(value) for value in (knowledge_bases or []) if value)
+        normalized_user_filters = tuple(
+            sorted((str(field), repr(value)) for field, value in (user_filters or {}).items())
+        )
+        key = (query.strip(), categories, normalized_user_filters)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+
+        rule_plan = parse_query_constraints(
+            key[0], knowledge_bases=list(categories), user_filters=user_filters
+        )
+        rule_filters = dict(rule_plan.filters)
+        if rule_filters and not rule_plan.unresolved:
+            result = QueryFilterExtraction(rule_filters, False, "rules")
+            self._cache[key] = result
+            return result
+
+        try:
+            decision = await self._ainvoke(key[0], categories)
+            filters = self._validated_filters(
+                decision, knowledge_bases=list(categories), query=key[0]
+            )
+            filters = normalize_query_entity_filters(filters, knowledge_bases=list(categories))
+            filters = {**filters, **rule_filters}
+            result = (
+                QueryFilterExtraction(filters, True, "rules_then_llm")
+                if filters
+                else QueryFilterExtraction({}, False, "llm_empty_or_low_confidence; no metadata filters")
+            )
+        except Exception:
+            logger.warning(
+                "query_filter_extractor failed; use no metadata filters error=async_llm_failed"
+            )
+            result = QueryFilterExtraction({}, False, "llm_failed; no metadata filters")
         self._cache[key] = result
         return result
 

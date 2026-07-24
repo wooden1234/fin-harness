@@ -22,8 +22,14 @@ from agents.finance_agent.financial_query_agent.text_to_sql.execution import (
 from agents.finance_agent.financial_query_agent.text_to_sql.components import nodes as nodes_module
 from agents.finance_agent.financial_query_agent.text_to_sql.components.nodes import (
     DEFAULT_TEXT_TO_SQL_MAX_ATTEMPTS,
+    prepare_context_node,
 )
-from agents.finance_agent.financial_query_agent.text_to_sql.middleware import clarification as clarification_mod
+from agents.finance_agent.financial_query_agent.text_to_sql.validation.result import (
+    ResultValidation,
+)
+from agents.finance_agent.financial_query_agent.text_to_sql.middleware.capability import (
+    DatabaseCapabilityMiddleware,
+)
 from agents.finance_agent.financial_query_agent.text_to_sql.middleware.clarification import (
     ClarificationMiddleware,
 )
@@ -32,11 +38,6 @@ from agents.finance_agent.financial_query_agent.workflows.text_to_sql import (
 )
 
 NODES_MODULE = nodes_module
-CLARIFICATION_MODULE = (
-    "agents.finance_agent.financial_query_agent.text_to_sql.middleware.clarification"
-)
-
-
 def _workflow_state(question: str) -> dict:
     return {
         "messages": [],
@@ -48,6 +49,46 @@ def _workflow_state(question: str) -> dict:
 
 def test_text_to_sql_default_attempt_limit_is_two():
     assert DEFAULT_TEXT_TO_SQL_MAX_ATTEMPTS == 2
+
+
+@pytest.mark.asyncio
+async def test_prepare_context_caps_total_attempts_at_one_correction():
+    context = await prepare_context_node(
+        {
+            "question": "测试 SQL",
+            "max_attempts": 9,
+        }
+    )
+
+    assert context["max_attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_validate_sql_node_counts_current_attempt_before_retry():
+    state = {
+        "question": "测试 SQL",
+        "attempts": 0,
+        "max_attempts": 2,
+        "seen_sql_hashes": [],
+        "last_error_type": "",
+        "repeat_error_count": 0,
+        "sql": "DELETE FROM fin_core.financial_companies",
+        "sql_params": {},
+    }
+
+    first = await nodes_module.validate_sql_node(state)
+    assert first["attempts"] == 1
+    assert first["next_step"] == "correct_sql"
+
+    state.update(first)
+    state.update(
+        sql="SELECT * FROM public.users",
+        sql_params={},
+    )
+    second = await nodes_module.validate_sql_node(state)
+
+    assert second["attempts"] == 2
+    assert second["next_step"] == "unsafe_output"
 
 
 def test_sql_pdf_provenance_is_exposed_in_worker_output():
@@ -191,16 +232,7 @@ async def test_clarification_middleware_before_generate_allows_incomplete_questi
 
 
 @pytest.mark.asyncio
-async def test_clarification_middleware_after_generate_halts_on_clarify_route(monkeypatch):
-    async def fake_build_clarification_answer(*args, **kwargs):
-        return "请补充更明确的统计年份，我再继续生成查询。"
-
-    monkeypatch.setattr(
-        clarification_mod,
-        "_build_clarification_answer",
-        fake_build_clarification_answer,
-    )
-
+async def test_clarification_middleware_after_generate_halts_on_clarify_route():
     result = await ClarificationMiddleware().after_generate(
         {"question": "腾讯净利润是多少"},
         GeneratedFinancialSql(
@@ -217,12 +249,81 @@ async def test_clarification_middleware_after_generate_halts_on_clarify_route(mo
     assert result.halt is True
     assert result.state_updates["missing_fields"] == ["year"]
     assert result.state_updates["route_reason"] == "缺少统计年份"
+    assert result.halt_answer == "请补充更明确的统计年份，我再继续生成查询。"
+
+
+@pytest.mark.asyncio
+async def test_database_capability_blocks_realtime_and_document_detail():
+    middleware = DatabaseCapabilityMiddleware()
+
+    realtime = await middleware.before_generate(
+        {"question": "今天腾讯股价和涨跌幅是多少"},
+        None,
+    )
+    document = await middleware.before_generate(
+        {"question": "宁德时代年报中坏账准备的计提依据是什么"},
+        None,
+    )
+    structured = await middleware.before_generate(
+        {"question": "腾讯2024年年报营业收入是多少"},
+        None,
+    )
+
+    assert realtime is not None
+    assert realtime.halt_reason == "unsupported"
+    assert document is not None
+    assert document.halt_reason == "unsupported"
+    assert structured is None
+
+
+@pytest.mark.asyncio
+async def test_prepare_context_routes_unsupported_before_building_sql_context():
+    unsupported = await prepare_context_node(
+        {"question": "宁德时代年报中坏账准备的计提依据是什么"}
+    )
+    structured = await prepare_context_node(
+        {"question": "腾讯2024年年报营业收入是多少"}
+    )
+
+    assert unsupported["next_step"] == "execution_error_output"
+    assert unsupported["halt_reason"] == "unsupported"
+    assert "schema_prompt" not in unsupported
+    assert structured["next_step"] == "generate_sql"
+    assert structured["schema_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_result_need_clarify_routes_to_clarify_without_sql_correction(monkeypatch):
+    async def fake_validate_result(*args, **kwargs):
+        return ResultValidation(
+            ok=False,
+            error="结果质检失败：宁德可能对应多家公司，请确认具体公司。",
+            error_type="semantic",
+            should_clarify=True,
+        )
+
+    monkeypatch.setattr(nodes_module, "validate_query_result_full", fake_validate_result)
+
+    result = await nodes_module.validate_result_node(
+        {
+            "question": "宁德营业收入是多少",
+            "sql": "SELECT 1",
+            "rows": [],
+        }
+    )
+
+    assert result["next_step"] == "clarify_output"
+    assert result["halt_reason"] == "clarify"
+    assert result["halt_answer"] == "宁德可能对应多家公司，请确认具体公司。"
+
 
 @pytest.mark.asyncio
 async def test_execute_generated_sql_normalizes_company_name_params(monkeypatch):
     captured: dict[str, object] = {}
+    resolve_calls: list[list[str]] = []
 
     async def fake_resolve(values):
+        resolve_calls.append(list(values))
         mapping = {
             "腾讯": SimpleNamespace(name="Tencent", db_company_key="TCEHY", ticker="TCEHY"),
             "宁德时代": SimpleNamespace(name="CATL", db_company_key="CATL", ticker="CATL"),
@@ -248,6 +349,7 @@ async def test_execute_generated_sql_normalizes_company_name_params(monkeypatch)
     )
 
     assert captured["params"] == {"company_names": ["CATL", "Tencent"], "limit": 5}
+    assert resolve_calls == [["宁德时代", "腾讯"]]
 
 
 @pytest.mark.asyncio
@@ -261,17 +363,10 @@ async def test_text_to_sql_workflow_clarifies_after_generate(monkeypatch):
             missing_fields=["year"],
         )
 
-    async def fake_build_clarification_answer(*args, **kwargs):
-        return "请补充更明确的统计年份，我再继续生成查询。"
-
     monkeypatch.setattr(
         NODES_MODULE,
         "generate_sql",
         fake_generate_sql,
-    )
-    monkeypatch.setattr(
-        f"{CLARIFICATION_MODULE}._build_clarification_answer",
-        fake_build_clarification_answer,
     )
 
     result = await text_to_sql_workflow(_workflow_state("腾讯净利润是多少"))

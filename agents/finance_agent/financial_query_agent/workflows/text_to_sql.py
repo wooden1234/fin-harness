@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.errors import GraphRecursionError
@@ -21,7 +21,6 @@ from agents.finance_agent.financial_query_agent.common import (
 from agents.finance_agent.financial_query_agent.text_to_sql.components import (
     clarify_after_correct_node,
     clarify_after_generate_node,
-    clarify_before_generate_node,
     clarify_output_node,
     correct_sql_node,
     db_verify_node,
@@ -41,11 +40,15 @@ from agents.finance_agent.financial_query_agent.text_to_sql.state import (
     TextToSqlNextStep,
     TextToSqlState,
 )
+from agents.finance_agent.financial_query_agent.state import (
+    FinancialQueryCoverage,
+    FinancialQueryNextActionSql,
+)
 from agents.finance_agent.financial_query_agent.text_to_sql.execution import (
     select_best_disclosure_rows,
 )
-from agents.finance_agent.financial_query_agent.services.fact_service import (
-    FinancialFactService,
+from agents.finance_agent.financial_query_agent.services.citation_builder import (
+    FinancialCitationBuilder,
 )
 from app.core.logger import get_logger
 
@@ -71,7 +74,6 @@ def build_text_to_sql_workflow_graph() -> StateGraph:
     builder = StateGraph(TextToSqlState)
 
     builder.add_node("prepare_context", prepare_context_node)
-    builder.add_node("clarify_before_generate", clarify_before_generate_node)
     builder.add_node("generate_sql", generate_sql_node)
     builder.add_node("clarify_after_generate", clarify_after_generate_node)
     builder.add_node("validate_sql", validate_sql_node)
@@ -89,16 +91,9 @@ def build_text_to_sql_workflow_graph() -> StateGraph:
         "prepare_context",
         _route_next_step,
         {
-            "clarify_before_generate": "clarify_before_generate",
-            END: END,
-        },
-    )
-    builder.add_conditional_edges(
-        "clarify_before_generate",
-        _route_next_step,
-        {
             "generate_sql": "generate_sql",
             "clarify_output": "clarify_output",
+            "execution_error_output": "execution_error_output",
             END: END,
         },
     )
@@ -216,15 +211,21 @@ def _base_updates(question: str, result: TextToSqlState) -> dict[str, Any]:
         "financial_query_validation_error_types": list(result.get("validation_error_types", [])),
         "financial_query_missing_fields": list(result.get("missing_fields", [])),
         "financial_query_plan_reason": str(result.get("route_reason", "")),
+        "financial_query_failure_category": result.get("failure_category"),
+        "financial_query_failure_code": str(result.get("failure_code", "")),
+        "financial_query_failure_retryable": bool(result.get("failure_retryable", False)),
     }
 
 
-def _next_action(result: TextToSqlState) -> str:
+def _next_action(result: TextToSqlState) -> FinancialQueryNextActionSql:
     final_status = str(result.get("final_status", "execution_error"))
-    return _TERMINAL_NEXT_ACTION_BY_STATUS.get(final_status, "end")
+    return cast(
+        FinancialQueryNextActionSql,
+        _TERMINAL_NEXT_ACTION_BY_STATUS.get(final_status, "end"),
+    )
 
 
-def _coverage_for_final_status(result: TextToSqlState) -> str:
+def _coverage_for_final_status(result: TextToSqlState) -> FinancialQueryCoverage:
     status = str(result.get("final_status") or "execution_error")
     if status == "success":
         return "covered"
@@ -269,7 +270,7 @@ async def text_to_sql_workflow(
         coverage = "uncovered"
 
     rows = select_best_disclosure_rows(list(result.get("rows") or []))
-    citations = FinancialFactService.sql_rows_to_citations(
+    citations = FinancialCitationBuilder.sql_rows_to_citations(
         rows,
         sub_task_id=str(state.get("sub_task_id") or ""),
     )

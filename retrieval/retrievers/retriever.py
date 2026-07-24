@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import asyncio
 import json
 import math
 from typing import Any
@@ -11,6 +12,7 @@ from app.core.logger import get_logger
 from retrieval.clients.embeddings import get_embed_model
 from retrieval.clients.milvus_client import collection_name, create_milvus_client, milvus_enabled
 from retrieval.clients.rerank_client import (
+    arerank_documents,
     rerank_documents,
     rerank_enabled,
     rerank_provider,
@@ -237,9 +239,140 @@ class VectorRetriever(Retriever):
             self.last_trace = trace
         return hits
 
+    async def asearch(
+        self,
+        query: str,
+        top_k: int | None = None,
+        metadata_filters: MetadataFilters | None = None,
+    ) -> list[RetrievalHit]:
+        """异步检索入口；数据库检索放入线程，外部重排使用异步 HTTP。"""
+        k = top_k or self.top_k
+        self.last_rerank_status = "not_run"
+        self.last_rerank_error = ""
+        self.last_rerank_hits = []
+        filters = merge_filters(self.metadata_filters, metadata_filters)
+        candidate_k = max(self.candidate_top_k, k * 4)
+        active_categories = _filtered_categories(self.categories, filters)
+        trace_filters = _category_only_filters(filters)
+        vector_hits, lexical_hits = await asyncio.gather(
+            asyncio.to_thread(
+                self.vector_retriever.search,
+                query,
+                top_k=candidate_k,
+                metadata_filters=filters,
+                enforce_on_empty=False,
+            ),
+            asyncio.to_thread(
+                self._lexical_search,
+                query,
+                top_k=candidate_k,
+                metadata_filters=filters,
+            ),
+        )
+        vector_hits = vector_hits or []
+        lexical_hits = lexical_hits or []
+        fusion_top_k = max(k, self.rerank_candidate_top_k) if self.rerank_enabled else k
+        if not vector_hits and not lexical_hits:
+            hits, trace = apply_on_empty_policy(
+                [], query=query, filters=trace_filters, categories=active_categories,
+                vector_hits=0, lexical_hits=0,
+            )
+            self.last_trace = trace
+            trace.extra.update({"rerank_status": "no_candidates", "rerank_error": "", "score_source": self.fusion_mode})
+            return hits
+        if self.fusion_mode == "rrf":
+            hits = _rrf_fuse_hits(
+                [("vector", vector_hits), ("lexical", lexical_hits)],
+                top_k=fusion_top_k, rrf_k=self.rrf_k,
+            )
+        else:
+            hits = _weighted_fuse_hits(
+                vector_hits, lexical_hits, top_k=fusion_top_k, vector_weight=self.vector_weight
+            )
+        hits = await self._arerank_hits(query, hits, top_k=k)
+        self.last_rerank_hits = list(hits)
+        hits = _auto_merge_parent_hits(hits, top_k=k)
+        hits, trace = apply_on_empty_policy(
+            hits, query=query, filters=trace_filters, categories=active_categories,
+            vector_hits=len(vector_hits), lexical_hits=len(lexical_hits),
+        )
+        if self.rerank_enabled:
+            trace.extra.update({"rerank_provider": self.rerank_provider, "rerank_model": self.rerank_model})
+        trace.extra.update({
+            "rerank_status": self.last_rerank_status,
+            "rerank_error": self.last_rerank_error,
+            "score_source": "rerank" if self.last_rerank_status == "success" else self.fusion_mode,
+        })
+        trace.final_hits = len(hits)
+        self.last_trace = trace
+        return hits
+
+    async def _arerank_hits(
+        self, query: str, hits: list[RetrievalHit], *, top_k: int
+    ) -> list[RetrievalHit]:
+        def fallback(reason: str, status: str = "fallback_to_fusion") -> list[RetrievalHit]:
+            self.last_rerank_status = status
+            self.last_rerank_error = reason
+            selected = hits[:top_k]
+            for hit in selected:
+                hit.metadata["rerank_status"] = status
+                hit.metadata["rerank_fallback_reason"] = reason
+                hit.metadata["score_source"] = hit.score_type or self.fusion_mode
+            return selected
+
+        if not self.rerank_enabled or not hits:
+            return fallback("rerank_disabled" if hits else "no_candidates", "disabled" if hits else "no_candidates")
+        candidate_hits = hits[: self.rerank_candidate_top_k]
+        try:
+            reranked = await arerank_documents(
+                query=query,
+                documents=[_rerank_text(hit) for hit in candidate_hits],
+                top_n=len(candidate_hits),
+            )
+        except Exception as exc:
+            logger.warning("external async rerank failed provider={} model={} error={}", self.rerank_provider, self.rerank_model, exc)
+            return fallback(type(exc).__name__)
+        if not reranked:
+            return fallback("empty_rerank_result")
+        ordered: list[RetrievalHit] = []
+        seen: set[int] = set()
+        for item in reranked:
+            if item.index < 0 or item.index >= len(candidate_hits):
+                continue
+            seen.add(item.index)
+            hit = candidate_hits[item.index]
+            metadata = dict(hit.metadata)
+            metadata.update({
+                "rerank_score": item.score,
+                "rerank_provider": self.rerank_provider,
+                "rerank_model": self.rerank_model,
+                "rerank_status": "success",
+                "score_source": "rerank",
+            })
+            ordered.append(RetrievalHit(
+                text=hit.text, score=item.score, metadata=metadata, node_id=hit.node_id,
+                category=hit.category, collection=hit.collection, score_type="rerank",
+            ))
+        if not ordered:
+            return fallback("invalid_rerank_result")
+        if self.rerank_min_score > 0.0 and ordered[0].score < self.rerank_min_score:
+            self.last_rerank_status = "below_threshold"
+            self.last_rerank_error = f"top_score={ordered[0].score:.6f} min_score={self.rerank_min_score:.6f}"
+            return []
+        for index, hit in enumerate(candidate_hits):
+            if index not in seen:
+                ordered.append(hit)
+        self.last_rerank_status = "success"
+        return ordered[:top_k]
+
 
 class HybridRetriever(Retriever):
     """Milvus 向量召回 + ES BM25 召回，本地 BM25 兜底。"""
+
+    # 异步 PDF 检索复用同文件中的通用实现；HybridRetriever 提供其所需的
+    # _lexical_search、融合参数和异步重排状态。
+    asearch = VectorRetriever.asearch
+    _arerank_hits = VectorRetriever._arerank_hits
 
     def __init__(
         self,

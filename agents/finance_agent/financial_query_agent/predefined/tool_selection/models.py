@@ -8,7 +8,6 @@ from pydantic import BaseModel, Field
 
 from agents.finance_agent.financial_query_agent.predefined.whitelist.descriptions import (
     VALID_TEMPLATE_IDS,
-    template_catalog_text,
 )
 
 
@@ -22,7 +21,6 @@ class predefined_sql(BaseModel):
     - compare_year_metric_lookup: 恰好 1 公司 + ≥2 显式年份 + 恰好 1 指标（单公司跨年对比）
     - trend_metric_lookup: 恰好 1 公司 + 恰好 1 指标 + ≥2 个显式年份（趋势叙述）
 
-    详细说明：
     """
 
     template_id: Literal[
@@ -51,11 +49,6 @@ class predefined_sql(BaseModel):
         description="财务指标列表；所有模板都必须恰好 1 个已批准指标",
     )
     top_k: int = Field(default=5, ge=1, le=20, description="最多返回多少条结果")
-
-
-# 将 catalog 注入 docstring，供 LLM bind_tools 时阅读
-predefined_sql.__doc__ = (predefined_sql.__doc__ or "") + "\n" + template_catalog_text()
-
 
 def is_valid_template_id(template_id: str) -> bool:
     return template_id in VALID_TEMPLATE_IDS

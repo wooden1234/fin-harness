@@ -8,6 +8,10 @@ from typing import Any
 from agents.finance_agent.financial_query_agent.predefined.semantic.company_resolver import (
     CompanyResolver,
 )
+from agents.finance_agent.financial_query_agent.services.entity_resolver import EntityResolver
+from agents.finance_agent.financial_query_agent.services.result_formatter import (
+    FinancialResultFormatter,
+)
 from agents.finance_agent.financial_query_agent.services.fact_service import FinancialFactService
 from agents.finance_agent.financial_query_agent.services.schemas import FinancialSqlResultRow
 
@@ -20,13 +24,33 @@ async def _resolve_company_values(values: list[str], *, target: str) -> list[str
     resolved = await CompanyResolver.resolve(values)
     if not resolved:
         return values
+
+    def match_company(original: str):
+        """在一次批量解析结果中定位输入对应的公司。"""
+        canonical = EntityResolver._canonical_company(original)
+        expanded_terms = {
+            term.strip().casefold()
+            for term in EntityResolver.expand_company_terms(original)
+            if term.strip()
+        }
+        for company in resolved:
+            company_canonical = getattr(company, "canonical_key", "") or ""
+            if company_canonical == canonical:
+                return company
+            candidate_terms = {
+                str(getattr(company, field, "") or "").strip().casefold()
+                for field in ("name", "db_company_key", "ticker")
+            }
+            if expanded_terms & candidate_terms:
+                return company
+        return None
+
     by_input: dict[str, str] = {}
     for original in values:
-        matches = await CompanyResolver.resolve([original])
-        if not matches:
+        company = match_company(original)
+        if company is None:
             by_input[original] = original
             continue
-        company = matches[0]
         if target == "company_key":
             by_input[original] = company.db_company_key
         elif target == "ticker":
@@ -131,7 +155,7 @@ def format_sql_rows(rows: list[FinancialSqlResultRow]) -> str:
     deduped_rows = select_best_disclosure_rows(rows)
     if not deduped_rows:
         return "（数据库中未找到匹配的财务指标，建议改查 PDF 文档库。）"
-    return FinancialFactService.format_sql_answer(deduped_rows)
+    return FinancialResultFormatter.format_sql_answer(deduped_rows)
 
 
 __all__ = ["execute_generated_sql", "format_sql_rows", "select_best_disclosure_rows"]

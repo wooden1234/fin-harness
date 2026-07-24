@@ -12,6 +12,7 @@ from agents.finance_agent.financial_query_agent.text_to_sql.generation.prompts i
 )
 from app.core.logger import get_logger
 from agents.finance_agent.financial_query_agent.services.schemas import GeneratedFinancialSql
+from agents.finance_agent.financial_query_agent.services.errors import classify_exception
 
 logger = get_logger(service="financial_query")
 
@@ -57,9 +58,16 @@ async def generate_sql(
                 config=config,
             ),
         )
-    except Exception:
+    except Exception as exc:
         logger.exception("text_to_sql_agent sql generation failed")
-        return fallback
+        failure = classify_exception(exc, source="llm_generation")
+        return fallback.model_copy(
+            update={
+                "failure_category": failure.category,
+                "failure_code": failure.code,
+                "failure_retryable": failure.retryable,
+            }
+        )
 
 
 __all__ = ["build_text_to_sql_prompt", "generate_sql"]

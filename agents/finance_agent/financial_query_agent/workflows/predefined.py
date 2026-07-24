@@ -47,8 +47,17 @@ from agents.finance_agent.financial_query_agent.predefined.tool_selection import
 from agents.finance_agent.financial_query_agent.predefined.whitelist.registry import (
     ResolvedPredefinedQuery,
 )
+from agents.finance_agent.financial_query_agent.services.citation_builder import (
+    FinancialCitationBuilder,
+)
 from agents.finance_agent.financial_query_agent.services.fact_service import (
     FinancialFactService,
+)
+from agents.finance_agent.financial_query_agent.services.errors import (
+    FailureCategory,
+    classify_exception,
+    classify_no_data,
+    classify_user_clarification,
 )
 from agents.finance_agent.financial_query_agent.services.schemas import (
     FinancialSqlResultRow,
@@ -83,6 +92,9 @@ def _fallback_to_text_to_sql(
     reason: str,
     *,
     step: str = "predefined_tool_selection_failed",
+    failure_category: FailureCategory | None = None,
+    failure_code: str = "",
+    failure_retryable: bool = False,
 ) -> dict[str, Any]:
     """predefined 无法可靠执行时，把控制权交回复杂查询路径。"""
     return {
@@ -91,6 +103,9 @@ def _fallback_to_text_to_sql(
         "financial_query_plan_reason": reason,
         "financial_query_template_id": None,
         "financial_query_next_action_sql": "fallback_to_text_to_sql",
+        "financial_query_failure_category": failure_category,
+        "financial_query_failure_code": failure_code,
+        "financial_query_failure_retryable": failure_retryable,
         "steps": [step],
     }
 
@@ -112,6 +127,8 @@ def _clarify_output(
             answer=reason,
             step="predefined",
             coverage="clarify",
+            failure_category=classify_user_clarification().category,
+            failure_code=classify_user_clarification().code,
         ),
     }
 
@@ -168,7 +185,14 @@ async def _init_node(
         logger.error("predefined_workflow missing question")
         return {
             "question": question,
-            "output": database_failure_output(source_state, step="predefined"),
+            "output": financial_query_output(
+                source_state,
+                answer="请补充公司名称、财务指标或统计年份后再查询。",
+                step="predefined",
+                coverage="clarify",
+                failure_category=classify_user_clarification().category,
+                failure_code=classify_user_clarification().code,
+            ),
         }
     return {"question": question}
 
@@ -178,6 +202,19 @@ async def _select_tool_node(
     config: RunnableConfig = None,
 ) -> dict[str, Any]:
     question = state["question"]
+    source_state = state["source_state"]
+    template_id = source_state.get("financial_query_template_id")
+    intent = source_state.get("financial_query_intent")
+    if template_id and isinstance(intent, FinancialQueryIntent):
+        logger.info(
+            "predefined_workflow reuse planner selection template_id={}",
+            template_id,
+        )
+        return {
+            "template_id": template_id,
+            "intent": intent,
+        }
+
     selection = await select_predefined_tool(question, config)
 
     if not selection.success or selection.slots is None:
@@ -190,6 +227,9 @@ async def _select_tool_node(
             "output": _fallback_to_text_to_sql(
                 question,
                 selection.error or "predefined_tool_selection_failed",
+                failure_category=selection.failure_category,
+                failure_code=selection.failure_code or selection.error,
+                failure_retryable=selection.failure_retryable,
             ),
         }
 
@@ -208,8 +248,30 @@ async def _semantic_node(
     source_state = state["source_state"]
     template_id = state["template_id"]
     intent = state["intent"]
-    canonical_matches = await resolve_canonical_metrics_node(intent)
-    coverage = await resolve_coverage_node(intent, canonical_matches, template_id)
+    try:
+        canonical_matches = await resolve_canonical_metrics_node(intent)
+        coverage = await resolve_coverage_node(intent, canonical_matches, template_id)
+    except Exception as exc:
+        failure = classify_exception(exc, source="predefined_semantic")
+        logger.exception(
+            "predefined_workflow semantic resolution failed code={}",
+            failure.code,
+        )
+        return {
+            "output": {
+                "financial_query_text": question,
+                "financial_query_template_id": template_id,
+                "financial_query_intent": intent,
+                **_fallback_to_text_to_sql(
+                    question,
+                    failure.code,
+                    step="predefined_semantic_failed",
+                    failure_category=failure.category,
+                    failure_code=failure.code,
+                    failure_retryable=failure.retryable,
+                ),
+            }
+        }
     if coverage.status == "clarify":
         return {
             "canonical_matches": canonical_matches,
@@ -328,6 +390,8 @@ async def _execute_node(
                     step="predefined",
                     coverage="uncovered",
                     fallback_reason="financial_query_no_rows",
+                    failure_category=classify_no_data().category,
+                    failure_code=classify_no_data().code,
                 ),
             },
         }
@@ -350,7 +414,7 @@ async def _format_node(
     coverage = state["coverage"]
     rows = state["rows"]
     answer = format_predefined_answer(rows, coverage)
-    citations = FinancialFactService.sql_rows_to_citations(
+    citations = FinancialCitationBuilder.sql_rows_to_citations(
         rows,
         sub_task_id=str(source_state.get("sub_task_id") or ""),
     )

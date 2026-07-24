@@ -57,13 +57,18 @@ def begin_turn_workspace() -> dict:
         "financial_query_sql": "",
         "financial_query_validated_sql": "",
         "financial_query_validation_error": "",
+        "financial_query_validation_error_type": "",
         "financial_query_validation_errors": [],
+        "financial_query_validation_error_types": [],
         "financial_query_sql_attempts": 0,
         "financial_query_next_action_sql": "",
         "financial_query_sql_params": {},
         "financial_query_template_id": None,
         "financial_query_schema_prompt": "",
         "financial_query_fewshot_examples": "",
+        "financial_query_failure_category": None,
+        "financial_query_failure_code": "",
+        "financial_query_failure_retryable": False,
     }
 
 

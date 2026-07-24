@@ -43,12 +43,12 @@ def build_retrieval_context(hits) -> str:
     return "\n\n".join(parts)
 
 
-def _resolve_route_and_filters(query: str) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
+async def _resolve_route_and_filters(query: str) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
     """LLM 类别路由 + query_filter_llm，与 gate070 评测链路对齐。"""
-    route = get_pdf_kb_router(min_confidence=0.5).route(query)
+    route = await get_pdf_kb_router(min_confidence=0.5).aroute(query)
     if not route.supported:
         return None, {
-            "source": "llm",
+            "source": route.source,
             "supported": False,
             "confidence": route.confidence,
             "reason": route.reason,
@@ -60,7 +60,7 @@ def _resolve_route_and_filters(query: str) -> tuple[dict[str, Any] | None, dict[
 
     categories = list(route.categories)
     route_meta = {
-        "source": "llm",
+        "source": route.source,
         "supported": route.supported,
         "confidence": route.confidence,
         "reason": route.reason,
@@ -74,7 +74,7 @@ def _resolve_route_and_filters(query: str) -> tuple[dict[str, Any] | None, dict[
     if categories:
         filters["category"] = categories[0] if len(categories) == 1 else categories
 
-    extraction = get_query_filter_extractor().extract(
+    extraction = await get_query_filter_extractor().aextract(
         query,
         knowledge_bases=categories or None,
     )
@@ -95,7 +95,7 @@ async def retrieve_node(state: PdfAgentState, *, config=None) -> PdfAgentState:
     query = str(state.get("query") or state.get("original_query") or "").strip()
     quality_calibrator = _get_quality_calibrator()
 
-    metadata_filters, route_meta, filter_meta = _resolve_route_and_filters(query)
+    metadata_filters, route_meta, filter_meta = await _resolve_route_and_filters(query)
     if route_meta.get("abstained"):
         logger.info(
             "retrieval abstained query={} reason={}",
@@ -128,7 +128,7 @@ async def retrieve_node(state: PdfAgentState, *, config=None) -> PdfAgentState:
         hybrid=True,
         rerank_min_score=settings.RERANK_MIN_SCORE,
     )
-    hits = retriever.search(query, top_k=top_k, metadata_filters=metadata_filters)
+    hits = await retriever.asearch(query, top_k=top_k, metadata_filters=metadata_filters)
     quality_calibrator.annotate(hits)
     trace = getattr(retriever, "last_trace", None)
     logger.info(

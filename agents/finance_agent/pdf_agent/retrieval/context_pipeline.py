@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -120,10 +121,14 @@ async def context_pipeline_node(
     rerank_enabled = bool(getattr(retriever, "rerank_enabled", False))
     retriever.rerank_enabled = False
     try:
-        original_hits = retriever.search(query, top_k=candidate_top_k, metadata_filters=None)
+        original_hits = await asyncio.to_thread(
+            retriever.search, query, top_k=candidate_top_k, metadata_filters=None
+        )
         rewrite_hits: list[RetrievalHit] = []
         if rewrite_query and rewrite_query != query:
-            rewrite_hits = retriever.search(rewrite_query, top_k=candidate_top_k, metadata_filters=None)
+            rewrite_hits = await asyncio.to_thread(
+                retriever.search, rewrite_query, top_k=candidate_top_k, metadata_filters=None
+            )
     finally:
         retriever.rerank_enabled = rerank_enabled
 
@@ -131,7 +136,9 @@ async def context_pipeline_node(
     if rewrite_hits:
         lists.append(("rewrite", rewrite_hits))
     fused = _rrf_fuse_hits(lists, top_k=max(candidate_top_k, top_k * 2))
-    reranked = retriever._rerank_hits(query, fused, top_k=max(candidate_top_k, top_k * 2))
+    reranked = await retriever._arerank_hits(
+        query, fused, top_k=max(candidate_top_k, top_k * 2)
+    )
     merged = _auto_merge_parent_hits(reranked, top_k=max(candidate_top_k, top_k * 2))
     diversified = select_diverse_hits(merged, top_k=top_k, max_per_doc=max_per_doc)
     context, packed_hits = pack_context(diversified, token_budget=token_budget)

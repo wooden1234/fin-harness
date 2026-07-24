@@ -11,8 +11,8 @@ from agents.finance_agent.financial_query_agent.predefined.semantic.reason_codes
 from agents.finance_agent.financial_query_agent.predefined.semantic.registry_seed import (
     CANONICAL_METRICS,
 )
-from agents.finance_agent.financial_query_agent.services.fact_service import (
-    FinancialFactService,
+from agents.finance_agent.financial_query_agent.services.result_formatter import (
+    FinancialResultFormatter,
 )
 from agents.finance_agent.financial_query_agent.services.schemas import (
     FinancialSqlResultRow,
@@ -45,7 +45,7 @@ def format_predefined_answer(
     rows: list[FinancialSqlResultRow],
     coverage: CoverageResolution | None = None,
 ) -> str:
-    base = FinancialFactService.format_sql_answer(rows)
+    base = FinancialResultFormatter.format_sql_answer(rows)
     notes = build_coverage_notes(coverage)
     if notes:
         return f"{base}\n\n{notes}"

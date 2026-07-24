@@ -26,7 +26,11 @@ from app.agents.states import SubTask
 
 def test_intent_to_evidence_chain_mapping():
     assert INTENT_TO_EVIDENCE_CHAIN["product_policy"] == ["faq", "web_search"]
-    assert INTENT_TO_EVIDENCE_CHAIN["structured_metric"] == ["financial_query", "web_search"]
+    assert INTENT_TO_EVIDENCE_CHAIN["structured_metric"] == [
+        "financial_query",
+        "pdf",
+        "web_search",
+    ]
     assert INTENT_TO_EVIDENCE_CHAIN["market_event"] == ["web_search"]
 
 
@@ -88,12 +92,12 @@ def test_coverage_gate_faq_uncovered_routes_to_web():
     assert route.node == "web_search_agent"
 
 
-def test_coverage_gate_sql_uncovered_routes_to_web_not_faq():
+def test_coverage_gate_sql_uncovered_routes_to_pdf():
     route = route_after_retrieval_worker(
         {
             "sub_task_id": "t1",
             "sub_question": "宁德时代 2024 年营业收入",
-            "evidence_chain": ["financial_query", "web_search"],
+            "evidence_chain": ["financial_query", "pdf", "web_search"],
             "task_results": [
                 {
                     "sub_task_id": "t1",
@@ -104,17 +108,17 @@ def test_coverage_gate_sql_uncovered_routes_to_web_not_faq():
         }
     )
     assert isinstance(route, Send)
-    assert route.node == "web_search_agent"
+    assert route.node == "pdf_agent"
 
 
-def test_fan_in_waits_for_sql_then_web_chain():
+def test_fan_in_waits_for_sql_pdf_then_web_chain():
     tasks = [
         SubTask(
             id="t1",
             question="宁德时代 2024 年营业收入",
             intent="structured_metric",
             type="financial_query",
-            evidence_chain=["financial_query", "web_search"],
+            evidence_chain=["financial_query", "pdf", "web_search"],
         )
     ]
     assert not fan_in_ready(
@@ -127,12 +131,32 @@ def test_fan_in_waits_for_sql_then_web_chain():
             }
         ],
     )
+    assert not fan_in_ready(
+        sub_tasks=tasks,
+        task_results=[
+            {
+                "sub_task_id": "t1",
+                "type": "financial_query",
+                "coverage": "uncovered",
+            },
+            {
+                "sub_task_id": "t1",
+                "type": "pdf",
+                "coverage": "uncovered",
+            },
+        ],
+    )
     assert fan_in_ready(
         sub_tasks=tasks,
         task_results=[
             {
                 "sub_task_id": "t1",
                 "type": "financial_query",
+                "coverage": "uncovered",
+            },
+            {
+                "sub_task_id": "t1",
+                "type": "pdf",
                 "coverage": "uncovered",
             },
             {
@@ -151,16 +175,17 @@ def test_fan_in_sql_uncovered_chain_exhausted_is_ready():
             question="宁德时代 2024 年毛利率",
             intent="structured_metric",
             type="financial_query",
-            evidence_chain=["financial_query", "web_search"],
+            evidence_chain=["financial_query", "pdf", "web_search"],
         )
     ]
     assert sub_task_satisfied(
         "t1",
         [
             {"sub_task_id": "t1", "type": "financial_query", "coverage": "uncovered"},
+            {"sub_task_id": "t1", "type": "pdf", "coverage": "uncovered"},
             {"sub_task_id": "t1", "type": "web_search", "coverage": "uncovered"},
         ],
-        chain=["financial_query", "web_search"],
+        chain=["financial_query", "pdf", "web_search"],
     )
 
 
