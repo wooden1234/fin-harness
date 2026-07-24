@@ -1,4 +1,4 @@
-"""主图编译：START → guardrails → context_compressor → query_rewrite → supervisor → risk_triage → plan_agent → final_answer → END。
+"""主图编译：START → init_turn → guardrails → memory_recall → context_compressor → supervisor → 按需 query_rewrite → plan_agent → final_answer → END。
 
 plan_agent 作为独立子图（planner → workers → join → summarize），主图只感知一个节点。
 """
@@ -11,6 +11,7 @@ from langgraph.graph import END, START, StateGraph
 
 from agents.states import FinAgentInput, FinAgentState
 from agents.runtime_context import AgentRuntimeContext
+from agents.init_turn import init_turn_node
 from agents.memory_recall import memory_recall_node
 from langgraph.store.base import BaseStore
 from agents.context_compressor import compress_context
@@ -18,8 +19,7 @@ from agents.final_answer import final_answer_node
 from agents.general_agent.node import general_agent
 from agents.finance_agent import finance_agent as _finance_agent_graph
 from agents.guardrails import guardrails_edge, guardrails_node
-from agents.query_rewrite import query_rewrite_node
-from agents.risk_triage import risk_triage_edge, risk_triage_node
+from agents.query_rewrite import query_rewrite_node, route_after_query_rewrite
 from agents.supervisor import analyze_and_route_query, route_query
 
 _compiled_graph = None
@@ -33,52 +33,52 @@ def build_graph() -> StateGraph:
         context_schema=AgentRuntimeContext,
     )
 
-    builder.add_node("guardrails", guardrails_node)
+    builder.add_node("init_turn", init_turn_node)
     builder.add_node("memory_recall", memory_recall_node)
+    builder.add_node("guardrails", guardrails_node)
     builder.add_node("context_compressor", compress_context)
     builder.add_node("query_rewrite", query_rewrite_node)
     builder.add_node("supervisor", analyze_and_route_query)
-    builder.add_node("risk_triage", risk_triage_node)
     builder.add_node("general_agent", general_agent)
     builder.add_node("plan_agent", _finance_agent_graph)
     builder.add_node("final_answer", final_answer_node)
 
-    # Layer 1: START → guardrails
-    builder.add_edge(START, "memory_recall")
-    builder.add_edge("memory_recall", "guardrails")
+    # Layer 1: START → init_turn → guardrails → memory_recall
+    builder.add_edge(START, "init_turn")
+    builder.add_edge("init_turn", "guardrails")
     builder.add_conditional_edges(
         "guardrails",
         guardrails_edge,
         {
-            "context_compressor": "context_compressor",
+            "memory_recall": "memory_recall",
             "final_answer": "final_answer",
         },
     )
 
-    # Layer 2: context_compressor → query_rewrite → supervisor
-    builder.add_edge("context_compressor", "query_rewrite")
-    builder.add_edge("query_rewrite", "supervisor")
+    # Layer 2: memory_recall → context_compressor → supervisor（按需改写一次）
+    builder.add_edge("memory_recall", "context_compressor")
+    builder.add_edge("context_compressor", "supervisor")
     builder.add_conditional_edges(
         "supervisor",
         route_query,
         {
             "general_agent": "general_agent",
-            "risk_triage": "risk_triage",
+            "plan_agent": "plan_agent",
+            "query_rewrite": "query_rewrite",
+            "final_answer": "final_answer",
             "error_handler": "final_answer",
         },
     )
-
-    # Layer 3: risk_triage → plan_agent / final_answer
     builder.add_conditional_edges(
-        "risk_triage",
-        risk_triage_edge,
+        "query_rewrite",
+        route_after_query_rewrite,
         {
-            "plan_agent": "plan_agent",
+            "supervisor": "supervisor",
             "final_answer": "final_answer",
         },
     )
 
-    # Layer 4: 汇聚 → final_answer → END
+    # Layer 3: 汇聚 → final_answer → END
     builder.add_edge("general_agent", "final_answer")
     builder.add_edge("plan_agent", "final_answer")
     builder.add_edge("final_answer", END)

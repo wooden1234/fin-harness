@@ -48,9 +48,8 @@ async def main() -> None:
     last = messages[-1] if messages else None
     answer = getattr(last, "content", "") if last else ""
 
-    print("--- route / risk ---")
+    print("--- route ---")
     print(f"route      = {result.get('route')}")
-    print(f"risk_level = {result.get('risk_level')}")
     print(f"logic      = {result.get('logic')}")
     print("\n--- answer ---")
     print(answer)

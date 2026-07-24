@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from agents.states import FinAgentState
+from agents.states import Citation, FinAgentState
 
 
 def latest_user_query(messages: list) -> str:
@@ -34,8 +34,9 @@ def financial_query_output(
     step: str,
     coverage: str = "covered",
     fallback_reason: str = "",
+    citations: list[Citation] | None = None,
 ) -> dict:
-    """结构化 SQL 查询输出：只返回答案，不写入 citations。
+    """结构化 SQL 查询输出，并透传 PDF 数据血缘。
 
     ``coverage`` 标记证据状态：covered=查到可靠数据 / clarify=需澄清 /
     uncovered=查无或失败（沿证据链降级，禁止改走 FAQ 编数）。
@@ -44,12 +45,14 @@ def financial_query_output(
         query = str(state.get("financial_query_text") or query_from_state(state))
     except ValueError:
         query = str(state.get("sub_question") or "")
+    resolved_citations = list(citations or [])
     task_result = {
         "sub_task_id": sub_task_id_from_state(state),
         "question": query,
         "type": "financial_query",
         "context": context or answer,
         "coverage": coverage,
+        "citations": resolved_citations,
     }
     if fallback_reason:
         task_result["fallback_reason"] = fallback_reason
@@ -58,6 +61,7 @@ def financial_query_output(
     return {
         # 拒答/降级：不推 AIMessage，避免中间文案流到前端；由 web/summarize 收口。
         "messages": [] if coverage == "uncovered" else [AIMessage(content=answer)],
+        "citations": resolved_citations,
         "task_results": [task_result],
         "steps": [step],
     }

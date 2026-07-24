@@ -4,37 +4,31 @@
 本文件不从 `agents.states` 或 `agents.__init__` 导入，避免循环依赖。
 
 各 mixin 归属：
-  - state_mixins.py 直接定义：SupervisorState / RiskTriageState / GuardrailsState
+  - state_mixins.py 直接定义：SupervisorState / GuardrailsState
   - finance_agent/state.py：      PlannerState / WorkerOutputState
   - financial_query_agent/state.py：FinancialQueryState
 """
 
 from __future__ import annotations
 
-from typing import NotRequired
+from typing import Any, NotRequired
 from typing_extensions import TypedDict
 
-from app.shared import AgentRoute, RiskLevel
+from app.shared import AgentRoute
 
 
 # ─── Supervisor（直属组件，无大 agent 包裹）───
 class SupervisorState(TypedDict):
     """Supervisor 写入的路由信息"""
     route: NotRequired[AgentRoute]
+    supervisor_action: NotRequired[str]
     logic: NotRequired[str]
-
-
-# ─── Risk Triage（直属组件，无大 agent 包裹）───
-class RiskTriageState(TypedDict):
-    """风险分级节点写入的风险信息"""
-    risk_level: NotRequired[RiskLevel]
-    risk_reason: NotRequired[str]
-    risk_needs_human: NotRequired[bool]
 
 
 # ─── Guardrails（直属组件，无大 agent 包裹）───
 class GuardrailsState(TypedDict):
     """安全护栏节点写入的校验结果"""
+    guardrail_decision: NotRequired[dict[str, Any]]
     guardrails_pass: NotRequired[bool]
     guardrails_reason: NotRequired[str]
 
@@ -62,7 +56,6 @@ __all__ = [
     "FinancialQueryState",
     "GuardrailsState",
     "PlannerState",
-    "RiskTriageState",
     "SupervisorState",
     "WorkerOutputState",
 ]

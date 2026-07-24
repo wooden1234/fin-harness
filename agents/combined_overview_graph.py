@@ -26,7 +26,6 @@ def build_combined_overview_graph() -> StateGraph:
         "context_compressor",
         "query_rewrite",
         "supervisor",
-        "risk_triage",
         "plan_tasks",
         "validate_plan",
         "resolve_evidence",

@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any
 
 from app.models.finance.annual_financial_fact import AnnualFinancialFact
+from app.shared import Citation
 from agents.finance_agent.financial_query_agent.services.fact_search_executor import FinancialFactSearchExecutor
 from agents.finance_agent.financial_query_agent.services.query_router import FinancialQueryRouter, FinancialQueryTemplate
 from agents.finance_agent.financial_query_agent.services.schemas import FinancialQueryIntent, FinancialSqlResultRow
@@ -215,15 +216,37 @@ class FinancialFactService:
         return citations
 
     @staticmethod
-    def sql_rows_to_citations(rows: list[FinancialSqlResultRow]) -> list[dict]:
-        citations: list[dict] = []
+    def sql_rows_to_citations(
+        rows: list[FinancialSqlResultRow],
+        *,
+        sub_task_id: str = "",
+    ) -> list[Citation]:
+        citations: list[Citation] = []
         for row in rows:
+            source = row.source or row.doc_id
+            if not source:
+                continue
             snippet = f"{row.metric_name}: {row.raw_value or row.value}"
             if row.unit:
                 snippet = f"{snippet}{row.unit}"
-            citation: dict[str, Any] = {"source": row.source or row.doc_id, "snippet": snippet[:200]}
+            citation: Citation = {
+                "source": source,
+                "snippet": snippet[:200],
+                "source_type": "pdf",
+                "sub_task_id": sub_task_id,
+            }
             if row.page_num is not None:
                 citation["page"] = row.page_num
+            if row.section:
+                citation["section"] = row.section
+            if row.doc_id:
+                citation["doc_id"] = row.doc_id
+            if row.document_id is not None:
+                citation["document_id"] = row.document_id
+            if row.table_id is not None:
+                citation["table_id"] = row.table_id
+            if row.source_cell_id is not None:
+                citation["source_cell_id"] = row.source_cell_id
             citations.append(citation)
         return citations
 

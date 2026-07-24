@@ -9,10 +9,20 @@ from agents.finance_agent.financial_query_agent.services.schemas import (
     FinancialSqlResultRow,
     GeneratedFinancialSql,
 )
+from agents.finance_agent.financial_query_agent.services.fact_service import (
+    FinancialFactService,
+)
+from agents.finance_agent.financial_query_agent.services.sql_executor import (
+    FinancialSqlExecutor,
+)
+from agents.finance_agent.financial_query_agent.common import financial_query_output
 from agents.finance_agent.financial_query_agent.text_to_sql.execution import (
     select_best_disclosure_rows,
 )
 from agents.finance_agent.financial_query_agent.text_to_sql.components import nodes as nodes_module
+from agents.finance_agent.financial_query_agent.text_to_sql.components.nodes import (
+    DEFAULT_TEXT_TO_SQL_MAX_ATTEMPTS,
+)
 from agents.finance_agent.financial_query_agent.text_to_sql.middleware import clarification as clarification_mod
 from agents.finance_agent.financial_query_agent.text_to_sql.middleware.clarification import (
     ClarificationMiddleware,
@@ -34,6 +44,82 @@ def _workflow_state(question: str) -> dict:
         "sub_task_id": "task-1",
         "financial_query_text": question,
     }
+
+
+def test_text_to_sql_default_attempt_limit_is_two():
+    assert DEFAULT_TEXT_TO_SQL_MAX_ATTEMPTS == 2
+
+
+def test_sql_pdf_provenance_is_exposed_in_worker_output():
+    row = FinancialSqlExecutor._to_result_row(
+        {
+            "company_name": "宁德时代",
+            "fiscal_year": 2024,
+            "metric_name": "营业收入",
+            "raw_value": "362,012,554",
+            "unit": "千元",
+            "source": "CATL_Annual_Report_2024.pdf",
+            "page_num": 8,
+            "doc_id": "PDF-AR-CATL-2024",
+            "document_id": 11,
+            "table_id": 22,
+            "source_cell_id": 33,
+            "section": "主要会计数据和财务指标",
+        }
+    )
+
+    citations = FinancialFactService.sql_rows_to_citations(
+        [row],
+        sub_task_id="task-1",
+    )
+    output = financial_query_output(
+        _workflow_state("宁德时代2024年营业收入是多少"),
+        answer="宁德时代2024年营业收入为362,012,554千元。",
+        step="text_to_sql",
+        citations=citations,
+    )
+
+    assert output["citations"][0] == {
+        "source": "CATL_Annual_Report_2024.pdf",
+        "snippet": "营业收入: 362,012,554千元",
+        "source_type": "pdf",
+        "sub_task_id": "task-1",
+        "page": 8,
+        "section": "主要会计数据和财务指标",
+        "doc_id": "PDF-AR-CATL-2024",
+        "document_id": 11,
+        "table_id": 22,
+        "source_cell_id": 33,
+    }
+    assert output["task_results"][0]["citations"] == output["citations"]
+
+
+@pytest.mark.asyncio
+async def test_text_to_sql_workflow_preserves_parent_callbacks(monkeypatch):
+    captured = {}
+    parent_callbacks = [object()]
+
+    async def fake_ainvoke(input_state, config):
+        captured["input"] = input_state
+        captured["config"] = config
+        return {
+            "answer": "查询成功",
+            "final_status": "success",
+            "attempts": 1,
+        }
+
+    monkeypatch.setattr(
+        "agents.finance_agent.financial_query_agent.workflows.text_to_sql._get_compiled_text_to_sql_graph",
+        lambda: SimpleNamespace(ainvoke=fake_ainvoke),
+    )
+
+    await text_to_sql_workflow(
+        _workflow_state("宁德时代 2024 年营业收入是多少"),
+        config={"callbacks": parent_callbacks},
+    )
+
+    assert captured["config"]["callbacks"] is parent_callbacks
+    assert captured["config"]["recursion_limit"] > 0
 
 
 def test_select_best_disclosure_rows_prefers_same_fiscal_year_full_year_value():
@@ -212,6 +298,13 @@ async def test_text_to_sql_workflow_success_path(monkeypatch):
                 company_name="Tencent",
                 metric_name="营业收入",
                 raw_value="660,257",
+                source="Tencent_Annual_Report_2024.pdf",
+                page_num=8,
+                doc_id="PDF-AR-TENCENT-2024",
+                document_id=11,
+                table_id=22,
+                source_cell_id=33,
+                section="主要会计数据和财务指标",
             )
         ]
 
@@ -236,6 +329,10 @@ async def test_text_to_sql_workflow_success_path(monkeypatch):
     assert result["financial_query_next_action_sql"] == "execute"
     assert result["financial_query_sql_attempts"] == 1
     assert "结构化查询成功" in result["messages"][0].content
+    assert result["citations"][0]["source_type"] == "pdf"
+    assert result["citations"][0]["sub_task_id"] == "task-1"
+    assert result["citations"][0]["source_cell_id"] == 33
+    assert result["task_results"][0]["citations"] == result["citations"]
 
 
 @pytest.mark.asyncio

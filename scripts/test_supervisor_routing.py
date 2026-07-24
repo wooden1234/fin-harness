@@ -39,7 +39,6 @@ async def run_one(query: str) -> None:
     target = route_query(merged)
     print(f"\nQ: {query}")
     print(f"  route       = {update.get('route')}")
-    print(f"  risk_level  = {update.get('risk_level')}")
     print(f"  logic       = {update.get('logic')}")
     print(f"  next_node   = {target}")
 

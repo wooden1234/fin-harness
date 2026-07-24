@@ -136,6 +136,13 @@ async def test_predefined_happy_path_returns_formatted_answer():
             metric_name="营业收入",
             raw_value="660,257",
             unit="百万元",
+            source="Tencent_Annual_Report_2024.pdf",
+            page_num=8,
+            doc_id="PDF-AR-TENCENT-2024",
+            document_id=11,
+            table_id=22,
+            source_cell_id=33,
+            section="主要会计数据和财务指标",
         )
     ]
 
@@ -178,3 +185,18 @@ async def test_predefined_happy_path_returns_formatted_answer():
     assert "660,257" in result["messages"][0].content
     assert result["financial_query_template_id"] == "exact_metric_lookup"
     assert result["steps"] == ["predefined"]
+    assert result["citations"] == [
+        {
+            "source": "Tencent_Annual_Report_2024.pdf",
+            "snippet": "营业收入: 660,257百万元",
+            "source_type": "pdf",
+            "sub_task_id": "task-1",
+            "page": 8,
+            "section": "主要会计数据和财务指标",
+            "doc_id": "PDF-AR-TENCENT-2024",
+            "document_id": 11,
+            "table_id": 22,
+            "source_cell_id": 33,
+        }
+    ]
+    assert result["task_results"][0]["citations"] == result["citations"]

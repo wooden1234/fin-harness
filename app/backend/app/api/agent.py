@@ -228,13 +228,6 @@ async def agent_query(
                                 route = result_payload.get("route")
                                 if route:
                                     yield _sse({"type": "meta", "route": route})
-                        if node_name == "risk_triage":
-                            result_payload = data.get("result")
-                            if isinstance(result_payload, dict):
-                                risk_level = result_payload.get("risk_level")
-                                if risk_level:
-                                    yield _sse({"type": "meta", "risk_level": risk_level})
-
                     if node_name not in VISIBLE_TASK_NODES:
                         continue
 
@@ -299,7 +292,6 @@ async def agent_query(
                     "content": _extract_final_response(values),
                     "citations": values.get("citations") or [],
                     "route": values.get("route"),
-                    "risk_level": values.get("risk_level"),
                     "compliance_action": values.get("compliance_action"),
                     "compliance_reason_code": values.get("compliance_reason_code"),
                 },
@@ -371,7 +363,6 @@ async def agent_query(
                 "content": final_response,
                 "citations": citations,
                 "route": values.get("route"),
-                "risk_level": values.get("risk_level"),
                 "compliance_action": values.get("compliance_action"),
                 "compliance_reason_code": values.get("compliance_reason_code"),
             })

@@ -1,6 +1,6 @@
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Shield, Bot } from 'lucide-react'
+import { Bot } from 'lucide-react'
 import type { Message } from '@/stores/useChatStore'
 import { CitationsPanel } from './CitationsPanel'
 
@@ -8,13 +8,6 @@ const routeLabels = {
   faq: 'FAQ 知识库',
   account: '账户查询',
   general: '通用对话',
-} as const
-
-const riskColors = {
-  L1: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300',
-  L2: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300',
-  L3: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300',
-  L4: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300',
 } as const
 
 export function ChatMessage({ message }: { message: Message }) {
@@ -29,17 +22,11 @@ export function ChatMessage({ message }: { message: Message }) {
       )}
 
       <div className={`max-w-[80%] ${isUser ? 'items-end' : 'items-start'} flex flex-col`}>
-        {!isUser && (message.route || message.riskLevel) && (
+        {!isUser && (message.route || message.interrupted) && (
           <div className="flex flex-wrap gap-2 mb-2">
             {message.route && (
               <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
                 {routeLabels[message.route]}
-              </span>
-            )}
-            {message.riskLevel && (
-              <span className={`text-[11px] px-2 py-0.5 rounded-full flex items-center gap-1 ${riskColors[message.riskLevel]}`}>
-                <Shield size={10} />
-                {message.riskLevel}
               </span>
             )}
             {message.interrupted && (

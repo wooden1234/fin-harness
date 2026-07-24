@@ -6,10 +6,12 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Overwrite
 
+from agents.guardrails.output.finance_compliance import (
+    review_finance_answer as review_answer,
+)
 from agents.states import FinAgentState
 from app.core.logger import get_logger
 from compliance.policies import ComplianceDecision
-from compliance.review import review_answer
 
 logger = get_logger(service="final_answer")
 
@@ -22,6 +24,10 @@ COMPLIANCE_REVIEW_ERROR_ANSWER = (
     "抱歉，当前回答未能通过合规审查，请稍后重试或联系人工服务。"
 )
 COMPLIANCE_ESCALATED_ANSWER = "该问题需要人工进一步审核，请联系人工服务。"
+ROUTE_CLARIFICATION_ANSWER = (
+    "我暂时无法明确判断您的查询目标。"
+    "请补充更具体的对象和问题，例如公司或产品名称、年份、指标或查询口径。"
+)
 
 
 def _current_sub_task_ids(state: FinAgentState) -> set[str]:
@@ -82,16 +88,14 @@ async def final_answer_node(
     """统一格式化最终回答，附加引用来源"""
 
     force_empty_citations = False
-    forced_action = ""
 
     if state.get("guardrails_pass") is False:
         reason = state.get("guardrails_reason", "输入超出业务范围")
         answer = f"抱歉，{reason}。我只能回答金融相关的问题，请重新提问。"
         force_empty_citations = True
-    elif state.get("risk_needs_human", False):
-        answer = "您的问题已转人工处理，请稍候。"
+    elif state.get("supervisor_action") in {"rewrite", "clarify"}:
+        answer = ROUTE_CLARIFICATION_ANSWER
         force_empty_citations = True
-        forced_action = "escalate"
     else:
         route = state.get("route", "general")
         answer = ""
@@ -121,12 +125,6 @@ async def final_answer_node(
         answer = "抱歉，我暂时无法回答您的问题，请稍后重试。"
 
     answer, compliance_decision = _review_final_answer(answer)
-    if forced_action == "escalate" and compliance_decision.action == "pass":
-        compliance_decision = ComplianceDecision(
-            action="escalate",
-            reason_code="risk_requires_human",
-            reason=str(state.get("risk_reason") or "风险分级要求人工处理"),
-        )
 
     citations = _filter_current_turn_citations(state, list(state.get("citations") or []))
 

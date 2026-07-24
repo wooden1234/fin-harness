@@ -15,6 +15,10 @@ from app.agents.finance_agent.planner.resolve_evidence import (
     INTENT_TO_EVIDENCE_CHAIN,
     resolve_task_evidence,
 )
+from app.agents.finance_agent.planner.prompts import (
+    PLANNER_REPAIR_SYSTEM_PROMPT,
+    PLANNER_SYSTEM_PROMPT,
+)
 from pathlib import Path
 from app.agents.finance_agent.planner.validate import validate_and_normalize_tasks
 from app.agents.states import SubTask
@@ -176,3 +180,24 @@ def test_phase1_intent_eval_cases_load():
     assert product["expected_intents"] == ["product_policy"]
     row = score_case(product, ["faq"], actual_intents=["product_policy"])
     assert row["intent_ok"] and row["type_ok"]
+
+
+def test_planner_prompt_keeps_boundary_rules_compact():
+    assert len(PLANNER_SYSTEM_PROMPT) <= 5000
+    assert len(PLANNER_REPAIR_SYSTEM_PROMPT) <= 1000
+    assert "不要按“答案是数字”判断" in PLANNER_SYSTEM_PROMPT
+    assert "按单项计提坏账准备" in PLANNER_SYSTEM_PROMPT
+
+
+def test_planner_eval_covers_pdf_sql_and_faq_boundaries():
+    path = Path(__file__).resolve().parents[2] / "knowledge" / "eval" / "planner_eval.jsonl"
+    cases = {case["id"]: case for case in load_eval_cases(path)}
+
+    assert cases["boundary_pdf_bad_debt_table"]["expected_intents"] == ["document_qa"]
+    assert cases["boundary_sql_canonical_metric"]["expected_intents"] == [
+        "structured_metric"
+    ]
+    assert cases["boundary_faq_internal_policy"]["expected_intents"] == [
+        "product_policy"
+    ]
+    assert cases["boundary_mixed_sql_pdf_detail"]["expected_task_count"] == 2

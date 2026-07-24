@@ -30,6 +30,10 @@ class FinancialSqlResultRow(BaseModel):
     source: str = Field(default="")
     page_num: int | None = Field(default=None)
     doc_id: str = Field(default="")
+    document_id: int | None = Field(default=None)
+    table_id: int | None = Field(default=None)
+    source_cell_id: int | None = Field(default=None)
+    section: str = Field(default="")
 
 
 class GeneratedFinancialSql(BaseModel):

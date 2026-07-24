@@ -89,7 +89,6 @@ export function useAgentChat() {
         if (assistantMessageId) {
           updateMessage(assistantMessageId, {
             route: event.route,
-            riskLevel: event.risk_level,
           })
         }
       }
@@ -110,7 +109,6 @@ export function useAgentChat() {
             content: contentBuffer || event.content || '',
             citations: event.citations,
             route: event.route,
-            riskLevel: event.risk_level,
             agentSteps: [...useChatStore.getState().agentSteps],
           })
         }

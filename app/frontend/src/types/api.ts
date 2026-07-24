@@ -36,4 +36,3 @@ export interface Citation {
 }
 
 export type AgentRoute = 'faq' | 'account' | 'general'
-export type RiskLevel = 'L1' | 'L2' | 'L3' | 'L4'

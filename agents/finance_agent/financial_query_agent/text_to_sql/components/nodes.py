@@ -40,7 +40,7 @@ from app.core.logger import get_logger
 logger = get_logger(service="financial_query")
 
 DEFAULT_TEXT_TO_SQL_TOP_K = 5
-DEFAULT_TEXT_TO_SQL_MAX_ATTEMPTS = 3
+DEFAULT_TEXT_TO_SQL_MAX_ATTEMPTS = 2
 FINANCIAL_QUERY_SQL_UNSAFE_ANSWER = (
     "当前问题需要生成 SQL，但生成结果未通过只读安全校验。请补充更具体的查询条件后重试。"
 )

@@ -348,8 +348,18 @@ async def _format_node(
     resolved_query = state["resolved_query"]
     execution = state["execution"]
     coverage = state["coverage"]
-    answer = format_predefined_answer(state["rows"], coverage)
-    logger.info("predefined_workflow rows={} template_id={}", len(state["rows"]), template_id)
+    rows = state["rows"]
+    answer = format_predefined_answer(rows, coverage)
+    citations = FinancialFactService.sql_rows_to_citations(
+        rows,
+        sub_task_id=str(source_state.get("sub_task_id") or ""),
+    )
+    logger.info(
+        "predefined_workflow rows={} citations={} template_id={}",
+        len(rows),
+        len(citations),
+        template_id,
+    )
     return {
         "output": {
             **_base_execution_updates(
@@ -362,6 +372,7 @@ async def _format_node(
                 source_state,
                 answer=answer,
                 step="predefined",
+                citations=citations,
             ),
         }
     }

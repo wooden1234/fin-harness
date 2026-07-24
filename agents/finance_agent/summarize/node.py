@@ -75,7 +75,6 @@ def _format_task_results(task_results: list[TaskResult]) -> str:
 
 
 async def _stream_llm_summary(
-    risk_level: str,
     human_content: str,
     config: RunnableConfig | None,
 ) -> str:
@@ -83,7 +82,7 @@ async def _stream_llm_summary(
     parts: list[str] = []
     async for chunk in llm.astream(
         [
-            ("system", SUMMARIZE_SYSTEM_PROMPT.format(risk_level=risk_level)),
+            ("system", SUMMARIZE_SYSTEM_PROMPT),
             ("human", human_content),
         ],
         config=config,
@@ -99,7 +98,6 @@ async def summarize_node(
 ) -> dict:
     task_results: list[TaskResult] = list(state.get("task_results") or [])
     sub_tasks = list(state.get("sub_tasks") or [])
-    risk_level = state.get("risk_level", "L1")
 
     current_ids = {t.id for t in sub_tasks if t.id}
     if current_ids:
@@ -111,14 +109,10 @@ async def summarize_node(
     task_results = _pick_best_per_subtask(task_results)
 
     logger.info(
-        "summarize task_results=%d coverages=%s risk_level=%s",
+        "summarize task_results=%d coverages=%s",
         len(task_results),
         [_coverage_of(tr) for tr in task_results],
-        risk_level,
     )
-
-    if risk_level in ("L3", "L4"):
-        return {"summary": "您的问题涉及敏感内容，建议联系人工客服获得进一步帮助。"}
 
     if not task_results:
         return {"summary": ""}
@@ -146,11 +140,11 @@ async def summarize_node(
                 summary = context.removeprefix("[LLM 回答] ").strip() or context
             else:
                 human = SINGLE_TASK_HUMAN_PROMPT.format(context=context)
-                summary = await _stream_llm_summary(risk_level, human, config)
+                summary = await _stream_llm_summary(human, config)
         else:
             formatted = _format_task_results(task_results)
             human = MULTI_TASK_HUMAN_PROMPT.format(formatted=formatted)
-            summary = await _stream_llm_summary(risk_level, human, config)
+            summary = await _stream_llm_summary(human, config)
     except Exception:
         logger.exception("summarize llm invoke failed")
         summary = "抱歉，在汇总信息时出现错误，请稍后重试。"

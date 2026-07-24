@@ -1,4 +1,4 @@
-"""Supervisor：意图分类（仅分类，风险已拆至 risk_triage）。"""
+"""Supervisor：选择普通对话、金融任务、改写或追问动作。"""
 
 from __future__ import annotations
 
@@ -15,7 +15,17 @@ from app.core.logger import get_logger
 
 logger = get_logger(service="supervisor")
 
-RouteTarget = Literal["general_agent", "risk_triage", "error_handler"]
+RouteTarget = Literal[
+    "general_agent",
+    "plan_agent",
+    "query_rewrite",
+    "final_answer",
+    "error_handler",
+]
+
+_REWRITE_ATTEMPTED_STATUSES = frozenset(
+    {"success", "passthrough", "uncertain", "fallback"}
+)
 
 
 async def analyze_and_route_query(
@@ -31,6 +41,12 @@ async def analyze_and_route_query(
         SystemMessage(content=SUPERVISOR_SYSTEM_PROMPT),
         *conversation_messages(state),
     ]
+    rewritten_query = str(state.get("rewritten_query") or "").strip()
+    rewrite_status = str(state.get("rewrite_status") or "").strip()
+    if rewritten_query and rewrite_status in _REWRITE_ATTEMPTED_STATUSES:
+        messages.append(
+            SystemMessage(content=f"[本轮改写后的问题]\n{rewritten_query}")
+        )
 
     logger.info("----- Supervisor: analyze_and_route_query -----")
     logger.info("history_messages={}", len(messages) - 1)
@@ -41,20 +57,33 @@ async def analyze_and_route_query(
             Router, method="json_mode"
         ).ainvoke(messages, config=config),
     )
-    logger.info("route={} logic={}", router.type, router.logic)
+    logger.info("action={} logic={}", router.action, router.logic)
 
-    return {"route": router.type, "logic": router.logic}
+    route = router.action if router.action in {"general", "plan"} else ""
+    return {
+        "route": route,
+        "supervisor_action": router.action,
+        "logic": router.logic,
+    }
 
 
 def route_query(state: FinAgentState) -> RouteTarget:
-    """条件边：根据 Supervisor 的 route 选择下一节点。"""
-    route = state.get("route", "general")
-    logger.info("route_query: route={}", route)
+    """条件边：根据 Supervisor 的单一动作选择下一节点。"""
+    action = str(state.get("supervisor_action") or state.get("route") or "")
+    rewrite_status = str(state.get("rewrite_status") or "")
+    rewrite_attempted = rewrite_status in _REWRITE_ATTEMPTED_STATUSES
+    logger.info(
+        "route_query: action={} rewrite_attempted={}",
+        action,
+        rewrite_attempted,
+    )
 
-    if route == "general":
+    if action in {"rewrite", "clarify"}:
+        return "final_answer" if rewrite_attempted else "query_rewrite"
+    if action == "general":
         return "general_agent"
-    if route == "plan":
-        return "risk_triage"
+    if action == "plan":
+        return "plan_agent"
 
-    logger.warning("未知 route={}，走错误兜底", route)
+    logger.warning("未知 supervisor_action={}，走错误兜底", action)
     return "error_handler"

@@ -54,7 +54,11 @@ SELECT
   COALESCE(fact.currency, '') AS currency,
   COALESCE(document.source, '') AS source,
   table_ctx.page_num AS page_num,
-  COALESCE(document.doc_id, '') AS doc_id
+  COALESCE(document.doc_id, '') AS doc_id,
+  document.id AS document_id,
+  table_ctx.id AS table_id,
+  fact.source_cell_id AS source_cell_id,
+  COALESCE(table_ctx.section, '') AS section
 FROM fin_core.annual_financial_facts AS fact
 JOIN fin_core.annual_financial_tables AS table_ctx ON table_ctx.id = fact.table_id
 JOIN fin_core.annual_report_documents AS document ON document.id = table_ctx.document_id
@@ -94,7 +98,11 @@ SELECT
   COALESCE(fact.currency, '') AS currency,
   COALESCE(document.source, '') AS source,
   table_ctx.page_num AS page_num,
-  COALESCE(document.doc_id, '') AS doc_id
+  COALESCE(document.doc_id, '') AS doc_id,
+  document.id AS document_id,
+  table_ctx.id AS table_id,
+  fact.source_cell_id AS source_cell_id,
+  COALESCE(table_ctx.section, '') AS section
 FROM fin_core.annual_financial_facts AS fact
 JOIN fin_core.annual_financial_tables AS table_ctx ON table_ctx.id = fact.table_id
 JOIN fin_core.annual_report_documents AS document ON document.id = table_ctx.document_id
@@ -145,7 +153,11 @@ FROM (
     COALESCE(fact.unit, '') AS unit,
     COALESCE(document.source, '') AS source,
     table_ctx.page_num AS page_num,
-    COALESCE(document.doc_id, '') AS doc_id
+    COALESCE(document.doc_id, '') AS doc_id,
+    document.id AS document_id,
+    table_ctx.id AS table_id,
+    fact.source_cell_id AS source_cell_id,
+    COALESCE(table_ctx.section, '') AS section
   FROM fin_core.annual_financial_facts AS fact
   JOIN fin_core.annual_financial_tables AS table_ctx ON table_ctx.id = fact.table_id
   JOIN fin_core.annual_report_documents AS document ON document.id = table_ctx.document_id
@@ -186,7 +198,11 @@ SELECT
   COALESCE(fact.unit, '') AS unit,
   COALESCE(document.source, '') AS source,
   table_ctx.page_num AS page_num,
-  COALESCE(document.doc_id, '') AS doc_id
+  COALESCE(document.doc_id, '') AS doc_id,
+  document.id AS document_id,
+  table_ctx.id AS table_id,
+  fact.source_cell_id AS source_cell_id,
+  COALESCE(table_ctx.section, '') AS section
 FROM fin_core.annual_financial_facts AS fact
 JOIN fin_core.annual_financial_tables AS table_ctx ON table_ctx.id = fact.table_id
 JOIN fin_core.annual_report_documents AS document ON document.id = table_ctx.document_id
@@ -226,7 +242,11 @@ SELECT
   COALESCE(fact.unit, '') AS unit,
   COALESCE(document.source, '') AS source,
   table_ctx.page_num AS page_num,
-  COALESCE(document.doc_id, '') AS doc_id
+  COALESCE(document.doc_id, '') AS doc_id,
+  document.id AS document_id,
+  table_ctx.id AS table_id,
+  fact.source_cell_id AS source_cell_id,
+  COALESCE(table_ctx.section, '') AS section
 FROM fin_core.annual_financial_facts AS fact
 JOIN fin_core.annual_financial_tables AS table_ctx ON table_ctx.id = fact.table_id
 JOIN fin_core.annual_report_documents AS document ON document.id = table_ctx.document_id
@@ -268,7 +288,11 @@ SELECT
   COALESCE(fact.currency, '') AS currency,
   COALESCE(document.source, '') AS source,
   table_ctx.page_num AS page_num,
-  COALESCE(document.doc_id, '') AS doc_id
+  COALESCE(document.doc_id, '') AS doc_id,
+  document.id AS document_id,
+  table_ctx.id AS table_id,
+  fact.source_cell_id AS source_cell_id,
+  COALESCE(table_ctx.section, '') AS section
 FROM fin_core.annual_financial_facts AS fact
 JOIN fin_core.annual_financial_tables AS table_ctx ON table_ctx.id = fact.table_id
 JOIN fin_core.annual_report_documents AS document ON document.id = table_ctx.document_id
@@ -313,7 +337,11 @@ SELECT
   COALESCE(fact.unit, '') AS unit,
   COALESCE(document.source, '') AS source,
   table_ctx.page_num AS page_num,
-  COALESCE(document.doc_id, '') AS doc_id
+  COALESCE(document.doc_id, '') AS doc_id,
+  document.id AS document_id,
+  table_ctx.id AS table_id,
+  fact.source_cell_id AS source_cell_id,
+  COALESCE(table_ctx.section, '') AS section
 FROM fin_core.annual_financial_facts AS fact
 JOIN fin_core.annual_financial_tables AS table_ctx ON table_ctx.id = fact.table_id
 JOIN fin_core.annual_report_documents AS document ON document.id = table_ctx.document_id
@@ -354,7 +382,11 @@ SELECT
   COALESCE(fact.unit, '') AS unit,
   COALESCE(document.source, '') AS source,
   table_ctx.page_num AS page_num,
-  COALESCE(document.doc_id, '') AS doc_id
+  COALESCE(document.doc_id, '') AS doc_id,
+  document.id AS document_id,
+  table_ctx.id AS table_id,
+  fact.source_cell_id AS source_cell_id,
+  COALESCE(table_ctx.section, '') AS section
 FROM fin_core.annual_financial_facts AS fact
 JOIN fin_core.annual_financial_tables AS table_ctx ON table_ctx.id = fact.table_id
 JOIN fin_core.annual_report_documents AS document ON document.id = table_ctx.document_id

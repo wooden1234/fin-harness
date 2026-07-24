@@ -19,7 +19,6 @@ from app.shared import (
     CoreState,
     ConversationState,
     CoverageStatus,
-    RiskLevel,
     SubTaskIntent,
     TaskResult,
 )
@@ -30,7 +29,6 @@ from app.state_mixins import (
     FinancialQueryState,
     GuardrailsState,
     PlannerState,
-    RiskTriageState,
     SupervisorState,
     WorkerOutputState,
 )
@@ -43,7 +41,6 @@ from app.shared import PlannerOutput, Router, SubTask, SubTaskType
 class FinAgentState(
     CoreState,
     SupervisorState,
-    RiskTriageState,
     GuardrailsState,
     ComplianceState,
     PlannerState,
@@ -77,8 +74,6 @@ __all__ = [
     "GuardrailsState",
     "PlannerOutput",
     "PlannerState",
-    "RiskLevel",
-    "RiskTriageState",
     "Router",
     "SubTask",
     "SubTaskIntent",

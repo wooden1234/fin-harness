@@ -59,7 +59,7 @@ def _print_turn(result: dict) -> None:
     messages = result.get("messages") or []
     last = messages[-1] if messages else None
     answer = last.content if isinstance(last, AIMessage) else getattr(last, "content", "")
-    print(f"  route={result.get('route')} risk={result.get('risk_level')}")
+    print(f"  route={result.get('route')}")
     print(f"  messages={len(messages)}")
     print(f"  A: {str(answer)[:300]}...")
 

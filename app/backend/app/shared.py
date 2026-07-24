@@ -15,7 +15,6 @@ from pydantic import BaseModel, Field
 
 # ---------- 共享类型别名 ----------
 AgentRoute = Literal["faq", "pdf", "account", "general", "plan"]
-RiskLevel = Literal["L1", "L2", "L3", "L4"]
 SubTaskType = Literal["faq", "pdf", "financial_query", "web_search", "general"]
 
 # 意图分类：Planner 输出意图，数据源由 resolve_evidence 按意图映射（不由 LLM 直接选源）
@@ -33,10 +32,15 @@ CoverageStatus = Literal["covered", "partial", "uncovered", "clarify"]
 
 # ---------- 共享 TypedDict ----------
 class Citation(TypedDict, total=False):
-    """检索引用；FAQ / PDF 节点写入，SSE done 带回前端。"""
+    """证据引用；检索节点及 SQL 溯源写入，SSE done 带回前端。"""
     source: str
     snippet: str
     page: int
+    section: str
+    doc_id: str
+    document_id: int
+    table_id: int
+    source_cell_id: int
     url: str
     title: str
     published_at: str
@@ -67,9 +71,12 @@ class TaskResult(TypedDict, total=False):
 
 # ---------- 共享 Pydantic 模型（Planner / Supervisor 等共用）----------
 class Router(BaseModel):
-    """Supervisor 对用户问题的分类结果：general（闲聊）还是 plan（RAG）。"""
-    type: Literal["general", "plan"] = Field(
-        description="general=闲聊/泛化/回溯对话；plan=需要检索知识库或文档"
+    """Supervisor 对用户问题的单一互斥处理动作。"""
+    action: Literal["general", "plan", "rewrite", "clarify"] = Field(
+        description=(
+            "general=普通对话；plan=进入金融任务；rewrite=结合上文补全；"
+            "clarify=无法安全补全，需要追问"
+        ),
     )
     logic: str = Field(
         description="一两句话说明为何选该路由"
@@ -125,7 +132,7 @@ class ConversationState(TypedDict):
     conversation_summary: NotRequired[str]
     conversation_summary_until: NotRequired[str]
 
-    # 本轮追问改写结果（压缩后、路由前写入；不进入 messages）。
+    # 本轮追问改写结果（Supervisor 按需触发后写入；不进入 messages）。
     # 生命周期：本轮有效 → final_answer 收口清空；下轮 query_rewrite 再检查兜底。
     rewritten_query: NotRequired[str]
     # 改写状态：success=完成补全，passthrough=无需补全，

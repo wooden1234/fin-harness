@@ -99,6 +99,10 @@ class FinancialSqlExecutor:
             source=str(mapping.get("source") or ""),
             page_num=mapping.get("page_num"),
             doc_id=str(mapping.get("doc_id") or ""),
+            document_id=mapping.get("document_id"),
+            table_id=mapping.get("table_id"),
+            source_cell_id=mapping.get("source_cell_id"),
+            section=str(mapping.get("section") or ""),
         )
 
 

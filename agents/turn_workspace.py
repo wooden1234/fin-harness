@@ -15,23 +15,22 @@ from langgraph.types import Overwrite
 
 
 def begin_turn_workspace() -> dict:
-    """每轮入口（guardrails）统一重置临时工作区。"""
+    """每轮入口（init_turn）统一重置临时工作区。"""
     return {
         # ── reducer 字段：必须 Overwrite ──
         "steps": Overwrite([]),
         "task_results": Overwrite([]),
         "citations": Overwrite([]),
 
-        # ── 本轮派生 / 路由 / 风控 / 合规 ──
+        # ── 本轮派生 / 路由 / 护栏 / 合规 ──
         "rewritten_query": "",
         "rewrite_status": "",
         "summary": "",
         "rag_trace": {},
         "route": "",
+        "supervisor_action": "",
         "logic": "",
-        "risk_level": "",
-        "risk_reason": "",
-        "risk_needs_human": False,
+        "guardrail_decision": {},
         "guardrails_reason": "",
         "compliance_action": "",
         "compliance_reason_code": "",

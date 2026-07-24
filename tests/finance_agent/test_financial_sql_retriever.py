@@ -3,6 +3,9 @@
 from agents.finance_agent.financial_query_agent.text_to_sql.retrievers.sql_examples import (
     FinancialSqlExampleRetriever,
 )
+from agents.finance_agent.financial_query_agent.text_to_sql.generation.context import (
+    build_fewshot_examples,
+)
 
 
 def test_retriever_prefers_quarter_examples_for_quarter_question():
@@ -38,3 +41,12 @@ def test_retriever_keeps_annual_example_for_annual_question():
     assert examples
     assert examples[0].category == "单指标查数"
     assert "period_type = 'annual'" in examples[0].sql or "period_type IS NULL" in examples[0].sql
+
+
+def test_build_fewshot_examples_uses_one_example_by_default():
+    prompt = build_fewshot_examples("宁德时代 2024 年一季度营业收入是多少")
+
+    assert "示例1（季度查询）" in prompt
+    assert "示例2（" not in prompt
+    for alias in ("document_id", "table_id", "source_cell_id", "section"):
+        assert f"AS {alias}" in prompt

@@ -127,7 +127,7 @@ def build_schema_prompt() -> str:
     return FINANCIAL_SQL_SCHEMA_PROMPT
 
 
-def build_fewshot_examples(question: str, *, k: int = 3) -> str:
+def build_fewshot_examples(question: str, *, k: int = 1) -> str:
     """先按规则检索 few-shot，后续可无缝替换成向量检索。"""
     examples = _EXAMPLE_RETRIEVER.get_examples(question, k=k)
     return _EXAMPLE_RETRIEVER.format_examples(examples)

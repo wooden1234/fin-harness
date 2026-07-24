@@ -36,7 +36,7 @@ def latest_user_query(messages: list) -> str:
 def begin_turn_workspace() -> dict:
     """兼容旧名：plan 路径只重置 worker 输出，不 Overwrite steps。
 
-    完整临时工作区重置见 ``agents.turn_workspace.begin_turn_workspace``（guardrails 入口）。
+    完整临时工作区重置见 ``agents.turn_workspace.begin_turn_workspace``（init_turn 入口）。
     """
     return reset_worker_workspace()
 

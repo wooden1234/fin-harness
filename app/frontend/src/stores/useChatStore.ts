@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { AgentRoute, Citation, Conversation, RiskLevel } from '@/types/api'
+import type { AgentRoute, Citation, Conversation } from '@/types/api'
 import type { AgentStep, AgentStepStatus } from '@/types/agentSteps'
 
 export interface Message {
@@ -8,7 +8,6 @@ export interface Message {
   content: string
   citations?: Citation[]
   route?: AgentRoute
-  riskLevel?: RiskLevel
   interrupted?: boolean
   agentSteps?: AgentStep[]
   timestamp: number

@@ -12,7 +12,6 @@ from typing import Any
 from langchain_core.runnables import RunnableConfig
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
-from langsmith.run_helpers import tracing_context
 
 from agents.states import FinAgentState
 from agents.finance_agent.financial_query_agent.common import (
@@ -41,6 +40,12 @@ from agents.finance_agent.financial_query_agent.text_to_sql.components.nodes imp
 from agents.finance_agent.financial_query_agent.text_to_sql.state import (
     TextToSqlNextStep,
     TextToSqlState,
+)
+from agents.finance_agent.financial_query_agent.text_to_sql.execution import (
+    select_best_disclosure_rows,
+)
+from agents.finance_agent.financial_query_agent.services.fact_service import (
+    FinancialFactService,
 )
 from app.core.logger import get_logger
 
@@ -236,15 +241,13 @@ async def text_to_sql_workflow(
     question = str(state.get("financial_query_text") or query_from_state(state)).strip()
     invoke_config: RunnableConfig = {
         **(config or {}),
-        "callbacks": [],
         "recursion_limit": _recursion_limit(),
     }
     try:
-        with tracing_context(enabled=False):
-            result = await _get_compiled_text_to_sql_graph().ainvoke(
-                {"question": question},
-                config=invoke_config,
-            )
+        result = await _get_compiled_text_to_sql_graph().ainvoke(
+            {"question": question},
+            config=invoke_config,
+        )
     except GraphRecursionError:
         logger.error(
             "text_to_sql_workflow exceeded recursion_limit={}",
@@ -265,12 +268,18 @@ async def text_to_sql_workflow(
         answer = result["answer"]
         coverage = "uncovered"
 
+    rows = select_best_disclosure_rows(list(result.get("rows") or []))
+    citations = FinancialFactService.sql_rows_to_citations(
+        rows,
+        sub_task_id=str(state.get("sub_task_id") or ""),
+    )
     fq_output = financial_query_output(
         state,
         answer=answer,
         step="text_to_sql",
         coverage=coverage,
         fallback_reason="financial_query_text_to_sql_failed" if coverage == "uncovered" else "",
+        citations=citations if coverage == "covered" else [],
     )
     return {
         **_base_updates(question, result),

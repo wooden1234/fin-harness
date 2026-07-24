@@ -7,10 +7,14 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class AgentRuntimeContext:
-    """由认证主体派生的不可变上下文，禁止使用请求体中的身份字段。"""
+    """由认证主体派生的不可变上下文，禁止使用请求体中的身份字段。
 
-    tenant_id: str
-    user_id: str
+    ``tenant_id`` / ``user_id`` 带默认值，供 ``langgraph dev`` / Studio 在未传
+    context 时仍能启动；生产路径必须通过 ``from_user`` 注入真实身份。
+    """
+
+    tenant_id: str = "studio"
+    user_id: str = "0"
     conversation_id: str | None = None
     run_id: str | None = None
 

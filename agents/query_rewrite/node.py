@@ -1,6 +1,8 @@
-"""query_rewrite 节点：压缩后、路由前，将追问补全为完整问句。"""
+"""query_rewrite 节点：Supervisor 无法直接分配时，将追问补全为完整问句。"""
 
 from __future__ import annotations
+
+from typing import Literal
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
@@ -13,6 +15,7 @@ from app.core.logger import get_logger
 logger = get_logger(service="query_rewrite")
 
 _RECENT_MESSAGE_LIMIT = 8
+RewriteTarget = Literal["supervisor", "final_answer"]
 
 
 def _latest_user_query(messages: list[AnyMessage]) -> str:
@@ -151,3 +154,11 @@ async def query_rewrite_node(
         "rewrite_status": "success" if rewritten != query else "passthrough",
         "steps": ["query_rewrite"],
     }
+
+
+def route_after_query_rewrite(state: FinAgentState) -> RewriteTarget:
+    """改写成功后交回 Supervisor 复判；失败或仍不明确时直接追问。"""
+    rewrite_status = str(state.get("rewrite_status") or "")
+    if rewrite_status in {"success", "passthrough"}:
+        return "supervisor"
+    return "final_answer"
