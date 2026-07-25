@@ -35,31 +35,22 @@ def _parse_evaluation(content: Any) -> dict[str, Any]:
     strategy = str(payload.get("next_strategy") or "none").strip().lower()
     if strategy not in _STRATEGIES:
         strategy = "step_back" if route == "rewrite" else "none"
+    if route != "rewrite":
+        strategy = "none"
+    elif strategy == "none":
+        strategy = "step_back"
     try:
         confidence = min(max(float(payload.get("confidence", 0.0)), 0.0), 1.0)
     except (TypeError, ValueError):
         confidence = 0.0
+    answer = str(payload.get("answer") or "").strip() if route == "answer" else ""
     return {
         "route": route,
-        "relevance": payload.get("relevance") is True,
-        "completeness": payload.get("completeness") is True,
-        "ambiguity": payload.get("ambiguity") is True,
-        "answerable": payload.get("answerable") is True,
         "next_strategy": strategy,
         "reason": str(payload.get("reason") or ""),
-        "missing_fields": _string_list(payload.get("missing_fields")),
-        "unsupported_facts": _string_list(payload.get("unsupported_facts")),
-        "strategy_reason": str(payload.get("strategy_reason") or ""),
-        "web_reason": str(payload.get("web_reason") or ""),
         "confidence": confidence,
-        "answer": str(payload.get("answer") or "").strip(),
+        "answer": answer,
     }
-
-
-def _string_list(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]
 
 
 async def evaluate_evidence_node(state: PdfAgentState, *, config=None) -> PdfAgentState:
@@ -82,9 +73,8 @@ async def evaluate_evidence_node(state: PdfAgentState, *, config=None) -> PdfAge
             evaluation = {
                 **evaluation,
                 "route": "web_search",
-                "answerable": False,
+                "next_strategy": "none",
                 "reason": evaluation["reason"] or "模型未生成有效答案",
-                "web_reason": evaluation["web_reason"] or "PDF 证据无法形成有效答案",
             }
         citation_indices = extract_citation_indices(answer, len(state.get("hits") or []))
         trace_update = append_trace(
@@ -92,14 +82,8 @@ async def evaluate_evidence_node(state: PdfAgentState, *, config=None) -> PdfAge
             "evidence_evaluate",
             status="ok",
             route=evaluation["route"],
-            relevance=evaluation["relevance"],
-            completeness=evaluation["completeness"],
-            ambiguity=evaluation["ambiguity"],
-            answerable=evaluation["answerable"],
-            missing_fields=evaluation["missing_fields"],
-            unsupported_facts=evaluation["unsupported_facts"],
-            strategy_reason=evaluation["strategy_reason"],
-            web_reason=evaluation["web_reason"],
+            next_strategy=evaluation["next_strategy"],
+            reason=evaluation["reason"],
             confidence=evaluation["confidence"],
             answer_chars=len(answer),
             citation_count=len(citation_indices),

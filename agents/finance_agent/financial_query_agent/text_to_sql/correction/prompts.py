@@ -15,10 +15,10 @@ FINANCIAL_QUERY_TEXT_TO_SQL_CORRECTION_PROMPT = """你是 financial_query 的只
 4. 只允许使用 Schema 中列出的 fin_core 财务表，优先保留 canonical_metrics、company_metric_mappings 和 annual_financial_facts.canonical_code 的统一口径约束
 5. 必须使用命名参数，并尽量复用原始参数名；params 必须与 SQL 中的命名参数完全一致
 6. 财务指标优先使用 :canonical_code，不要退回到 financial_metrics.canonical_name 作为统一口径
-7. 若无法安全修正，请 route=clarify，并说明缺失信息
+7. 修正成功时 route=execute；若无法安全修正，请 route=clarify，并说明缺失信息
 8. 优先修正表名、列名、JOIN 路径、LIMIT、参数绑定和只读约束问题
 9. 用户说“近三年/近五年/历年/趋势”但未给具体年份时，不要因缺年份追问；用最新可用年度倒序取 N 条，再按 period_year 升序展示
-10. 必须同步返回 query_contract：companies、years、canonical_code 指标列表、period_type 和 operation；修正 SQL 后契约也必须与用户问题一致
+10. 必须同步返回 query_contract：companies、years、metrics(canonical_code) 指标列表、period_type 和 operation；operation 只能是 point_lookup、list、compare、trend、aggregate 或 unknown；修正 SQL 后契约也必须与用户问题一致。不要返回 canonical_code/canonical_codes 或 point_query 等旧字段和值
 
 错误类型处理：
 - safety: 只处理只读、安全关键字、单条 SELECT、LIMIT 等问题

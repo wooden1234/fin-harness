@@ -86,8 +86,8 @@ class Router(BaseModel):
 class SubTask(BaseModel):
     """单个子任务 — Planner 分解产物。
 
-    Planner 只产出 ``intent``；``type``（首选证据工具）与 ``evidence_chain``
-    （降级链）由 resolve_evidence 节点按意图映射填充。
+    Planner 只产出 ``intent`` 与 ``reason``；``type``（首选证据工具）与
+    ``evidence_chain``（降级链）由 resolve_evidence 节点按意图映射填充。
     """
     id: str = Field(default="", description="子任务唯一标识，用于结果匹配")
     question: str = Field(description="独立的子问题，可直接检索")
@@ -98,6 +98,10 @@ class SubTask(BaseModel):
             "document_qa=文档依据问答 / structured_metric=结构化财务指标查数 / "
             "market_event=最新市场或监管信息"
         ),
+    )
+    reason: str = Field(
+        default="",
+        description="一两句话说明为何选择该 intent（Planner LLM 输出）",
     )
     type: SubTaskType = Field(
         default="faq",

@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": ".cursor/hooks/block_dangerous_shell.py",
+        "failClosed": true
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": ".cursor/hooks/block_dangerous_shell.py",
+        "matcher": "Shell",
+        "failClosed": true
+      }
+    ]
+  }
+}

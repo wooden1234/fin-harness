@@ -2,6 +2,7 @@
 
 from agents.finance_agent.financial_query_agent.services.schemas import (
     FinancialSqlResultRow,
+    GeneratedFinancialSql,
     QueryContract,
 )
 from agents.finance_agent.financial_query_agent.text_to_sql.validation import (
@@ -32,6 +33,54 @@ def test_validate_generated_sql_passes_without_canonical_path_for_result_layer_c
     )
 
     assert result.ok
+
+
+def test_query_contract_normalizes_legacy_single_lookup_operation():
+    contract = QueryContract(operation="query_single")
+
+    assert contract.operation == "point_lookup"
+
+
+def test_generated_sql_normalizes_legacy_route_metric_and_sql_fields():
+    generated = GeneratedFinancialSql(
+        generated_sql="SELECT 1",
+        route="generate",
+        query_contract={"metrics": [{"canonical_code": "REVENUE"}]},
+    )
+
+    assert generated.sql == "SELECT 1"
+    assert generated.route == "execute"
+    assert generated.query_contract.metrics == ["REVENUE"]
+
+
+def test_generated_sql_normalizes_legacy_default_ratio_contract():
+    generated = GeneratedFinancialSql(
+        sql="SELECT 1",
+        route="default",
+        query_contract={
+            "canonical_code": ["RND_EXPENSE", "REVENUE"],
+            "operation": "ratio",
+        },
+    )
+
+    assert generated.route == "execute"
+    assert generated.query_contract.metrics == ["RND_EXPENSE", "REVENUE"]
+    assert generated.query_contract.operation == "aggregate"
+
+
+def test_generated_sql_normalizes_correction_aliases():
+    generated = GeneratedFinancialSql(
+        sql="SELECT 1",
+        route="correct",
+        query_contract={
+            "canonical_codes": ["REVENUE"],
+            "operation": "point_query",
+        },
+    )
+
+    assert generated.route == "execute"
+    assert generated.query_contract.metrics == ["REVENUE"]
+    assert generated.query_contract.operation == "point_lookup"
 
 
 def test_validate_query_result_flags_empty_point_lookup():

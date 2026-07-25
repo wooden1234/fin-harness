@@ -48,6 +48,7 @@ def resolve_task_evidence(task: SubTask) -> SubTask:
         id=task.id,
         question=task.question,
         intent=intent,
+        reason=str(getattr(task, "reason", "") or "").strip(),
         type=chain[0],
         evidence_chain=chain,
     )

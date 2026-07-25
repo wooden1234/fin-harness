@@ -80,7 +80,14 @@ def validate_and_normalize_tasks(tasks: list[SubTask] | None) -> ValidationResul
             needs_repair = True
             continue
 
-        cleaned.append(SubTask(id=task.id or "", question=question, intent=intent))
+        cleaned.append(
+            SubTask(
+                id=task.id or "",
+                question=question,
+                intent=intent,
+                reason=str(getattr(task, "reason", "") or "").strip(),
+            )
+        )
 
     merged: list[SubTask] = []
     for task in cleaned:
@@ -104,6 +111,7 @@ def validate_and_normalize_tasks(tasks: list[SubTask] | None) -> ValidationResul
                 id=kept.id or task.id,
                 question=task.question,
                 intent=task.intent,
+                reason=task.reason or kept.reason,
             )
 
     if len(merged) > MAX_SUBTASKS:

@@ -166,10 +166,7 @@ def _rewrite_metadata(result: PdfAgentState) -> dict:
         "evidence_evaluation_status": result.get("evidence_evaluation_status", "unavailable"),
         "evidence_route": result.get("evidence_route", "web_search"),
         "next_rewrite_strategy": result.get("next_rewrite_strategy", "none"),
-        "missing_fields": evidence.get("missing_fields", []),
-        "unsupported_facts": evidence.get("unsupported_facts", []),
-        "strategy_reason": evidence.get("strategy_reason", ""),
-        "web_reason": evidence.get("web_reason", ""),
+        "evidence_reason": evidence.get("reason", ""),
         "retrieval_quality": float(result.get("retrieval_quality") or 0.0),
         "retrieval_quality_source": result.get("retrieval_quality_source", "unknown"),
     }

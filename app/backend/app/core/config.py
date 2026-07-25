@@ -126,6 +126,14 @@ class Settings(BaseSettings):
     TAVILY_SEARCH_URL: str = "https://api.tavily.com/search"
     WEB_SEARCH_MAX_RESULTS: int = 5
 
+    # 天气（OpenWeatherMap）。配置 OPENWEATHER_API_KEY 后启用。
+    OPENWEATHER_API_KEY: str = ""
+    OPENWEATHER_GEOCODE_URL: str = "https://api.openweathermap.org/geo/1.0/direct"
+    OPENWEATHER_CURRENT_URL: str = "https://api.openweathermap.org/data/2.5/weather"
+    OPENWEATHER_FORECAST_URL: str = "https://api.openweathermap.org/data/2.5/forecast"
+    OPENWEATHER_TIMEOUT_SEC: float = 10.0
+    OPENWEATHER_MAX_DAYS: int = 5
+
     # LangGraph Checkpoint（W3 Day 5）：postgres | memory
     AGENT_CHECKPOINT_BACKEND: str = "postgres"
 

@@ -44,7 +44,7 @@ def build_retrieval_context(hits) -> str:
 
 
 async def _resolve_route_and_filters(query: str) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
-    """LLM 类别路由 + query_filter_llm，与 gate070 评测链路对齐。"""
+    """规则优先解析路由和过滤条件，每次查询最多调用一次 LLM。"""
     route = await get_pdf_kb_router(min_confidence=0.5).aroute(query)
     if not route.supported:
         return None, {
@@ -74,7 +74,8 @@ async def _resolve_route_and_filters(query: str) -> tuple[dict[str, Any] | None,
     if categories:
         filters["category"] = categories[0] if len(categories) == 1 else categories
 
-    extraction = await get_query_filter_extractor().aextract(
+    extractor = get_query_filter_extractor()
+    extraction = extractor.extract_rules(
         query,
         knowledge_bases=categories or None,
     )

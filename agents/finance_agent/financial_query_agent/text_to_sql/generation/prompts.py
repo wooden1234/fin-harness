@@ -16,7 +16,7 @@ FINANCIAL_QUERY_TEXT_TO_SQL_PROMPT = """你是 financial_query 的只读 SQL 生
 5. 信息不足时 route=clarify，并给出 missing_fields；不要猜测公司、年份或指标。
 6. “近 N 年/历年/趋势”按最新可用年度取 N 条，再按 period_year 升序输出。
 7. 季度查询使用 period_type='quarter'；未指定季度或半年度的财务事实默认使用 period_type='annual'。
-8. 必须返回 query_contract：companies、years、metrics(canonical_code)、period_type 和 operation；不确定时使用空列表或 unknown。
+8. 必须返回 query_contract：companies、years、metrics(canonical_code)、period_type 和 operation。operation 只能是 point_lookup、list、compare、trend、aggregate 或 unknown；单个指标查询使用 point_lookup。
 """
 
 __all__ = ["FINANCIAL_QUERY_TEXT_TO_SQL_PROMPT"]

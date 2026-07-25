@@ -1,29 +1,18 @@
-"""PDF 查询元数据提取：优先使用大模型，失败时不施加字段过滤。"""
+"""PDF 查询元数据提取：仅使用确定性规则和实体词典。"""
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from app.core.config import settings
-from app.core.logger import get_logger
-from retrieval.core.filters import (
-    MetadataFilters,
-    supported_filter_keys,
-)
-from retrieval.retrievers.query_constraints import (
-    normalize_query_entity_filters,
-    parse_query_constraints,
-)
+from retrieval.core.filters import MetadataFilters
+from retrieval.retrievers.query_constraints import parse_query_constraints
 from retrieval.retrievers.json_utils import parse_json_payload
-
-logger = get_logger(service="query_filter_extractor")
 
 _FIELDS = ("year", "ticker", "doc_id", "source", "issuer")
 _DOC_ID_PATTERN = re.compile(r"^PDF-[A-Z0-9-]+$", flags=re.IGNORECASE)
@@ -117,33 +106,6 @@ class QueryFilterExtraction:
     reason: str
 
 
-def _system_prompt() -> str:
-    return """你是金融 PDF 知识库的查询元数据提取器。
-
-只从用户问题中提取明确出现或明确指代的过滤字段，不要根据常识、公司列表或知识库内容猜测。
-字段含义：
-- year：用于过滤文档的报告/财务年度；annual_reports 中出现“2024年营业收入/2025年研发费用”等明确财务年份时必须提取
-- year：不要提取“预计到2028年”“到2027年目标”“2026年市场规模预测”等正文预测/目标年份，除非问题明确询问该年份对应的报告版本
-- year：不要提取“截至2024年底/截至2024年末”等正文事实时间边界；这不是文档报告年份
-- ticker：六位股票代码
-- doc_id：问题中明确出现的 PDF 文档 ID，格式通常为 PDF-...
-- source：问题中明确指定的具体来源、报告名称或文件名；“报告/年报/研报/白皮书”等通用词不能作为 source
-- issuer：问题中明确指定的发布机构、研究机构或发行方
-
-无法确定时返回 null。confidence 为每个非空字段给出 0 到 1 的置信度。
-字符串内部不要使用未转义的 ASCII 双引号，如需引用词语请使用中文引号“”。
-不要输出 category；文档类型由另一个路由器处理。只输出 JSON。"""
-
-
-def _human_prompt(query: str, categories: tuple[str, ...]) -> str:
-    category_text = ", ".join(categories) if categories else "未确定"
-    return (
-        f"已确定的文档类别：{category_text}\n"
-        f"用户问题：\n{query}\n\n"
-        "请只提取适合作为文档元数据过滤条件的字段。"
-    )
-
-
 class QueryFilterExtractor:
     def __init__(
         self,
@@ -158,13 +120,6 @@ class QueryFilterExtractor:
             else min_confidence
         )
         self._cache: dict[tuple[str, tuple[str, ...], tuple[tuple[str, Any], ...]], QueryFilterExtraction] = {}
-
-    def _get_llm(self) -> BaseChatModel:
-        if self._llm is None:
-            from agents.llm import get_router_llm
-
-            self._llm = get_router_llm()
-        return self._llm
 
     @staticmethod
     def _parse_text(text: str) -> QueryFilterDecision:
@@ -200,70 +155,6 @@ class QueryFilterExtractor:
         return QueryFilterDecision.model_validate(payload)
 
     @staticmethod
-    def _response_text(response: Any) -> str:
-        content = getattr(response, "content", response)
-        if isinstance(content, dict):
-            if isinstance(content.get("text"), str):
-                return content["text"]
-            return json.dumps(content, ensure_ascii=False)
-        if isinstance(content, list):
-            return "".join(
-                block.get("text", str(block)) if isinstance(block, dict) else str(block)
-                for block in content
-            )
-        return str(content)
-
-    async def _ainvoke(self, query: str, categories: tuple[str, ...]) -> QueryFilterDecision:
-        llm = self._get_llm()
-        messages = [
-            SystemMessage(content=_system_prompt()),
-            HumanMessage(content=_human_prompt(query, categories)),
-        ]
-        response: Any = None
-        try:
-            response = await llm.ainvoke(messages)
-            return self._parse_text(self._response_text(response))
-        except Exception as exc:
-            detail = ""
-            if isinstance(exc, ValidationError):
-                detail = "; ".join(
-                    f"{'.'.join(str(item) for item in error.get('loc', ())) or 'root'}:{error.get('type', 'invalid')}"
-                    for error in exc.errors()
-                )
-            else:
-                detail = str(exc)
-            logger.warning(
-                "query_filter_extractor invoke or parse failed; use no metadata filters "
-                "error={} detail={} response_preview={!r}",
-                type(exc).__name__,
-                detail or "unavailable",
-                self._response_text(response)[:300] if response is not None else "",
-            )
-            raise
-
-    def _invoke(self, query: str, categories: tuple[str, ...]) -> QueryFilterDecision:
-        """保留同步兼容入口，异步图应使用 ``_ainvoke``。"""
-        llm = self._get_llm()
-        messages = [
-            SystemMessage(content=_system_prompt()),
-            HumanMessage(content=_human_prompt(query, categories)),
-        ]
-        response: Any = None
-        try:
-            response = llm.invoke(messages)
-            return self._parse_text(self._response_text(response))
-        except Exception as exc:
-            detail = str(exc)
-            logger.warning(
-                "query_filter_extractor invoke or parse failed; use no metadata filters "
-                "error={} detail={} response_preview={!r}",
-                type(exc).__name__,
-                detail,
-                self._response_text(response)[:300] if response is not None else "",
-            )
-            raise
-
-    @staticmethod
     def _allow_year_filter(query: str, knowledge_bases: list[str]) -> bool:
         """仅在年份像文档版本时下推，避免误把正文事实年份当成文档年份。"""
         if _YEAR_PREDICTION_PATTERN.search(query):
@@ -280,26 +171,21 @@ class QueryFilterExtractor:
             return True
         return False
 
-    def _validated_filters(
+    def extract_rules(
         self,
-        decision: QueryFilterDecision,
-        *,
-        knowledge_bases: list[str],
         query: str,
-    ) -> MetadataFilters:
-        allowed = supported_filter_keys(knowledge_bases or None)
-        result: MetadataFilters = {}
-        for field in _FIELDS:
-            value: Any = getattr(decision, field)
-            if value in (None, "") or field not in allowed:
-                continue
-            if field == "year" and not self._allow_year_filter(query, knowledge_bases):
-                continue
-            confidence = float(decision.confidence.get(field, 0.0))
-            if confidence < self.min_confidence:
-                continue
-            result[field] = value
-        return result
+        *,
+        knowledge_bases: list[str] | None = None,
+        user_filters: MetadataFilters | None = None,
+    ) -> QueryFilterExtraction:
+        """仅执行确定性规则和实体词典，不调用大模型。"""
+        categories = [str(value) for value in (knowledge_bases or []) if value]
+        plan = parse_query_constraints(
+            str(query or "").strip(),
+            knowledge_bases=categories,
+            user_filters=user_filters,
+        )
+        return QueryFilterExtraction(dict(plan.filters), False, "rules")
 
     def extract(
         self,
@@ -317,46 +203,9 @@ class QueryFilterExtractor:
         if cached is not None:
             return cached
 
-        rule_plan = parse_query_constraints(
-            key[0],
-            knowledge_bases=list(categories),
-            user_filters=user_filters,
+        result = self.extract_rules(
+            key[0], knowledge_bases=list(categories), user_filters=user_filters
         )
-        rule_filters = dict(rule_plan.filters)
-
-        # L1 已得到明确硬约束且没有字段语义歧义时，不调用 LLM。
-        if rule_filters and not rule_plan.unresolved:
-            result = QueryFilterExtraction(rule_filters, False, "rules")
-            self._cache[key] = result
-            return result
-
-        try:
-            decision = self._invoke(key[0], categories)
-            filters = self._validated_filters(
-                decision,
-                knowledge_bases=list(categories),
-                query=key[0],
-            )
-            filters = normalize_query_entity_filters(
-                filters,
-                knowledge_bases=list(categories),
-            )
-            filters = {**filters, **rule_filters}
-            if filters:
-                result = QueryFilterExtraction(filters, True, "rules_then_llm")
-            else:
-                result = QueryFilterExtraction(
-                    {},
-                    False,
-                    "llm_empty_or_low_confidence; no metadata filters",
-                )
-        except Exception as exc:
-            logger.warning(
-                "query_filter_extractor failed; use no metadata filters error={}",
-                type(exc).__name__,
-            )
-            result = QueryFilterExtraction({}, False, "llm_failed; no metadata filters")
-
         self._cache[key] = result
         return result
 
@@ -377,32 +226,9 @@ class QueryFilterExtractor:
         if cached is not None:
             return cached
 
-        rule_plan = parse_query_constraints(
+        result = self.extract_rules(
             key[0], knowledge_bases=list(categories), user_filters=user_filters
         )
-        rule_filters = dict(rule_plan.filters)
-        if rule_filters and not rule_plan.unresolved:
-            result = QueryFilterExtraction(rule_filters, False, "rules")
-            self._cache[key] = result
-            return result
-
-        try:
-            decision = await self._ainvoke(key[0], categories)
-            filters = self._validated_filters(
-                decision, knowledge_bases=list(categories), query=key[0]
-            )
-            filters = normalize_query_entity_filters(filters, knowledge_bases=list(categories))
-            filters = {**filters, **rule_filters}
-            result = (
-                QueryFilterExtraction(filters, True, "rules_then_llm")
-                if filters
-                else QueryFilterExtraction({}, False, "llm_empty_or_low_confidence; no metadata filters")
-            )
-        except Exception:
-            logger.warning(
-                "query_filter_extractor failed; use no metadata filters error=async_llm_failed"
-            )
-            result = QueryFilterExtraction({}, False, "llm_failed; no metadata filters")
         self._cache[key] = result
         return result
 
