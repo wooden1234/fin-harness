@@ -248,6 +248,7 @@ register_tool(
         read_only=True,
     ),
     langchain_tool=get_weather,
+    handler=get_weather.ainvoke,
 )
 
 

@@ -13,12 +13,14 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
+from agents.orchestrator.adapters import agent_result_from_task_result
 
 # 父图可安全合并的字段（均带 list reducer 或由下游单点消费）
 PARENT_SAFE_WORKER_KEYS = frozenset(
     {
         "messages",
         "task_results",
+        "agent_results",
         "citations",
         "steps",
     }
@@ -29,11 +31,19 @@ WorkerFn = Callable[..., Awaitable[Any]]
 
 def project_worker_updates_to_parent(updates: Mapping[str, Any]) -> dict[str, Any]:
     """过滤 worker 更新，仅保留可并行合并到父图的字段。"""
-    return {
+    projected = {
         key: value
         for key, value in updates.items()
         if key in PARENT_SAFE_WORKER_KEYS
     }
+    # 旧 Worker 仍返回 task_results 时，在边界同步生成统一 AgentResult。
+    if "agent_results" not in projected and projected.get("task_results"):
+        projected["agent_results"] = [
+            agent_result_from_task_result(item)
+            for item in projected["task_results"]
+            if isinstance(item, Mapping)
+        ]
+    return projected
 
 
 def isolate_worker_node(worker: Any) -> WorkerFn:

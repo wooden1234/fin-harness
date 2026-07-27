@@ -8,7 +8,8 @@ from dotenv import load_dotenv
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 BACKEND_DIR = ROOT_DIR / "app" / "backend"
-for path in (str(BACKEND_DIR), str(ROOT_DIR)):
+DEPS_DIR = ROOT_DIR / ".deps"
+for path in (str(BACKEND_DIR), str(ROOT_DIR), str(DEPS_DIR)):
     if path not in sys.path:
         sys.path.insert(0, path)
 

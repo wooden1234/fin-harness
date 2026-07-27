@@ -32,6 +32,10 @@ class PlannerState(TypedDict):
 class WorkerOutputState(TypedDict):
     """Worker 并行输出 + Summarize 汇总结果"""
     task_results: NotRequired[Annotated[list[TaskResult], add]]
+    # 兼容迁移期间的统一结果；旧 task_results 暂时继续保留。
+    # 使用 Any 避免领域 State 反向导入 Root Orchestrator 造成初始化环；
+    # 运行时实际写入的是 agents.orchestrator.contracts.AgentResult。
+    agent_results: NotRequired[Annotated[list[Any], add]]
     citations: NotRequired[Annotated[list[Citation], add]]
     # 当前一轮金融任务的候选答案；final_answer 采用后清空。
     # 切勿与 conversation_summary（多轮会话压缩记忆）混用。

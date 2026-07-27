@@ -18,6 +18,7 @@ logger = get_logger(service="supervisor")
 RouteTarget = Literal[
     "general_agent",
     "plan_agent",
+    "stock_screening_agent",
     "query_rewrite",
     "final_answer",
     "error_handler",
@@ -59,7 +60,11 @@ async def analyze_and_route_query(
     )
     logger.info("action={} logic={}", router.action, router.logic)
 
-    route = router.action if router.action in {"general", "plan"} else ""
+    route = (
+        router.action
+        if router.action in {"general", "plan", "stock_screening"}
+        else ""
+    )
     return {
         "route": route,
         "supervisor_action": router.action,
@@ -84,6 +89,8 @@ def route_query(state: FinAgentState) -> RouteTarget:
         return "general_agent"
     if action == "plan":
         return "plan_agent"
+    if action == "stock_screening":
+        return "stock_screening_agent"
 
     logger.warning("未知 supervisor_action={}，走错误兜底", action)
     return "error_handler"

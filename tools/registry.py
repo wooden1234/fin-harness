@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 
 from langchain_core.tools import BaseTool
 
-from tools.base import ToolSpec
+from tools.base import ToolSource, ToolSpec
+
+ToolHandler = Callable[[dict[str, Any]], Awaitable[Any]]
 
 _REGISTRY: dict[str, "RegisteredTool"] = {}
 _BY_NAME: dict[str, str] = {}  # langchain tool.name → tool_id
@@ -17,30 +21,47 @@ class RegisteredTool:
     """已注册工具条目。"""
 
     spec: ToolSpec
+    handler: ToolHandler
     langchain_tool: BaseTool | None = None
+    source: ToolSource = "local"
 
 
 def register_tool(
     spec: ToolSpec,
     *,
     langchain_tool: BaseTool | None = None,
+    handler: ToolHandler | None = None,
+    source: ToolSource = "local",
 ) -> RegisteredTool:
-    """注册工具：``ToolSpec`` 必填；有 ``langchain_tool`` 时可被 ``bind_tools``。"""
-    if langchain_tool is not None:
-        _BY_NAME[str(langchain_tool.name)] = spec.tool_id
+    """注册工具的模型绑定与统一执行入口。
 
-    entry = RegisteredTool(spec=spec, langchain_tool=langchain_tool)
+    对同一 ``tool_id`` 重复注册会覆盖旧条目，便于测试清空注册表后
+    ``importlib.reload`` 工具模块。
+    """
+    if langchain_tool is not None:
+        tool_name = str(langchain_tool.name)
+        existing_id = _BY_NAME.get(tool_name)
+        if existing_id is not None and existing_id != spec.tool_id:
+            raise ValueError(f"duplicate tool name: {tool_name}")
+        _BY_NAME[tool_name] = spec.tool_id
+
+    resolved_handler = handler
+    if resolved_handler is None and langchain_tool is not None:
+        ainvoke = getattr(langchain_tool, "ainvoke", None)
+        if ainvoke is None:
+            raise ValueError(f"tool_missing_handler:{spec.tool_id}")
+        resolved_handler = ainvoke  # type: ignore[assignment]
+    if resolved_handler is None:
+        raise ValueError(f"tool_missing_handler:{spec.tool_id}")
+
+    entry = RegisteredTool(
+        spec=spec,
+        langchain_tool=langchain_tool,
+        handler=resolved_handler,
+        source=source,
+    )
     _REGISTRY[spec.tool_id] = entry
     return entry
-
-
-def register_tool_spec(spec: ToolSpec) -> None:
-    """兼容旧接口：只登记元数据。若已有条目则保留原 langchain_tool。"""
-    existing = _REGISTRY.get(spec.tool_id)
-    register_tool(
-        spec,
-        langchain_tool=existing.langchain_tool if existing else None,
-    )
 
 
 def get_registered_tool(tool_id: str) -> RegisteredTool:
@@ -95,6 +116,14 @@ def list_bindable_tools(
     return tools
 
 
+def validate_tool_ids(tool_ids: list[str] | tuple[str, ...]) -> None:
+    """严格校验 Agent 声明的工具 ID，避免拼写错误静默降级。"""
+    for tool_id in tool_ids:
+        entry = get_registered_tool(str(tool_id))
+        if entry.langchain_tool is None:
+            raise ValueError(f"tool has no langchain binding: {tool_id}")
+
+
 def clear_registry() -> None:
     """仅供测试重置。"""
     _REGISTRY.clear()
@@ -103,6 +132,7 @@ def clear_registry() -> None:
 
 __all__ = [
     "RegisteredTool",
+    "ToolHandler",
     "clear_registry",
     "get_langchain_tool",
     "get_registered_tool",
@@ -111,6 +141,6 @@ __all__ = [
     "list_bindable_tools",
     "list_registered_tools",
     "list_tool_specs",
+    "validate_tool_ids",
     "register_tool",
-    "register_tool_spec",
 ]

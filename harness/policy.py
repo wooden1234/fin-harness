@@ -11,7 +11,13 @@ def pre_check(context: RunContext) -> None:
 
 
 def can_use_tool(context: RunContext, tool_id: str) -> bool:
-    """默认允许只读工具，后续按 ToolSpec 风险等级收紧。"""
+    """按显式权限判定工具；缺少权限时默认拒绝。"""
     if not context.permissions:
-        return True
+        return False
+    try:
+        from tools.registry import get_tool_spec
+
+        get_tool_spec(tool_id)
+    except KeyError:
+        return False
     return tool_id in context.permissions or "*" in context.permissions

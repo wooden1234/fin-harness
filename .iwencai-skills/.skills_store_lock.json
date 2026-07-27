@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "hithink-astock-selector": {
+      "name": "hithink-astock-selector",
+      "zip_url": "https://ms.10jqka.com.cn/gateway/market/api/v1/skills/square/download?name=hithink-astock-selector",
+      "source": "skillhub",
+      "version": ""
+    }
+  }
+}

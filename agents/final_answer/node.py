@@ -15,7 +15,7 @@ from compliance.policies import ComplianceDecision
 
 logger = get_logger(service="final_answer")
 
-KNOWLEDGE_SOURCE_TYPES = frozenset({"faq", "pdf", "web"})
+KNOWLEDGE_SOURCE_TYPES = frozenset({"faq", "pdf", "web", "iwencai"})
 COMPLIANCE_BLOCKED_ANSWER = (
     "抱歉，我不能提供保证收益、确定涨跌或直接交易指令。"
     "我可以继续为您整理相关公开信息、数据依据和风险因素。"

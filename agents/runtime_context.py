@@ -5,6 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+_DEFAULT_USER_READ_ONLY_TOOLS = (
+    "weather.get",
+    "iwencai.query",
+    "iwencai.screen",
+)
+
+
 @dataclass(frozen=True, slots=True)
 class AgentRuntimeContext:
     """由认证主体派生的不可变上下文，禁止使用请求体中的身份字段。
@@ -17,6 +24,7 @@ class AgentRuntimeContext:
     user_id: str = "0"
     conversation_id: str | None = None
     run_id: str | None = None
+    permissions: tuple[str, ...] = ()
 
     @classmethod
     def from_user(
@@ -28,6 +36,7 @@ class AgentRuntimeContext:
     ) -> "AgentRuntimeContext":
         tenant_id = str(getattr(user, "tenant_id", "default"))
         user_id = str(getattr(user, "id"))
+        role = str(getattr(user, "role", ""))
         if not tenant_id or tenant_id == "None":
             raise ValueError("认证主体缺少 tenant_id")
         return cls(
@@ -35,4 +44,7 @@ class AgentRuntimeContext:
             user_id=user_id,
             conversation_id=str(conversation_id) if conversation_id is not None else None,
             run_id=run_id,
+            permissions=("*",)
+            if role == "admin"
+            else (_DEFAULT_USER_READ_ONLY_TOOLS if role == "user" else ()),
         )

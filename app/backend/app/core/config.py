@@ -134,8 +134,26 @@ class Settings(BaseSettings):
     OPENWEATHER_TIMEOUT_SEC: float = 10.0
     OPENWEATHER_MAX_DAYS: int = 5
 
+    # 同花顺问财 SkillHub OpenAPI。密钥只从环境变量读取。
+    IWENCAI_BASE_URL: str = "https://openapi.iwencai.com"
+    IWENCAI_API_KEY: str = ""
+    IWENCAI_TIMEOUT_SEC: float = 30.0
+    IWENCAI_MAX_LIMIT: int = 100
+    IWENCAI_SKILL_ROOT: str = str(
+        PROJECT_ROOT / ".iwencai-skills/hithink-astock-selector"
+    )
+    IWENCAI_SKILL_RUNNER_ENABLED: bool = True
+    IWENCAI_SKILL_RUNNER_TIMEOUT_SEC: float = 30.0
+    IWENCAI_SKILL_RUNNER_MAX_OUTPUT_BYTES: int = 1_000_000
+
     # LangGraph Checkpoint（W3 Day 5）：postgres | memory
     AGENT_CHECKPOINT_BACKEND: str = "postgres"
+
+    # Root Orchestrator V2 灰度开关：v1 | v2 | rollout
+    AGENT_GRAPH_MODE: str = "v2"
+    AGENT_GRAPH_V2_ROLLOUT_PERCENT: int = 0
+    AGENT_GRAPH_V2_TENANT_ALLOWLIST: str = ""
+    AGENT_GRAPH_V2_NEW_CONVERSATIONS_ONLY: bool = True
 
     # MinerU PDF 解析
     MINERU_API_KEY: str = ""

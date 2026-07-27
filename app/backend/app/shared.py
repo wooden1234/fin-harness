@@ -14,7 +14,14 @@ from langgraph.graph import add_messages
 from pydantic import BaseModel, Field
 
 # ---------- 共享类型别名 ----------
-AgentRoute = Literal["faq", "pdf", "account", "general", "plan"]
+AgentRoute = Literal[
+    "faq",
+    "pdf",
+    "account",
+    "general",
+    "plan",
+    "stock_screening",
+]
 SubTaskType = Literal["faq", "pdf", "financial_query", "web_search", "general"]
 
 # 意图分类：Planner 输出意图，数据源由 resolve_evidence 按意图映射（不由 LLM 直接选源）
@@ -72,10 +79,10 @@ class TaskResult(TypedDict, total=False):
 # ---------- 共享 Pydantic 模型（Planner / Supervisor 等共用）----------
 class Router(BaseModel):
     """Supervisor 对用户问题的单一互斥处理动作。"""
-    action: Literal["general", "plan", "rewrite", "clarify"] = Field(
+    action: Literal["general", "plan", "stock_screening", "rewrite", "clarify"] = Field(
         description=(
             "general=普通对话；plan=进入金融任务；rewrite=结合上文补全；"
-            "clarify=无法安全补全，需要追问"
+            "stock_screening=自然语言 A 股选股；clarify=无法安全补全，需要追问"
         ),
     )
     logic: str = Field(

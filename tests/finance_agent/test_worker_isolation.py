@@ -114,10 +114,11 @@ def test_main_graph_runs_guardrails_before_memory_recall():
 def test_supervisor_direct_actions_route_without_rewrite():
     assert route_query({"supervisor_action": "general"}) == "general_agent"
     assert route_query({"supervisor_action": "plan"}) == "plan_agent"
+    assert route_query({"supervisor_action": "stock_screening"}) == "stock_screening_agent"
 
 
 def test_supervisor_router_uses_one_mutually_exclusive_action():
-    for action in ("general", "plan", "rewrite", "clarify"):
+    for action in ("general", "plan", "stock_screening", "rewrite", "clarify"):
         assert Router(action=action, logic="测试").action == action
 
     with pytest.raises(ValueError):

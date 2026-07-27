@@ -6,9 +6,10 @@
     llm.bind_tools(list_bindable_tools())
 """
 
-from tools.base import ToolRiskLevel, ToolResult, ToolSpec
+from tools.base import ToolRiskLevel, ToolResult, ToolSource, ToolSpec
 from tools.catalog import TOOL_MODULES, load_all_tools
 from tools.execution import execute_tool
+from tools.mcp_proxy import register_mcp_tool
 from tools.registry import (
     RegisteredTool,
     get_langchain_tool,
@@ -19,7 +20,7 @@ from tools.registry import (
     list_registered_tools,
     list_tool_specs,
     register_tool,
-    register_tool_spec,
+    validate_tool_ids,
 )
 
 __all__ = [
@@ -27,6 +28,7 @@ __all__ = [
     "RegisteredTool",
     "ToolRiskLevel",
     "ToolResult",
+    "ToolSource",
     "ToolSpec",
     "execute_tool",
     "get_langchain_tool",
@@ -38,5 +40,6 @@ __all__ = [
     "list_tool_specs",
     "load_all_tools",
     "register_tool",
-    "register_tool_spec",
+    "register_mcp_tool",
+    "validate_tool_ids",
 ]

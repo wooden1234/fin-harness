@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
 from agents.checkpoint import make_thread_config
-from agents.graph import get_graph
+from agents.graph_selector import get_selected_graph, select_graph_version
 from agents.runtime_context import AgentRuntimeContext
 from app.api.agent_progress import (
     VISIBLE_TASK_NODES,
@@ -105,6 +105,11 @@ async def agent_query(
             raise HTTPException(status_code=404, detail="会话不存在或无权访问")
 
     conversation_key = conversation_pk if conversation_pk is not None else uuid.uuid4()
+    graph_version = select_graph_version(
+        conversation_id=conversation_key,
+        user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+    )
     lock_token: str | None = None
     if conversation_pk is not None:
         try:
@@ -115,6 +120,7 @@ async def agent_query(
         conversation_key,
         user_id=current_user.id,
         tenant_id=current_user.tenant_id,
+        graph_version=graph_version,
     )
     run_id = str(uuid.uuid4())
     client_message_id = client_message_id or str(uuid.uuid4())
@@ -182,11 +188,21 @@ async def agent_query(
             await ConversationLockService.release(conversation_pk, lock_token)
         raise
     try:
-        graph = get_graph()
+        graph = get_selected_graph(graph_version)
     except Exception:
-        if conversation_pk is not None and lock_token is not None:
-            await ConversationLockService.release(conversation_pk, lock_token)
-        raise
+        if graph_version != "v2":
+            if conversation_pk is not None and lock_token is not None:
+                await ConversationLockService.release(conversation_pk, lock_token)
+            raise
+        logger.exception("V2 graph construction failed, fallback to V1")
+        graph_version = "v1"
+        graph = get_selected_graph(graph_version)
+        thread_config = make_thread_config(
+            conversation_key,
+            user_id=current_user.id,
+            tenant_id=current_user.tenant_id,
+            graph_version=graph_version,
+        )
     input_payload = {"messages": [HumanMessage(content=query)]}
     # 只发送 final_answer 审查后的内容，避免候选答案先于合规结果泄露。
     async def process_stream():
@@ -200,6 +216,7 @@ async def agent_query(
                     user_id=current_user.id,
                     tenant_id=current_user.tenant_id,
                     thread_config=thread_config,
+                    graph=graph,
                     exclude_run_id=run_id,
                 )
             async for chunk in graph.astream(
@@ -368,6 +385,52 @@ async def agent_query(
             })
 
         except Exception as e:
+            if graph_version == "v2" and not assistant_full_response:
+                logger.exception("V2 graph stream failed, retrying with V1")
+                try:
+                    graph_version = "v1"
+                    graph = get_selected_graph(graph_version)
+                    thread_config = make_thread_config(
+                        conversation_key,
+                        user_id=current_user.id,
+                        tenant_id=current_user.tenant_id,
+                        graph_version=graph_version,
+                    )
+                    fallback_state = await graph.ainvoke(
+                        input_payload,
+                        config=thread_config,
+                        context=AgentRuntimeContext.from_user(
+                            current_user,
+                            conversation_id=conversation_key,
+                            run_id=run_id,
+                        ),
+                    )
+                    values = fallback_state or {}
+                    final_response = _extract_final_response(values)
+                    if final_response:
+                        assistant_full_response = final_response
+                    await AgentRunService.mark_graph_completed(
+                        run_id,
+                        summary_snapshot={
+                            "content": final_response,
+                            "citations": values.get("citations") or [],
+                            "route": values.get("route"),
+                            "fallback_from": "v2",
+                        },
+                    )
+                    yield _sse({
+                        "type": "done",
+                        "run_id": run_id,
+                        "message_id": assistant_message_id,
+                        "persistence_status": "checkpoint_only",
+                        "content": final_response,
+                        "citations": values.get("citations") or [],
+                        "route": values.get("route"),
+                        "fallback_from": "v2",
+                    })
+                    return
+                except Exception:
+                    logger.exception("V1 fallback failed")
             logger.exception("agent_query stream error")
             try:
                 await AgentRunService.mark_failed(run_id, error_message=str(e))

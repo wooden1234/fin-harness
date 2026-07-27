@@ -12,6 +12,7 @@ class RunContext:
     """贯穿一次请求的运行上下文。"""
 
     user_id: str | None = None
+    tenant_id: str | None = None
     conversation_id: str | None = None
     trace_id: str = field(default_factory=lambda: uuid4().hex)
     roles: tuple[str, ...] = ()
@@ -22,6 +23,7 @@ class RunContext:
 def build_run_context(
     *,
     user_id: str | None = None,
+    tenant_id: str | None = None,
     conversation_id: str | None = None,
     roles: tuple[str, ...] = (),
     permissions: tuple[str, ...] = (),
@@ -29,6 +31,7 @@ def build_run_context(
 ) -> RunContext:
     return RunContext(
         user_id=user_id,
+        tenant_id=tenant_id,
         conversation_id=conversation_id,
         roles=roles,
         permissions=permissions,

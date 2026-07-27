@@ -12,12 +12,15 @@ from typing import Any
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.runtime import Runtime
+from langgraph.prebuilt import ToolNode
 
 from agents.context import conversation_messages
+from agents.runtime_context import AgentRuntimeContext
 from app.core.logger import get_logger
 from harness.context import RunContext, build_run_context
 from tools import execute_tool, list_bindable_tools, load_all_tools
-from tools.registry import get_tool_id_by_name
+from tools.registry import get_tool_id_by_name, validate_tool_ids
 
 logger = get_logger(service="tool_runtime")
 
@@ -40,55 +43,19 @@ def _tool_result_content(data: Any) -> str:
         return str(data)
 
 
-def _run_context_from_config(
-    config: RunnableConfig | None,
+def _run_context_from_runtime(
+    runtime: Runtime[AgentRuntimeContext] | None,
     *,
     agent_name: str,
 ) -> RunContext:
-    run_context = build_run_context(metadata={"agent": agent_name})
-    configurable = (config or {}).get("configurable") or {}
-    if isinstance(configurable, dict):
-        run_context.user_id = configurable.get("user_id") or run_context.user_id
-        run_context.conversation_id = (
-            configurable.get("thread_id")
-            or configurable.get("conversation_id")
-            or run_context.conversation_id
-        )
-    return run_context
-
-
-async def _execute_tool_calls(
-    ai_message: AIMessage,
-    *,
-    config: RunnableConfig | None,
-    agent_name: str,
-) -> list[ToolMessage]:
-    """执行一轮 AIMessage.tool_calls，返回对应 ToolMessage 列表。"""
-    run_context = _run_context_from_config(config, agent_name=agent_name)
-    tool_messages: list[ToolMessage] = []
-
-    for call in ai_message.tool_calls or []:
-        name = str(call.get("name") or "")
-        call_id = str(call.get("id") or "")
-        args = call.get("args") if isinstance(call.get("args"), dict) else {}
-        try:
-            tool_id = get_tool_id_by_name(name)
-            result = await execute_tool(tool_id, run_context, **args)
-            payload: dict[str, Any] = (
-                {"ok": True, "data": result.data}
-                if result.ok
-                else {"ok": False, "error": result.error}
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("{} tool failed name={}", agent_name, name)
-            payload = {"ok": False, "error": str(exc)}
-
-        tool_messages.append(
-            ToolMessage(content=_tool_result_content(payload), tool_call_id=call_id)
-        )
-        logger.info("{} tool_call name={} ok={}", agent_name, name, payload.get("ok"))
-
-    return tool_messages
+    context = runtime.context if runtime is not None else None
+    return build_run_context(
+        user_id=getattr(context, "user_id", None),
+        tenant_id=getattr(context, "tenant_id", None),
+        conversation_id=getattr(context, "conversation_id", None),
+        permissions=tuple(getattr(context, "permissions", ()) or ()),
+        metadata={"agent": agent_name, "run_id": getattr(context, "run_id", None)},
+    )
 
 
 async def run_with_tools(
@@ -98,10 +65,12 @@ async def run_with_tools(
     system_prompt: str,
     tool_ids: Sequence[str] = (),
     config: RunnableConfig | None = None,
+    runtime: Runtime[AgentRuntimeContext] | None = None,
     max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS,
     busy_answer: str = DEFAULT_BUSY_ANSWER,
     agent_name: str = "agent",
     stream_final: bool = True,
+    return_tool_results: bool = False,
 ) -> dict[str, Any]:
     """带工具的一轮对话：按需调用工具，返回 ``{"messages": [AIMessage(...)]}``。
 
@@ -111,8 +80,53 @@ async def run_with_tools(
     """
     load_all_tools()
     ids = [str(item) for item in tool_ids if str(item).strip()]
+    validate_tool_ids(ids)
     tools = list_bindable_tools(tool_ids=ids) if ids else []
     llm_with_tools = llm.bind_tools(tools) if tools else llm
+    allowed_tool_ids = frozenset(ids)
+    run_context = _run_context_from_runtime(runtime, agent_name=agent_name)
+    tool_results: list[dict[str, Any]] = []
+
+    async def _governed_tool_call(request: Any, _handler: Any) -> ToolMessage:
+        """让 ToolNode 负责循环，让项目执行器负责权限和审计边界。"""
+        call = request.tool_call
+        name = str(call.get("name") or "")
+        call_id = str(call.get("id") or "")
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        tool_id = name
+        try:
+            tool_id = get_tool_id_by_name(name)
+            result = await execute_tool(
+                tool_id,
+                run_context,
+                arguments=args,
+                allowed_tool_ids=allowed_tool_ids,
+            )
+            payload: dict[str, Any] = (
+                {"ok": True, "data": result.data}
+                if result.ok
+                else {"ok": False, "error": result.error}
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("{} tool failed name={}", agent_name, name)
+            payload = {"ok": False, "error": str(exc)}
+        tool_results.append({"tool_id": tool_id, **payload})
+        logger.info("{} tool_call name={} ok={}", agent_name, name, payload.get("ok"))
+        return ToolMessage(
+            content=_tool_result_content(payload),
+            name=name,
+            tool_call_id=call_id,
+        )
+
+    tool_node = (
+        ToolNode(
+            tools,
+            handle_tool_errors=True,
+            awrap_tool_call=_governed_tool_call,
+        )
+        if tools
+        else None
+    )
 
     working: list[BaseMessage] = [
         SystemMessage(content=system_prompt),
@@ -136,6 +150,12 @@ async def run_with_tools(
         final = await llm.ainvoke(working, config=config)
         return _message_text(getattr(final, "content", "")).strip() or busy_answer
 
+    def _response(answer: str) -> dict[str, Any]:
+        response: dict[str, Any] = {"messages": [AIMessage(content=answer)]}
+        if return_tool_results:
+            response["tool_results"] = list(tool_results)
+        return response
+
     try:
         # 未绑定任何工具：直接生成最终回答
         if not tools:
@@ -144,7 +164,7 @@ async def run_with_tools(
                 if stream_final
                 else await _invoke_final_answer()
             )
-            return {"messages": [AIMessage(content=answer)]}
+            return _response(answer)
 
         # 有工具：先 ainvoke 决策/执行，最终回答再统一流式
         for round_idx in range(max(1, int(max_tool_rounds or 1))):
@@ -155,15 +175,21 @@ async def run_with_tools(
                 )
 
             if not ai_message.tool_calls:
-                # 不再在此处直接返回 ainvoke 文本；落到下方统一最终回答
-                break
+                answer = _message_text(ai_message.content).strip() or busy_answer
+                return _response(answer)
 
             working.append(ai_message)
-            tool_messages = await _execute_tool_calls(
-                ai_message,
-                config=config,
-                agent_name=agent_name,
+            # 当前 run_with_tools 是一个普通节点，不是独立的 StateGraph 节点；
+            # 直接调用 ToolNode 的 Runnable 会缺少 LangGraph 注入的 Runtime，
+            # 因此使用其异步节点入口显式传入 Runtime。
+            tool_result = await tool_node._afunc(
+                {"messages": working},
+                config or {},
+                Runtime(
+                    context=runtime.context if runtime is not None else None,
+                ),
             )
+            tool_messages = list(tool_result.get("messages") or [])
             working.extend(tool_messages)
             logger.info(
                 "{} tool_round={} calls={}",
@@ -179,9 +205,9 @@ async def run_with_tools(
         )
     except Exception:
         logger.exception("{} llm invoke failed", agent_name)
-        return {"messages": [AIMessage(content=busy_answer)]}
+        return _response(busy_answer)
 
-    return {"messages": [AIMessage(content=answer)]}
+    return _response(answer)
 
 
 __all__ = [

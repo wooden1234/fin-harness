@@ -3,13 +3,13 @@
   "hooks": {
     "beforeShellExecution": [
       {
-        "command": ".cursor/hooks/block_dangerous_shell.py",
+        "command": "python3 .cursor/hooks/block_dangerous_shell.py",
         "failClosed": true
       }
     ],
     "preToolUse": [
       {
-        "command": ".cursor/hooks/block_dangerous_shell.py",
+        "command": "python3 .cursor/hooks/block_dangerous_shell.py",
         "matcher": "Shell",
         "failClosed": true
       }

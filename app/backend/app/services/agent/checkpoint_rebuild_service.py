@@ -5,7 +5,6 @@ from __future__ import annotations
 from sqlalchemy import select
 from langchain_core.messages import AIMessage, HumanMessage
 
-from agents.graph import get_graph
 from agents.checkpoint import delete_thread_checkpoint
 from app.core.database import AsyncSessionLocal
 from app.models.persistence.message import Message
@@ -20,10 +19,14 @@ class CheckpointRebuildService:
         user_id: int,
         tenant_id: str = "default",
         thread_config: dict,
+        graph=None,
         exclude_run_id: str | None = None,
     ) -> bool:
         """checkpoint 缺失时用历史消息恢复；返回是否实际重建。"""
-        graph = get_graph()
+        if graph is None:
+            from agents.graph import get_graph
+
+            graph = get_graph()
         current = await graph.aget_state(thread_config)
         if current is not None and (current.values or {}).get("messages"):
             return False

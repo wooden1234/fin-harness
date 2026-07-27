@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 ToolRiskLevel = Literal["low", "medium", "high", "critical"]
+ToolSource = Literal["local", "mcp"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +19,8 @@ class ToolSpec:
     risk_level: ToolRiskLevel = "low"
     read_only: bool = True
     requires_human_approval: bool = False
+    timeout_seconds: float = 30.0
+    max_retries: int = 0
 
 
 @dataclass(slots=True)
