@@ -2,8 +2,10 @@
 
 from agents.orchestrator.analyzer import heuristic_profile
 from agents.orchestrator.graph import (
+    build_plan,
     detect_evidence_conflicts,
     detect_result_gaps,
+    dispatch_wave,
     quality_gate,
     replan,
     synthesize,
@@ -11,6 +13,7 @@ from agents.orchestrator.graph import (
 )
 from agents.orchestrator.contracts import (
     AgentResult,
+    CandidateSet,
     Evidence,
     QualityReport,
     TaskPlan,
@@ -27,12 +30,55 @@ def test_v2_graph_compiles_with_independent_nodes():
     assert "final_answer" in graph.nodes
 
 
-def test_compound_stock_query_creates_dependency_plan():
+def test_compound_stock_query_creates_independent_research_workflow():
     profile = heuristic_profile("筛选新能源股票并分析前三只的风险")
     plan = build_plan_from_profile(profile)
 
-    assert [task.task_id for task in plan.tasks] == ["screen", "research"]
-    assert plan.tasks[1].depends_on == ["screen"]
+    assert len(plan.tasks) == 1
+    assert plan.tasks[0].task_id == "research"
+    assert plan.tasks[0].agent_id == "research_workflow"
+    assert plan.tasks[0].depends_on == []
+    assert plan.tasks[0].input_data["data_sources"] == [
+        "market",
+        "research",
+        "finance_rag",
+    ]
+
+
+def test_market_compute_receives_previous_candidate_set():
+    import asyncio
+
+    candidates = CandidateSet(
+        dataset_id="previous-1",
+        universe="A股",
+        provider="iwencai",
+        as_of="2026-07-27",
+        rows=[{"code": "AAA", "pe_ttm": 20}],
+    )
+    previous = AgentResult(
+        task_id="previous-market",
+        agent_id="stock_screening_agent",
+        status="completed",
+        structured_data=candidates.model_dump(),
+    )
+    profile = heuristic_profile("从刚才候选股票中按市盈率排序取前5只")
+    update = asyncio.run(
+        build_plan(
+            {
+                "request_profile": profile,
+                "agent_results": [previous],
+            }
+        )
+    )
+    sends = dispatch_wave(
+        {
+            "task_plan": update["task_plan"],
+            "prior_agent_results": update["prior_agent_results"],
+            "agent_results": [],
+        }
+    )
+
+    assert sends[0].arg["current_dependency_results"][0].task_id == "previous-market"
 
 
 def test_quality_gate_detects_result_gap_and_conflicting_claims():

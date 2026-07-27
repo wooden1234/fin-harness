@@ -5,14 +5,39 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 import sys
 from typing import Any
 
 from app.core.config import PROJECT_ROOT, settings
 
+
+@dataclass(frozen=True, slots=True)
+class _InstalledSkillSpec:
+    """已审核问财 Skill 的入口和参数风格。"""
+
+    entrypoint: str
+    argument_style: str
+
+
 _SUPPORTED_SKILLS = {
-    "hithink-astock-selector": "scripts/cli.py",
+    "hithink-astock-selector": _InstalledSkillSpec(
+        "scripts/cli.py", "query_flags"
+    ),
+    "hithink-fund-selector": _InstalledSkillSpec("scripts/cli.py", "query_flags"),
+    "hithink-industry-query": _InstalledSkillSpec("scripts/cli.py", "query_flags"),
+    "hithink-insresearch-query": _InstalledSkillSpec(
+        "scripts/cli.py", "query_flags"
+    ),
+    "hithink-market-query": _InstalledSkillSpec("scripts/cli.py", "query_flags"),
+    "hithink-zhishu-query": _InstalledSkillSpec("scripts/cli.py", "query_flags"),
+    "announcement-search": _InstalledSkillSpec(
+        "scripts/announcement_search.py", "search_positional"
+    ),
+    "report-search": _InstalledSkillSpec(
+        "scripts/report_search.py", "search_positional"
+    ),
 }
 
 
@@ -24,11 +49,11 @@ def _skill_root() -> Path:
 
 
 def _entrypoint(skill_id: str) -> Path:
-    relative = _SUPPORTED_SKILLS.get(skill_id)
-    if relative is None:
+    skill = _SUPPORTED_SKILLS.get(skill_id)
+    if skill is None:
         raise ValueError(f"skill_not_allowed:{skill_id}")
     root = _skill_root()
-    script = (root / relative).resolve()
+    script = (root / skill_id / skill.entrypoint).resolve()
     try:
         script.relative_to(root)
     except ValueError as exc:
@@ -36,6 +61,41 @@ def _entrypoint(skill_id: str) -> Path:
     if not script.is_file():
         raise FileNotFoundError(f"skill_entrypoint_not_found:{skill_id}")
     return script
+
+
+def _command_args(
+    skill_id: str,
+    script: Path,
+    *,
+    query: str,
+    page: int,
+    limit: int,
+    call_type: str,
+) -> list[str]:
+    """按已审核的 Skill 参数协议生成命令，不接受模型传入任意参数。"""
+    style = _SUPPORTED_SKILLS[skill_id].argument_style
+    if style == "search_positional":
+        return [
+            str(script),
+            query.strip(),
+            "--size",
+            str(limit),
+            "--timeout",
+            str(int(settings.IWENCAI_TIMEOUT_SEC)),
+        ]
+    return [
+        str(script),
+        "--query",
+        query.strip(),
+        "--page",
+        str(page),
+        "--limit",
+        str(limit),
+        "--call-type",
+        call_type,
+        "--timeout",
+        str(int(settings.IWENCAI_TIMEOUT_SEC)),
+    ]
 
 
 def _validate_positive_int(value: int, name: str) -> int:
@@ -85,20 +145,19 @@ async def run_installed_skill(
         "PATH": os.environ.get("PATH", ""),
         "PYTHONUNBUFFERED": "1",
         "IWENCAI_API_KEY": api_key,
+        "IWENCAI_BASE_URL": settings.IWENCAI_BASE_URL,
+        "IWENCAI_TIMEOUT": str(int(settings.IWENCAI_TIMEOUT_SEC)),
     }
     process = await asyncio.create_subprocess_exec(
         sys.executable,
-        str(script),
-        "--query",
-        query.strip(),
-        "--page",
-        str(page),
-        "--limit",
-        str(limit),
-        "--call-type",
-        call_type,
-        "--timeout",
-        str(int(settings.IWENCAI_TIMEOUT_SEC)),
+        *_command_args(
+            skill_id,
+            script,
+            query=query,
+            page=page,
+            limit=limit,
+            call_type=call_type,
+        ),
         cwd=str(script.parent.parent),
         env=environment,
         stdin=asyncio.subprocess.DEVNULL,

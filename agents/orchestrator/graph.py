@@ -29,12 +29,6 @@ from app.core.logger import get_logger
 
 logger = get_logger(service="orchestrator_v2")
 
-# 兼容旧测试与内部引用
-_heuristic_profile = heuristic_profile
-_latest_query = latest_query
-_build_plan = build_plan_from_profile
-
-
 async def build_plan(
     state: OrchestratorState,
     config: RunnableConfig = None,
@@ -42,11 +36,18 @@ async def build_plan(
     del config
     profile = state.get("request_profile") or heuristic_profile(latest_query(state))
     plan = build_plan_from_profile(profile)
+    prior_results = (
+        list(state.get("agent_results") or [])
+        if profile.operation_type == "compute"
+        else []
+    )
     return {
         "task_plan": plan,
         "route": "plan",
         "replan_count": 0,
         "agent_results": Overwrite([]),
+        # 跨轮继续过滤时，只把上一轮结果作为确定性计算输入，不拼入问题文本。
+        "prior_agent_results": prior_results,
         "evidence": Overwrite([]),
         "citations": Overwrite([]),
         "quality_report": None,
@@ -109,6 +110,8 @@ def dispatch_wave(state: OrchestratorState) -> list[Send]:
             for item in results
             if item.task_id in set(task.depends_on)
         ]
+        if task.agent_id == "market.compute" and not dependencies:
+            dependencies = list(state.get("prior_agent_results") or [])
         sends.append(
             Send(
                 "execute_task",

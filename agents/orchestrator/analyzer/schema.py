@@ -6,18 +6,28 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from agents.orchestrator.contracts import DataSourceType, OperationType
+
 AnalyzerIntent = Literal[
     "stock_screening",
+    "market_query",
+    "market_compute",
+    "research_search",
     "financial_analysis",
     "financial_research",
+    "deep_research",
     "general_chat",
     "clarify",
 ]
 AnalyzerComplexity = Literal["simple", "single_capability", "compound"]
 PreferredAgent = Literal[
+    "market_acquisition_workflow",
+    "research_retrieval_workflow",
+    "research_workflow",
     "stock_screening_agent",
     "finance_agent",
     "general_agent",
+    "market.compute",
 ]
 
 
@@ -27,6 +37,8 @@ class AnalyzerOutput(BaseModel):
     normalized_query: str = ""
     intents: list[AnalyzerIntent] = Field(default_factory=list)
     complexity: AnalyzerComplexity = "simple"
+    data_sources: list[DataSourceType] = Field(default_factory=list)
+    operation_type: OperationType = "answer"
     preferred_agent: PreferredAgent | None = None
     freshness_required: bool = False
     entities: list[str] = Field(default_factory=list)

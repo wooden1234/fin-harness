@@ -1,4 +1,4 @@
-"""Deep Agent 驱动的 A 股选股 Agent。"""
+"""普通工作流驱动的 A 股选股 Agent。"""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ from agents.orchestrator.adapters import citation_from_evidence
 from agents.orchestrator.contracts import AgentResult
 from agents.runtime_context import AgentRuntimeContext
 from agents.states import FinAgentState
-from agents.stock_screening_agent.deep_runtime import run_stock_screening_deep_agent
 from agents.stock_screening_agent.spec import STOCK_SCREENING_SPEC
+from agents.stock_screening_agent.workflow import run_stock_screening_workflow
 
 
 def _latest_user_query(state: Mapping[str, Any]) -> str:
@@ -31,7 +31,7 @@ async def run_stock_screening_agent(
     config: RunnableConfig | None = None,
     runtime: Runtime[AgentRuntimeContext] | None = None,
 ) -> AgentResult:
-    return await run_stock_screening_deep_agent(
+    return await run_stock_screening_workflow(
         state,
         query=query,
         config=config,

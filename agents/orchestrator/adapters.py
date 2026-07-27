@@ -1,4 +1,4 @@
-"""新旧任务、结果和引用模型之间的兼容转换。"""
+"""Finance Agent 内部结果与 v2 统一契约之间的边界转换。"""
 
 from __future__ import annotations
 
@@ -7,56 +7,20 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 
-from app.shared import Citation, SubTask, TaskResult
-from agents.orchestrator.contracts import AgentResult, Evidence, TaskSpec
+from app.shared import Citation, TaskResult
+from agents.orchestrator.contracts import AgentResult, Evidence
 
-_KNOWN_TASK_TYPES = {"faq", "pdf", "financial_query", "web_search", "general"}
-_STATUS_TO_COVERAGE = {
-    "completed": "covered",
+_COVERAGE_TO_STATUS = {
+    "covered": "completed",
     "partial": "partial",
     "uncovered": "uncovered",
     "clarify": "clarify",
-    "failed": "uncovered",
 }
-_COVERAGE_TO_STATUS = {value: key for key, value in _STATUS_TO_COVERAGE.items()}
 
 
 def _stable_id(*parts: str) -> str:
     value = "|".join(parts).encode("utf-8")
     return hashlib.sha1(value).hexdigest()[:16]
-
-
-def task_spec_from_subtask(task: SubTask) -> TaskSpec:
-    """把旧 Planner 子任务转换为统一任务契约。"""
-    capabilities = list(task.evidence_chain or [])
-    if not capabilities and task.type:
-        capabilities = [str(task.type)]
-    return TaskSpec(
-        task_id=task.id,
-        objective=task.question,
-        agent_id="finance_agent",
-        required_capabilities=capabilities,
-        metadata={"intent": task.intent, "reason": task.reason, "legacy_type": task.type},
-    )
-
-
-def subtask_from_task_spec(task: TaskSpec) -> SubTask:
-    """把统一任务契约转换为现有 Planner 子任务。"""
-    metadata = task.metadata
-    candidate_type = str(metadata.get("legacy_type") or "")
-    if candidate_type not in _KNOWN_TASK_TYPES:
-        candidate_type = next(
-            (item for item in task.required_capabilities if item in _KNOWN_TASK_TYPES),
-            "faq",
-        )
-    return SubTask(
-        id=task.task_id,
-        question=task.objective,
-        intent=str(metadata.get("intent") or ""),
-        reason=str(metadata.get("reason") or ""),
-        type=candidate_type,
-        evidence_chain=list(task.required_capabilities),
-    )
 
 
 def evidence_from_citation(
@@ -111,7 +75,7 @@ def evidence_from_citation(
 
 
 def citation_from_evidence(evidence: Evidence) -> Citation:
-    """把统一证据转换为前端兼容的引用结构。"""
+    """把统一证据转换为前端引用结构。"""
     citation: Citation = {
         "source": evidence.title or evidence.provider,
         "snippet": evidence.content,
@@ -150,36 +114,14 @@ def agent_result_from_task_result(
         error_code=str(result.get("error_code") or ""),
         metadata={
             "question": str(result.get("question") or ""),
-            "legacy_type": str(result.get("type") or ""),
+            "worker_type": str(result.get("type") or ""),
             "confidence": result.get("confidence"),
         },
     )
-
-
-def task_result_from_agent_result(result: AgentResult) -> TaskResult:
-    """把统一 Agent 输出转换为现有 Worker 结果。"""
-    coverage = _STATUS_TO_COVERAGE[result.status]
-    legacy: TaskResult = {
-        "sub_task_id": result.task_id,
-        "question": str(result.metadata.get("question") or ""),
-        "type": str(result.metadata.get("legacy_type") or result.agent_id),
-        "context": result.answer,
-        "citations": [citation_from_evidence(item) for item in result.evidence],
-        "coverage": coverage,
-        "fallback_to_web": coverage == "uncovered",
-    }
-    if result.gaps:
-        legacy["fallback_reason"] = result.gaps[0]
-    if result.error_code:
-        legacy["rag_trace"] = {"error_code": result.error_code}
-    return legacy
 
 
 __all__ = [
     "agent_result_from_task_result",
     "citation_from_evidence",
     "evidence_from_citation",
-    "subtask_from_task_spec",
-    "task_result_from_agent_result",
-    "task_spec_from_subtask",
 ]

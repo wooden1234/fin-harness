@@ -9,6 +9,13 @@ _DEFAULT_USER_READ_ONLY_TOOLS = (
     "weather.get",
     "iwencai.query",
     "iwencai.screen",
+    "iwencai.market.query",
+    "iwencai.industry.query",
+    "iwencai.index.query",
+    "iwencai.rating.query",
+    "iwencai.announcement.search",
+    "iwencai.report.search",
+    "iwencai.fund.screen",
 )
 
 

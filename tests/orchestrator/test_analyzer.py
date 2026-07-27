@@ -20,11 +20,13 @@ from agents.orchestrator.contracts import RequestProfile, TaskSpec
 from agents.orchestrator.planner import build_plan_from_profile
 
 
-def test_heuristic_compound_stock_query_unchanged():
+def test_heuristic_compound_stock_query_uses_deep_research():
     profile = heuristic_profile("筛选新能源股票并分析前三只的风险")
     plan = build_plan_from_profile(profile)
-    assert [task.task_id for task in plan.tasks] == ["screen", "research"]
-    assert plan.tasks[1].depends_on == ["screen"]
+    assert profile.operation_type == "deep_research"
+    assert profile.preferred_agent == "research_workflow"
+    assert [task.agent_id for task in plan.tasks] == ["research_workflow"]
+    assert plan.tasks[0].depends_on == []
     assert_plan_capabilities(plan)
 
 
@@ -39,6 +41,26 @@ def test_heuristic_metric_question_is_finance_not_stock():
     profile = heuristic_profile("什么是ROE")
     assert profile.preferred_agent == "finance_agent"
     assert "stock_screening" not in profile.intents
+
+
+def test_heuristic_market_query_selects_dedicated_tool():
+    profile = heuristic_profile("查询沪深300今日涨跌幅")
+    plan = build_plan_from_profile(profile)
+
+    assert profile.preferred_agent == "market_acquisition_workflow"
+    assert profile.data_sources == ["market"]
+    assert profile.operation_type == "acquire"
+    assert profile.constraints["market_tool_id"] == "iwencai.index.query"
+    assert plan.tasks[0].required_capabilities == ["iwencai.index.query"]
+    assert plan.tasks[0].input_data == {"market_tool_id": "iwencai.index.query"}
+
+
+def test_stock_screening_takes_priority_over_embedded_market_fields():
+    profile = heuristic_profile("筛选成交量放大且涨跌幅为正的股票")
+    plan = build_plan_from_profile(profile)
+
+    assert profile.preferred_agent == "stock_screening_agent"
+    assert plan.tasks[0].agent_id == "stock_screening_agent"
 
 
 def test_heuristic_ambiguous_query_goes_general():
@@ -63,7 +85,7 @@ def test_capability_assert_rejects_unknown_capability():
         assert_task_capabilities(task)
 
 
-def test_validate_normalizes_stock_intent_to_stock_agent():
+def test_validate_normalizes_stock_intent_to_stock_screening_agent():
     raw = AnalyzerOutput(
         normalized_query="帮我选新能源股票",
         intents=["stock_screening"],
@@ -73,7 +95,7 @@ def test_validate_normalizes_stock_intent_to_stock_agent():
     result = validate_and_normalize(raw, original_query="帮我选新能源股票")
     assert result.profile.preferred_agent == "stock_screening_agent"
     assert result.needs_repair is False
-    assert "stock_screening_requires_stock_agent" in result.issues
+    assert "stock_screening_requires_stock_screening_agent" in result.issues
 
 
 def test_validate_keeps_metric_question_on_finance_agent():
@@ -137,7 +159,7 @@ def test_analyze_request_falls_back_on_llm_error():
                 {"messages": [HumanMessage(content="筛选新能源股票并分析风险")]}
             )
         )
-    assert output["request_profile"].preferred_agent == "stock_screening_agent"
+    assert output["request_profile"].preferred_agent == "research_workflow"
     assert output["steps"] == [
         "orchestrator:analyze_request:heuristic_error_fallback"
     ]
@@ -194,3 +216,26 @@ def test_analyze_request_max_two_llm_calls_skips_repair_after_transient_retry():
     repair_mock.assert_not_called()
     assert output["steps"] == ["orchestrator:analyze_request:heuristic_fallback"]
     assert output["request_profile"].preferred_agent == "general_agent"
+
+
+def test_heuristic_research_query_uses_research_retrieval_workflow():
+    profile = heuristic_profile("查询宁德时代最近的公告")
+    plan = build_plan_from_profile(profile)
+
+    assert profile.preferred_agent == "research_retrieval_workflow"
+    assert profile.data_sources == ["research"]
+    assert profile.operation_type == "retrieve"
+    assert plan.tasks[0].agent_id == "research_retrieval_workflow"
+    assert plan.tasks[0].input_data == {
+        "research_tool_id": "iwencai.announcement.search"
+    }
+
+
+def test_heuristic_upstream_filter_uses_market_compute():
+    profile = heuristic_profile("从刚才候选股票中按营收增速排序取前5只")
+    plan = build_plan_from_profile(profile)
+
+    assert profile.preferred_agent == "market.compute"
+    assert profile.data_sources == ["upstream_data"]
+    assert profile.operation_type == "compute"
+    assert plan.tasks[0].agent_id == "market.compute"

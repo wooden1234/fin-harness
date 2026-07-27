@@ -31,6 +31,9 @@ class PlannerState(TypedDict):
 
 class WorkerOutputState(TypedDict):
     """Worker 并行输出 + Summarize 汇总结果"""
+    # Root Orchestrator 传入的完整依赖，不与用户问题拼接。
+    dependency_results: NotRequired[list[Any]]
+    task_input: NotRequired[dict[str, Any]]
     task_results: NotRequired[Annotated[list[TaskResult], add]]
     # 兼容迁移期间的统一结果；旧 task_results 暂时继续保留。
     # 使用 Any 避免领域 State 反向导入 Root Orchestrator 造成初始化环；

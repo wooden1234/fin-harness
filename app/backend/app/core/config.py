@@ -140,7 +140,7 @@ class Settings(BaseSettings):
     IWENCAI_TIMEOUT_SEC: float = 30.0
     IWENCAI_MAX_LIMIT: int = 100
     IWENCAI_SKILL_ROOT: str = str(
-        PROJECT_ROOT / ".iwencai-skills/hithink-astock-selector"
+        PROJECT_ROOT / ".iwencai-skills"
     )
     IWENCAI_SKILL_RUNNER_ENABLED: bool = True
     IWENCAI_SKILL_RUNNER_TIMEOUT_SEC: float = 30.0

@@ -24,6 +24,7 @@ class OrchestratorState(CoreState):
     task_plan: NotRequired[TaskPlan]
     current_task: NotRequired[TaskSpec]
     current_dependency_results: NotRequired[list[AgentResult]]
+    prior_agent_results: NotRequired[list[AgentResult]]
 
     agent_results: NotRequired[Annotated[list[AgentResult], add]]
     evidence: NotRequired[Annotated[list[Evidence], add]]

@@ -15,25 +15,82 @@ def build_plan_from_profile(profile: RequestProfile) -> TaskPlan:
     if profile.missing_fields:
         return TaskPlan(plan_id=plan_id, query=query, tasks=[])
 
+    if profile.preferred_agent == "market_acquisition_workflow":
+        market_tool_id = str(profile.constraints.get("market_tool_id") or "").strip()
+        acquire = TaskSpec(
+            task_id="market_acquire",
+            objective=query,
+            agent_id="market_acquisition_workflow",
+            required_capabilities=[market_tool_id] if market_tool_id else [],
+            input_data={"market_tool_id": market_tool_id} if market_tool_id else {},
+        )
+        plan = TaskPlan(plan_id=plan_id, query=query, tasks=[acquire])
+        assert_plan_capabilities(plan)
+        return plan
+
+    if profile.preferred_agent == "research_retrieval_workflow":
+        research_tool_id = str(
+            profile.constraints.get("research_tool_id") or ""
+        ).strip()
+        research = TaskSpec(
+            task_id="research",
+            objective=query,
+            agent_id="research_retrieval_workflow",
+            required_capabilities=[research_tool_id] if research_tool_id else [],
+            input_data=(
+                {"research_tool_id": research_tool_id}
+                if research_tool_id
+                else {}
+            ),
+        )
+        plan = TaskPlan(plan_id=plan_id, query=query, tasks=[research])
+        assert_plan_capabilities(plan)
+        return plan
+
     if profile.preferred_agent == "stock_screening_agent":
-        screen = TaskSpec(
-            task_id="screen",
+        screening = TaskSpec(
+            task_id="stock_screening",
             objective=query,
             agent_id="stock_screening_agent",
             required_capabilities=["iwencai.screen"],
         )
-        if profile.complexity == "compound":
-            research = TaskSpec(
-                task_id="research",
-                objective="根据上游选股结果，分析候选股票的财务表现、公开信息和主要风险",
-                agent_id="finance_agent",
-                depends_on=["screen"],
-                required_capabilities=["financial_query", "web_search"],
-            )
-            plan = TaskPlan(plan_id=plan_id, query=query, tasks=[screen, research])
-            assert_plan_capabilities(plan)
-            return plan
-        plan = TaskPlan(plan_id=plan_id, query=query, tasks=[screen])
+        plan = TaskPlan(plan_id=plan_id, query=query, tasks=[screening])
+        assert_plan_capabilities(plan)
+        return plan
+
+    if profile.preferred_agent == "market.compute":
+        query_plan = profile.constraints.get("market_query_plan")
+        compute = TaskSpec(
+            task_id="market_compute",
+            objective=query,
+            agent_id="market.compute",
+            required_capabilities=["market.compute"],
+            input_data=(
+                {"market_query_plan": query_plan}
+                if query_plan is not None
+                else {}
+            ),
+        )
+        plan = TaskPlan(plan_id=plan_id, query=query, tasks=[compute])
+        assert_plan_capabilities(plan)
+        return plan
+
+    if profile.preferred_agent in {"deep_research_agent", "research_workflow"}:
+        research = TaskSpec(
+            task_id="research",
+            objective=query,
+            agent_id="research_workflow",
+            required_capabilities=["deep.research"],
+            input_data={
+                "data_sources": list(profile.data_sources),
+                "entities": list(profile.entities),
+            },
+        )
+        plan = TaskPlan(
+            plan_id=plan_id,
+            query=query,
+            tasks=[research],
+        )
         assert_plan_capabilities(plan)
         return plan
 
@@ -61,7 +118,7 @@ def build_plan_from_profile(profile: RequestProfile) -> TaskPlan:
                 task_id="finance",
                 objective=query,
                 agent_id="finance_agent",
-                required_capabilities=["financial_query", "web_search"],
+                required_capabilities=["financial_query"],
             )
         ],
     )

@@ -22,6 +22,39 @@ _SKILL_ID = "hithink-astock-selector"
 _SKILL_VERSION = "1.0.0"
 
 
+async def _run_query_skill(
+    skill_id: str,
+    query: str,
+    *,
+    page: int = 1,
+    limit: int = 10,
+    call_type: str = "normal",
+) -> dict[str, Any]:
+    """调用已审核的结构化问财 Skill。"""
+    return await run_installed_skill(
+        skill_id,
+        query=query,
+        page=page,
+        limit=limit,
+        call_type=call_type,
+    )
+
+
+async def _run_search_skill(
+    skill_id: str,
+    query: str,
+    *,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """调用已审核的问财搜索 Skill。"""
+    return await run_installed_skill(
+        skill_id,
+        query=query,
+        page=1,
+        limit=limit,
+    )
+
+
 def _base_url() -> str:
     return settings.IWENCAI_BASE_URL.rstrip("/") + "/"
 
@@ -157,6 +190,154 @@ async def screen_iwencai(
     )
 
 
+@tool(parse_docstring=True)
+async def query_iwencai_market(
+    query: str,
+    page: int = 1,
+    limit: int = 10,
+    call_type: str = "normal",
+) -> dict[str, Any]:
+    """查询股票、ETF 和实时行情数据。
+
+    Args:
+        query: 行情查询语句。
+        page: 结果页码，从 1 开始。
+        limit: 每页返回条数。
+        call_type: 调用类型，只能是 normal 或 retry。
+    """
+    return await _run_query_skill(
+        "hithink-market-query",
+        query,
+        page=page,
+        limit=limit,
+        call_type=call_type,
+    )
+
+
+@tool(parse_docstring=True)
+async def query_iwencai_industry(
+    query: str,
+    page: int = 1,
+    limit: int = 10,
+    call_type: str = "normal",
+) -> dict[str, Any]:
+    """查询行业估值、财务、盈利、行情和板块排名。
+
+    Args:
+        query: 行业数据查询语句。
+        page: 结果页码，从 1 开始。
+        limit: 每页返回条数。
+        call_type: 调用类型，只能是 normal 或 retry。
+    """
+    return await _run_query_skill(
+        "hithink-industry-query",
+        query,
+        page=page,
+        limit=limit,
+        call_type=call_type,
+    )
+
+
+@tool(parse_docstring=True)
+async def query_iwencai_index(
+    query: str,
+    page: int = 1,
+    limit: int = 10,
+    call_type: str = "normal",
+) -> dict[str, Any]:
+    """查询上证、沪深 300、创业板和海外指数数据。
+
+    Args:
+        query: 指数数据查询语句。
+        page: 结果页码，从 1 开始。
+        limit: 每页返回条数。
+        call_type: 调用类型，只能是 normal 或 retry。
+    """
+    return await _run_query_skill(
+        "hithink-zhishu-query",
+        query,
+        page=page,
+        limit=limit,
+        call_type=call_type,
+    )
+
+
+@tool(parse_docstring=True)
+async def query_iwencai_rating(
+    query: str,
+    page: int = 1,
+    limit: int = 10,
+    call_type: str = "normal",
+) -> dict[str, Any]:
+    """查询研报评级、业绩预测、ESG 和机构研究数据。
+
+    Args:
+        query: 机构研究或评级查询语句。
+        page: 结果页码，从 1 开始。
+        limit: 每页返回条数。
+        call_type: 调用类型，只能是 normal 或 retry。
+    """
+    return await _run_query_skill(
+        "hithink-insresearch-query",
+        query,
+        page=page,
+        limit=limit,
+        call_type=call_type,
+    )
+
+
+@tool(parse_docstring=True)
+async def screen_iwencai_fund(
+    query: str,
+    page: int = 1,
+    limit: int = 10,
+    call_type: str = "normal",
+) -> dict[str, Any]:
+    """筛选公募基金及其基金经理、业绩和持仓。
+
+    Args:
+        query: 基金筛选语句。
+        page: 结果页码，从 1 开始。
+        limit: 每页返回条数。
+        call_type: 调用类型，只能是 normal 或 retry。
+    """
+    return await _run_query_skill(
+        "hithink-fund-selector",
+        query,
+        page=page,
+        limit=limit,
+        call_type=call_type,
+    )
+
+
+@tool(parse_docstring=True)
+async def search_iwencai_announcement(
+    query: str,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """搜索上市公司公告和重大事件。
+
+    Args:
+        query: 公告搜索语句。
+        limit: 返回结果数量。
+    """
+    return await _run_search_skill("announcement-search", query, limit=limit)
+
+
+@tool(parse_docstring=True)
+async def search_iwencai_report(
+    query: str,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """搜索券商研报和机构研究报告。
+
+    Args:
+        query: 研报搜索语句。
+        limit: 返回结果数量。
+    """
+    return await _run_search_skill("report-search", query, limit=limit)
+
+
 register_tool(
     ToolSpec(
         tool_id="iwencai.query",
@@ -168,6 +349,84 @@ register_tool(
     langchain_tool=query_iwencai,
     handler=query_iwencai.ainvoke,
 )
+
+for _tool_spec, _langchain_tool in (
+    (
+        ToolSpec(
+            tool_id="iwencai.market.query",
+            name="query_iwencai_market",
+            description="查询股票、ETF 和实时行情数据",
+            risk_level="low",
+            read_only=True,
+        ),
+        query_iwencai_market,
+    ),
+    (
+        ToolSpec(
+            tool_id="iwencai.industry.query",
+            name="query_iwencai_industry",
+            description="查询行业估值、财务、盈利、行情和板块排名",
+            risk_level="low",
+            read_only=True,
+        ),
+        query_iwencai_industry,
+    ),
+    (
+        ToolSpec(
+            tool_id="iwencai.index.query",
+            name="query_iwencai_index",
+            description="查询主要指数行情和指标",
+            risk_level="low",
+            read_only=True,
+        ),
+        query_iwencai_index,
+    ),
+    (
+        ToolSpec(
+            tool_id="iwencai.rating.query",
+            name="query_iwencai_rating",
+            description="查询研报评级、业绩预测和机构研究数据",
+            risk_level="low",
+            read_only=True,
+        ),
+        query_iwencai_rating,
+    ),
+    (
+        ToolSpec(
+            tool_id="iwencai.announcement.search",
+            name="search_iwencai_announcement",
+            description="搜索上市公司公告和重大事件",
+            risk_level="low",
+            read_only=True,
+        ),
+        search_iwencai_announcement,
+    ),
+    (
+        ToolSpec(
+            tool_id="iwencai.report.search",
+            name="search_iwencai_report",
+            description="搜索券商研报和机构研究报告",
+            risk_level="low",
+            read_only=True,
+        ),
+        search_iwencai_report,
+    ),
+    (
+        ToolSpec(
+            tool_id="iwencai.fund.screen",
+            name="screen_iwencai_fund",
+            description="筛选公募基金及其基金经理、业绩和持仓",
+            risk_level="low",
+            read_only=True,
+        ),
+        screen_iwencai_fund,
+    ),
+):
+    register_tool(
+        _tool_spec,
+        langchain_tool=_langchain_tool,
+        handler=_langchain_tool.ainvoke,
+    )
 
 register_tool(
     ToolSpec(
@@ -183,4 +442,15 @@ register_tool(
 )
 
 
-__all__ = ["fetch_iwencai", "query_iwencai", "screen_iwencai"]
+__all__ = [
+    "fetch_iwencai",
+    "query_iwencai",
+    "query_iwencai_index",
+    "query_iwencai_industry",
+    "query_iwencai_market",
+    "query_iwencai_rating",
+    "screen_iwencai",
+    "screen_iwencai_fund",
+    "search_iwencai_announcement",
+    "search_iwencai_report",
+]

@@ -6,6 +6,48 @@
       "zip_url": "https://ms.10jqka.com.cn/gateway/market/api/v1/skills/square/download?name=hithink-astock-selector",
       "source": "skillhub",
       "version": ""
+    },
+    "report-search": {
+      "name": "report-search",
+      "zip_url": "http://ms.10jqka.com.cn/gateway/market/api/v1/skills/square/download?name=report-search",
+      "source": "skillhub",
+      "version": ""
+    },
+    "hithink-industry-query": {
+      "name": "hithink-industry-query",
+      "zip_url": "http://ms.10jqka.com.cn/gateway/market/api/v1/skills/square/download?name=hithink-industry-query",
+      "source": "skillhub",
+      "version": ""
+    },
+    "announcement-search": {
+      "name": "announcement-search",
+      "zip_url": "http://ms.10jqka.com.cn/gateway/market/api/v1/skills/square/download?name=announcement-search",
+      "source": "skillhub",
+      "version": ""
+    },
+    "hithink-insresearch-query": {
+      "name": "hithink-insresearch-query",
+      "zip_url": "http://ms.10jqka.com.cn/gateway/market/api/v1/skills/square/download?name=hithink-insresearch-query",
+      "source": "skillhub",
+      "version": ""
+    },
+    "hithink-market-query": {
+      "name": "hithink-market-query",
+      "zip_url": "http://ms.10jqka.com.cn/gateway/market/api/v1/skills/square/download?name=hithink-market-query",
+      "source": "skillhub",
+      "version": ""
+    },
+    "hithink-zhishu-query": {
+      "name": "hithink-zhishu-query",
+      "zip_url": "http://ms.10jqka.com.cn/gateway/market/api/v1/skills/square/download?name=hithink-zhishu-query",
+      "source": "skillhub",
+      "version": ""
+    },
+    "hithink-fund-selector": {
+      "name": "hithink-fund-selector",
+      "zip_url": "http://ms.10jqka.com.cn/gateway/market/api/v1/skills/square/download?name=hithink-fund-selector",
+      "source": "skillhub",
+      "version": ""
     }
   }
 }

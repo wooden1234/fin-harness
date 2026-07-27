@@ -19,11 +19,12 @@ from agents.runtime_context import AgentRuntimeContext
 
 @dataclass(frozen=True, slots=True)
 class AgentSpec:
-    """专业 Agent 的稳定描述。"""
+    """Root Orchestrator 可调用处理器的稳定描述。"""
 
     agent_id: str
     description: str
     capabilities: tuple[str, ...]
+    kind: str = "agent"
 
 
 AGENT_SPECS: tuple[AgentSpec, ...] = (
@@ -34,13 +35,46 @@ AGENT_SPECS: tuple[AgentSpec, ...] = (
     ),
     AgentSpec(
         agent_id="finance_agent",
-        description="处理金融知识、财务、文档和公开信息研究",
-        capabilities=("faq", "pdf", "financial_query", "web_search"),
+        description="处理金融知识、财务数据库和 RAG 分析",
+        capabilities=("faq", "pdf", "financial_query"),
+    ),
+    AgentSpec(
+        agent_id="market_acquisition_workflow",
+        description="按明确的数据类型从受治理市场数据源采集结构化数据",
+        capabilities=(
+            "iwencai.market.query",
+            "iwencai.industry.query",
+            "iwencai.index.query",
+            "iwencai.fund.screen",
+        ),
+        kind="workflow",
+    ),
+    AgentSpec(
+        agent_id="research_retrieval_workflow",
+        description="按明确的资料类型检索公告、研报和机构评级",
+        capabilities=(
+            "iwencai.announcement.search",
+            "iwencai.report.search",
+            "iwencai.rating.query",
+        ),
+        kind="workflow",
     ),
     AgentSpec(
         agent_id="stock_screening_agent",
-        description="处理自然语言 A 股选股",
+        description="理解复杂自然语言选股条件并调用受治理选股工具",
         capabilities=("iwencai.screen",),
+    ),
+    AgentSpec(
+        agent_id="market.compute",
+        description="对上游 CandidateSet 执行确定性过滤、排序和截取",
+        capabilities=("market.compute",),
+        kind="deterministic",
+    ),
+    AgentSpec(
+        agent_id="research_workflow",
+        description="围绕一个问题完成多源采集、Deep Agent 分析和质量收敛",
+        capabilities=("deep.research",),
+        kind="workflow",
     ),
 )
 
@@ -59,6 +93,11 @@ def list_agent_specs() -> list[AgentSpec]:
     return list(AGENT_SPECS)
 
 
+def _dependency_payload(results: list[AgentResult]) -> list[AgentResult]:
+    """复制完整上游结果，避免下游修改编排器持有的对象。"""
+    return [item.model_copy(deep=True) for item in results]
+
+
 async def invoke_agent(
     task: TaskSpec,
     *,
@@ -69,18 +108,60 @@ async def invoke_agent(
     """以统一契约调用现有专业 Agent。"""
     get_agent_spec(task.agent_id)
     query = task.objective
-    if dependency_results:
-        dependency_text = "\n\n".join(
-            f"上游任务 {item.task_id} 结果：{item.answer}"
-            for item in dependency_results
+    invocation_state = {
+        "messages": [HumanMessage(content=query)],
+        "dependency_results": _dependency_payload(dependency_results),
+        "task_input": dict(task.input_data),
+    }
+
+    if task.agent_id == "market_acquisition_workflow":
+        from agents.market_acquisition_workflow import (
+            run_market_acquisition_workflow,
         )
-        query = f"{query}\n\n{dependency_text}"
+
+        result = await run_market_acquisition_workflow(
+            invocation_state,
+            query=query,
+            config=config,
+            runtime=runtime,
+        )
+        return result.model_copy(update={"task_id": task.task_id})
+
+    if task.agent_id == "research_retrieval_workflow":
+        from agents.research_retrieval_workflow import (
+            run_research_retrieval_workflow,
+        )
+
+        result = await run_research_retrieval_workflow(
+            invocation_state,
+            query=query,
+            config=config,
+            runtime=runtime,
+        )
+        return result.model_copy(update={"task_id": task.task_id})
 
     if task.agent_id == "stock_screening_agent":
         from agents.stock_screening_agent import run_stock_screening_agent
 
         result = await run_stock_screening_agent(
-            {"messages": [HumanMessage(content=query)]},
+            invocation_state,
+            query=query,
+            config=config,
+            runtime=runtime,
+        )
+        return result.model_copy(update={"task_id": task.task_id})
+
+    if task.agent_id == "market.compute":
+        from agents.market_compute.executor import run_market_compute
+
+        result = await run_market_compute(invocation_state, query=query)
+        return result.model_copy(update={"task_id": task.task_id})
+
+    if task.agent_id == "research_workflow":
+        from agents.research_workflow import run_research_workflow
+
+        result = await run_research_workflow(
+            invocation_state,
             query=query,
             config=config,
             runtime=runtime,
@@ -91,7 +172,7 @@ async def invoke_agent(
         from agents.finance_agent import finance_agent
 
         output = await finance_agent.ainvoke(
-            {"messages": [HumanMessage(content=query)]},
+            invocation_state,
             config=config,
         )
         unified_results = list(output.get("agent_results") or [])
@@ -135,7 +216,7 @@ async def invoke_agent(
         from agents.general_agent import general_agent
 
         output = await general_agent(
-            {"messages": [HumanMessage(content=query)]},
+            invocation_state,
             config=config,
             runtime=runtime,
         )
@@ -180,4 +261,10 @@ def _merge_output_evidence(
     return best.model_copy(update={"task_id": task_id, "evidence": merged})
 
 
-__all__ = ["AGENT_SPECS", "AgentSpec", "get_agent_spec", "invoke_agent", "list_agent_specs"]
+__all__ = [
+    "AGENT_SPECS",
+    "AgentSpec",
+    "get_agent_spec",
+    "invoke_agent",
+    "list_agent_specs",
+]

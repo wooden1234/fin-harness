@@ -10,6 +10,21 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 RequestComplexity = Literal["simple", "single_capability", "compound"]
+DataSourceType = Literal[
+    "market",
+    "research",
+    "finance_rag",
+    "upstream_data",
+    "none",
+]
+OperationType = Literal[
+    "acquire",
+    "retrieve",
+    "compute",
+    "analyze",
+    "answer",
+    "deep_research",
+]
 TaskStatus = Literal[
     "pending",
     "running",
@@ -26,6 +41,102 @@ AgentResultStatus = Literal[
     "clarify",
     "failed",
 ]
+MarketFilterOperator = Literal[
+    "eq",
+    "ne",
+    "gt",
+    "gte",
+    "lt",
+    "lte",
+    "in",
+    "not_in",
+    "contains",
+    "between",
+]
+MarketSortDirection = Literal["asc", "desc"]
+DocumentChannel = Literal["report", "announcement", "news", "unknown"]
+
+
+class MarketFilter(BaseModel):
+    """市场数据过滤条件。"""
+
+    field: str = Field(min_length=1)
+    operator: MarketFilterOperator
+    value: Any
+
+
+class MarketSort(BaseModel):
+    """市场数据排序条件。"""
+
+    field: str = Field(min_length=1)
+    direction: MarketSortDirection = "desc"
+
+
+class MarketQueryPlan(BaseModel):
+    """自然语言市场问题解析后的确定性查询计划。"""
+
+    universe: str = Field(min_length=1, description="A股、港股、美股、基金等范围")
+    filters: list[MarketFilter] = Field(default_factory=list)
+    enrichments: list[str] = Field(default_factory=list)
+    sort: list[MarketSort] = Field(default_factory=list)
+    group_by: list[str] = Field(default_factory=list)
+    metrics: list[str] = Field(default_factory=list)
+    limit: int = Field(default=20, ge=1, le=500)
+    as_of: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CandidateSet(BaseModel):
+    """选股及市场查询产生的标准化候选数据集。"""
+
+    schema_version: str = "1.0"
+    dataset_id: str = Field(min_length=1)
+    universe: str = Field(min_length=1)
+    provider: str = Field(min_length=1)
+    as_of: str
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    query_plan: MarketQueryPlan | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class DocumentHit(BaseModel):
+    """公告或研报搜索命中的一条文档元数据。"""
+
+    document_id: str = ""
+    title: str = ""
+    summary: str = ""
+    published_at: str | None = None
+    organization: str = ""
+    rating: str = ""
+    target_price: str | float | int | None = None
+    url: str | None = None
+    pdf_url: str | None = None
+    provider: str = "iwencai"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class DocumentHitSet(BaseModel):
+    """研报、公告等搜索结果的统一文档契约。"""
+
+    schema_version: str = "1.0"
+    query: str
+    channel: DocumentChannel = "unknown"
+    documents: list[DocumentHit] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class DeepResearchReport(BaseModel):
+    """Deep Agent 研究结论的可追溯结构化输出。"""
+
+    schema_version: str = "1.0"
+    query: str
+    summary: str
+    source_tools: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    gaps: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class RequestProfile(BaseModel):
@@ -36,6 +147,8 @@ class RequestProfile(BaseModel):
     domain: str = "finance"
     intents: list[str] = Field(default_factory=list)
     complexity: RequestComplexity = "simple"
+    data_sources: list[DataSourceType] = Field(default_factory=list)
+    operation_type: OperationType = "answer"
     freshness_required: bool = False
     entities: list[str] = Field(default_factory=list)
     constraints: dict[str, Any] = Field(default_factory=dict)
@@ -148,7 +261,19 @@ class QualityReport(BaseModel):
 
 __all__ = [
     "AgentResult",
+    "CandidateSet",
+    "DataSourceType",
+    "DeepResearchReport",
+    "DocumentChannel",
+    "DocumentHit",
+    "DocumentHitSet",
     "Evidence",
+    "MarketFilter",
+    "MarketFilterOperator",
+    "MarketQueryPlan",
+    "MarketSort",
+    "MarketSortDirection",
+    "OperationType",
     "QualityReport",
     "RequestComplexity",
     "RequestProfile",

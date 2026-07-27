@@ -89,14 +89,9 @@ async def repair_profile(
     )
 
 
-# 兼容旧测试名：现为单次调用。
-analyze_with_retry = analyze_once
-
-
 __all__ = [
     "ainvoke_analyzer",
     "analyze_once",
-    "analyze_with_retry",
     "is_transient_api_error",
     "repair_profile",
 ]
