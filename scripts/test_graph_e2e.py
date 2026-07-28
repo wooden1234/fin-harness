@@ -24,7 +24,7 @@ for path in (str(BACKEND_DIR), str(ROOT)):
 load_dotenv(ROOT / ".env")
 
 from agents.checkpoint import close_checkpoint, init_checkpoint, make_thread_config  # noqa: E402
-from agents.graph import get_graph  # noqa: E402
+from agents.orchestrator.graph import get_orchestrator_graph  # noqa: E402
 
 DEFAULT_QUERY = "什么是 T+1 交易制度？"
 
@@ -32,7 +32,7 @@ DEFAULT_QUERY = "什么是 T+1 交易制度？"
 async def main() -> None:
     query = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_QUERY
     await init_checkpoint(backend="postgres")
-    graph = get_graph()
+    graph = get_orchestrator_graph()
     conversation_id = str(uuid.uuid4())
     config = make_thread_config(conversation_id)
 

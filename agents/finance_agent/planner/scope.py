@@ -7,7 +7,7 @@ from typing import Any
 
 
 def domain_scope_from_state(state: Mapping[str, Any]):
-    """读取并校验 Root 下发的 Scope；缺失表示兼容旧 V1 调用。"""
+    """读取并校验 Root 下发的 Scope；缺失表示兼容 Finance 子图直接调用。"""
     raw = state.get("domain_planning_scope")
     if raw is None:
         task_input = state.get("task_input")

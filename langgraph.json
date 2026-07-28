@@ -2,7 +2,6 @@
   "dependencies": ["."],
   "graphs": {
     "fin_agent": "./langgraph_entry.py:graph",
-    "fin_agent_v1": "./langgraph_entry.py:v1_graph",
     "orchestrator_graph": "./langgraph_entry.py:orchestrator_graph",
     "research_workflow_graph": "./langgraph_entry.py:research_workflow_graph",
     "finance_agent": "./langgraph_entry.py:finance_graph",

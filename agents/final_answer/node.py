@@ -89,7 +89,7 @@ def _filter_current_turn_citations(
     state: FinAgentState,
     citations: list[dict],
 ) -> list[dict]:
-    """按统一 Evidence 契约保留本轮可展示引用，兼容 V1 和 V2。"""
+    """按统一 Evidence 契约保留本轮可展示引用，并兼容旧结果格式。"""
     current_ids = _current_sub_task_ids(state)
     constrained_answer = state.get("constrained_answer")
     used_evidence_ids: set[str] | None = None

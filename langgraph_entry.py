@@ -4,8 +4,7 @@
 LangGraph API 会自行管理 persistence（inmem / Postgres）。
 
 在 Studio 左上角切换 graph 名称即可查看不同层级：
-- fin_agent              主图
-- fin_agent_v1           V1 固定路由主图（独立版本）
+- fin_agent              Root Orchestrator 主图
 - finance_agent          编排子图（含 faq / pdf / financial_query / web_search）
 - financial_query_agent  SQL 路由子图
 - predefined_workflow    白名单 SQL 工作流
@@ -16,7 +15,6 @@ LangGraph API 会自行管理 persistence（inmem / Postgres）。
 
 from __future__ import annotations
 
-from importlib import import_module
 import sys
 from pathlib import Path
 
@@ -40,10 +38,9 @@ from agents.finance_agent.graph import build_finance_agent_subgraph  # noqa: E40
 from agents.orchestrator.graph import get_orchestrator_graph  # noqa: E402
 from agents.research_workflow.workflow import build_research_workflow  # noqa: E402
 
-v1_graph = import_module("agent-v1.graph").get_graph(with_checkpointer=False)
 orchestrator_graph = get_orchestrator_graph(with_checkpointer=False)
-# 保留旧 Studio graph 名称；新调用方应显式使用 v1_graph / orchestrator_graph。
-graph = v1_graph
+# 保留通用 Studio graph 名称，并统一指向 Root Orchestrator。
+graph = orchestrator_graph
 finance_graph = build_finance_agent_subgraph().compile()
 financial_query_graph = build_financial_query_agent_graph().compile()
 predefined_graph = build_predefined_workflow_graph().compile()

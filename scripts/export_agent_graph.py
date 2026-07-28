@@ -30,12 +30,15 @@ from agents.finance_agent.financial_query_agent.workflows.text_to_sql import (  
     build_text_to_sql_workflow_graph,
 )
 from agents.finance_agent.graph import build_finance_agent_subgraph  # noqa: E402
-from agents.graph import get_graph  # noqa: E402
+from agents.orchestrator.graph import get_orchestrator_graph  # noqa: E402
 
 OUT_DIR = ROOT / "docs" / "architecture"
 
 LAYERS: dict[str, tuple[Any, bool]] = {
-    "fin_agent": (lambda: get_graph(with_checkpointer=False), False),
+    "fin_agent": (
+        lambda: get_orchestrator_graph(with_checkpointer=False),
+        False,
+    ),
     "finance_agent": (lambda: build_finance_agent_subgraph().compile(), True),
     "financial_query_agent": (
         lambda: build_financial_query_agent_graph().compile(),
@@ -74,7 +77,7 @@ def _write_overview() -> Path:
 
 | 层级 | 文件 | Studio graph 名 | 说明 |
 |------|------|-----------------|------|
-| 1 | [agent-graph-fin-agent.mmd](./agent-graph-fin-agent.mmd) | `fin_agent` | 主图：guardrails → supervisor → plan_agent → final_answer |
+| 1 | [agent-graph-fin-agent.mmd](./agent-graph-fin-agent.mmd) | `fin_agent` | 主图：analyze_request → build_plan → execute_task → quality_gate → final_answer |
 | 2 | [agent-graph-finance-agent.mmd](./agent-graph-finance-agent.mmd) | `finance_agent` | 编排子图：plan → dispatch → faq/pdf/financial_query/web_search → join → summarize |
 | 3 | [agent-graph-financial-query-agent.mmd](./agent-graph-financial-query-agent.mmd) | `financial_query_agent` | SQL 路由：planner → predefined / text_to_sql |
 | 4 | [agent-graph-predefined-workflow.mmd](./agent-graph-predefined-workflow.mmd) | `predefined_workflow` | 白名单 SQL：init → select_tool → semantic → resolve → execute → format |
@@ -92,8 +95,8 @@ langgraph dev
 ## 层级关系
 
 ```text
-fin_agent
-└── plan_agent (= finance_agent)
+fin_agent (= orchestrator)
+└── execute_task → finance_agent
     ├── faq_agent          (单节点)
     ├── pdf_agent          (单节点)
     ├── financial_query_agent

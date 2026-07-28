@@ -80,7 +80,6 @@ def make_thread_config(
     *,
     user_id: str | int | None = None,
     tenant_id: str | int | None = None,
-    graph_version: str = "v1",
 ) -> RunnableConfig:
     """生成隔离的 LangGraph thread config。
 
@@ -92,14 +91,11 @@ def make_thread_config(
         user_id=user_id,
         tenant_id=tenant_id,
     )
-    if graph_version not in {"v1", "v2"}:
-        raise ValueError(f"invalid_graph_version:{graph_version}")
-    if graph_version == "v2":
-        thread_id = f"{thread_id}:graph:v2"
+    thread_id = f"{thread_id}:graph:v2"
     return {
         "configurable": {
             "thread_id": thread_id,
-            "graph_version": graph_version,
+            "graph_version": "v2",
         }
     }
 
@@ -148,13 +144,8 @@ async def close_checkpoint() -> None:
     _exit_stack = None
     _checkpointer = None
 
-    from agents.graph import reset_graph_cache
-
-    reset_graph_cache()
-    from agents.graph_selector import reset_graph_selector_cache
     from agents.orchestrator.graph import reset_orchestrator_graph_cache
 
-    reset_graph_selector_cache()
     reset_orchestrator_graph_cache()
     logger.info("Agent checkpoint closed")
 
@@ -184,8 +175,7 @@ async def delete_thread_checkpoint(
         tenant_id=tenant_id,
     )
     checkpointer = get_checkpointer()
-    thread_ids = (thread_id, f"{thread_id}:graph:v2")
-    for candidate in thread_ids:
-        await checkpointer.adelete_thread(candidate)
-    logger.info("deleted checkpoint thread_ids={}", thread_ids)
-    return thread_id
+    v2_thread_id = f"{thread_id}:graph:v2"
+    await checkpointer.adelete_thread(v2_thread_id)
+    logger.info("deleted checkpoint thread_id={}", v2_thread_id)
+    return v2_thread_id

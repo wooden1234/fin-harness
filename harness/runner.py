@@ -9,7 +9,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 
 from agents.checkpoint import make_thread_config
-from agents.graph_selector import get_selected_graph, select_graph_version
+from agents.orchestrator.graph import get_orchestrator_graph
 from agents.runtime_context import AgentRuntimeContext
 from harness.context import RunContext, build_run_context
 from harness.policy import pre_check
@@ -54,20 +54,13 @@ async def run_agent(
     )
     pre_check(run_context)
 
-    graph_version = select_graph_version(
-        conversation_id=conversation_id or run_context.trace_id,
-        user_id=run_context.user_id,
-        tenant_id=run_context.tenant_id,
-    )
-    graph = get_selected_graph(graph_version)
+    graph = get_orchestrator_graph()
     runtime_context = _runtime_context_from_run_context(
         run_context,
         conversation_id=conversation_id,
         deadline_seconds=(
             settings.AGENT_V2_COMPOUND_HARD_DEADLINE_SEC
             + settings.AGENT_V2_FINALIZATION_GRACE_SEC
-            if graph_version == "v2"
-            else None
         ),
     )
     config = (
@@ -75,36 +68,25 @@ async def run_agent(
             conversation_id,
             user_id=run_context.user_id,
             tenant_id=run_context.tenant_id,
-            graph_version=graph_version,
         )
         if conversation_id is not None
         else {
             "configurable": {
-                "thread_id": (
-                    run_context.trace_id
-                    if graph_version == "v1"
-                    else f"{run_context.trace_id}:graph:v2"
-                ),
-                "graph_version": graph_version,
+                "thread_id": f"{run_context.trace_id}:graph:v2",
+                "graph_version": "v2",
             }
         }
     )
     try:
-        if graph_version == "v2":
-            async with asyncio.timeout(
-                settings.AGENT_V2_COMPOUND_HARD_DEADLINE_SEC
-                + settings.AGENT_V2_FINALIZATION_GRACE_SEC
-            ):
-                return await graph.ainvoke(
-                    {"messages": [HumanMessage(content=query)]},
-                    config,
-                    context=runtime_context,
-                )
-        return await graph.ainvoke(
-            {"messages": [HumanMessage(content=query)]},
-            config,
-            context=runtime_context,
-        )
+        async with asyncio.timeout(
+            settings.AGENT_V2_COMPOUND_HARD_DEADLINE_SEC
+            + settings.AGENT_V2_FINALIZATION_GRACE_SEC
+        ):
+            return await graph.ainvoke(
+                {"messages": [HumanMessage(content=query)]},
+                config,
+                context=runtime_context,
+            )
     except (asyncio.CancelledError, TimeoutError):
         raise
     except Exception:

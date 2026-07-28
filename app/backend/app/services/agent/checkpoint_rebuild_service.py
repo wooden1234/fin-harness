@@ -24,9 +24,9 @@ class CheckpointRebuildService:
     ) -> bool:
         """checkpoint 缺失时用历史消息恢复；返回是否实际重建。"""
         if graph is None:
-            from agents.graph import get_graph
+            from agents.orchestrator.graph import get_orchestrator_graph
 
-            graph = get_graph()
+            graph = get_orchestrator_graph()
         current = await graph.aget_state(thread_config)
         if current is not None and (current.values or {}).get("messages"):
             return False

@@ -2,7 +2,7 @@
 
 金融 Multi-Agent 平台。基于 LangGraph 编排多 Agent / Workflow 协作，覆盖财务问答、PDF 研报检索、结构化查数、A 股选股与市场数据计算，并提供合规审查、证据引用与审计能力。
 
-默认入口为 **Orchestrator V2**（动态任务波次）；可通过配置回退或灰度到 **V1 Supervisor** 固定路由图。
+主入口为 **Orchestrator V2**，通过动态任务波次调度各领域 Agent 与 Workflow。
 
 ## 功能概览
 
@@ -85,7 +85,7 @@ langgraph dev
 | Graph | 说明 |
 |-------|------|
 | `orchestrator_graph` | Root Orchestrator V2 |
-| `fin_agent_v1` | V1 Supervisor 固定路由 |
+| `fin_agent` | Root Orchestrator V2 的通用入口 |
 | `finance_agent` | Finance 编排子图 |
 | `financial_query_agent` / `predefined_workflow` / `text_to_sql_workflow` | 财务查数相关子图 |
 | `fin_agent_combined` | 合图总览 |
@@ -96,9 +96,7 @@ langgraph dev
 ```text
 用户请求
   → Guardrails / Memory / Query Rewrite
-  → Graph 选择（v1 | v2 | rollout）
-      ├─ V1：Supervisor 固定路由
-      └─ V2：Analyzer → Planner → 波次调度 → Quality Gate → Final Answer
+  → Analyzer → Planner → 波次调度 → Quality Gate → Final Answer
 ```
 
 Orchestrator V2 可调度的主要处理器（见 `agents/orchestrator/agent_registry.py`）：
@@ -113,19 +111,13 @@ Orchestrator V2 可调度的主要处理器（见 `agents/orchestrator/agent_reg
 | `market.compute` | 对 `CandidateSet` 做确定性 filter / sort / limit |
 | `research_workflow` | 多源研究与内部 Deep Agent 分析 |
 
-图版本由 `AGENT_GRAPH_MODE`（`v1` / `v2` / `rollout`）控制，详见 `agents/graph_selector.py`。
-
 ## 项目图结构
 
 ```mermaid
 flowchart TB
     U[用户] --> FE[React / Vite 前端]
     FE --> API[FastAPI API + SSE]
-    API --> SEL{Graph Selector}
-    SEL -->|v1| V1[Supervisor V1 固定路由图]
-    SEL -->|v2 / rollout| V2[Orchestrator V2]
-
-    V1 --> V1N[Guardrails → Memory → Query Rewrite → Supervisor]
+    API --> V2[Orchestrator V2]
     V2 --> INIT[Init Turn]
     INIT --> GUARD[Guardrails]
     GUARD --> MEM[Memory Recall]
@@ -199,7 +191,6 @@ flowchart LR
 ```
 fin-harness/
 ├── agents/                 # LangGraph Agent / Workflow（Orchestrator、Finance、选股、研究等）
-├── agent-v1/               # V1 Supervisor 主图（独立版本，便于灰度）
 ├── app/
 │   ├── backend/            # FastAPI 后端（API、模型、服务）
 │   └── frontend/           # React 前端
@@ -239,7 +230,6 @@ pytest
 | `DATABASE_URL` | PostgreSQL 异步连接串 |
 | `PGVECTOR_DATABASE_URL` | pgvector 连接串 |
 | `LANGGRAPH_CHECKPOINT_URL` | LangGraph 状态持久化 |
-| `AGENT_GRAPH_MODE` | 图版本：`v1` / `v2` / `rollout` |
 | `SECRET_KEY` | JWT 签名密钥 |
 | `IWENCAI_API_KEY` | 问财选股 / 市场数据（若启用） |
 

@@ -24,7 +24,7 @@ for path in (str(BACKEND_DIR), str(ROOT)):
 load_dotenv(ROOT / ".env")
 
 from agents.checkpoint import close_checkpoint, init_checkpoint, make_thread_config  # noqa: E402
-from agents.graph import get_graph, reset_graph_cache  # noqa: E402
+from agents.orchestrator.graph import get_orchestrator_graph  # noqa: E402
 
 TURN1 = "什么是 T+1 交易制度？"
 TURN2 = "刚才说的这个制度，当天买入的股票什么时候可以卖？"
@@ -33,7 +33,7 @@ TURN2 = "刚才说的这个制度，当天买入的股票什么时候可以卖�
 async def main() -> None:
     conversation_id = sys.argv[1] if len(sys.argv) > 1 else str(uuid.uuid4())
     await init_checkpoint(backend="postgres")
-    graph = get_graph()
+    graph = get_orchestrator_graph()
     config = make_thread_config(conversation_id)
 
     print(f"conversation_id (thread_id) = {conversation_id}\n")

@@ -149,11 +149,6 @@ class Settings(BaseSettings):
     # LangGraph Checkpoint（W3 Day 5）：postgres | memory
     AGENT_CHECKPOINT_BACKEND: str = "postgres"
 
-    # Root Orchestrator V2 灰度开关：v1 | v2 | rollout
-    AGENT_GRAPH_MODE: str = "v2"
-    AGENT_GRAPH_V2_ROLLOUT_PERCENT: int = 0
-    AGENT_GRAPH_V2_TENANT_ALLOWLIST: str = ""
-    AGENT_GRAPH_V2_NEW_CONVERSATIONS_ONLY: bool = True
     # V2 请求预算：软时限停止扩张并降级回答，硬时限终止执行。
     AGENT_V2_SIMPLE_SOFT_DEADLINE_SEC: float = 6.0
     AGENT_V2_SIMPLE_HARD_DEADLINE_SEC: float = 12.0

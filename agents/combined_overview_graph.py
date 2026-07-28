@@ -22,10 +22,15 @@ def build_combined_overview_graph() -> StateGraph:
     builder = StateGraph(OverviewState)
 
     chain = (
+        "init_turn",
         "guardrails",
+        "memory_recall",
         "context_compressor",
         "query_rewrite",
-        "supervisor",
+        "analyze_request",
+        "build_plan",
+        "prepare_wave",
+        "execute_task",
         "plan_tasks",
         "validate_plan",
         "resolve_evidence",
@@ -50,7 +55,11 @@ def build_combined_overview_graph() -> StateGraph:
         "web_search_agent",
         "join",
         "summarize",
-        "general_agent",
+        "wave_join",
+        "evaluate_results",
+        "map_claim_evidence",
+        "quality_gate",
+        "synthesize",
         "final_answer",
     )
     for name in chain:

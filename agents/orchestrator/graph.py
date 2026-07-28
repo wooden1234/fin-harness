@@ -936,7 +936,7 @@ async def clarify(
 
 
 def build_orchestrator_graph() -> StateGraph:
-    """构建 V2 图；不修改旧的 ``agents.graph``。"""
+    """构建 Root Orchestrator 图。"""
     builder = StateGraph(
         OrchestratorState,
         input_schema=FinAgentInput,
