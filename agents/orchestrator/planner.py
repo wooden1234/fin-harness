@@ -5,7 +5,24 @@ from __future__ import annotations
 import uuid
 
 from agents.orchestrator.analyzer.validate import assert_plan_capabilities
-from agents.orchestrator.contracts import RequestProfile, TaskPlan, TaskSpec
+from agents.orchestrator.contracts import (
+    RequestProfile,
+    TaskPlan,
+    TaskSpec,
+)
+from agents.orchestrator.domain_scope import build_finance_scope
+
+
+def _finance_planning_scope(profile: RequestProfile):
+    """把请求画像转换为 Finance Planner 的显式授权范围。"""
+    return build_finance_scope(
+        parent_task_id="finance",
+        parent_logical_task_id="finance",
+        data_sources=profile.data_sources,
+        freshness_required=profile.freshness_required,
+        entities=profile.entities,
+        constraints=profile.constraints,
+    )
 
 
 def build_plan_from_profile(profile: RequestProfile) -> TaskPlan:
@@ -110,6 +127,7 @@ def build_plan_from_profile(profile: RequestProfile) -> TaskPlan:
         assert_plan_capabilities(plan)
         return plan
 
+    finance_scope = _finance_planning_scope(profile)
     plan = TaskPlan(
         plan_id=plan_id,
         query=query,
@@ -119,6 +137,11 @@ def build_plan_from_profile(profile: RequestProfile) -> TaskPlan:
                 objective=query,
                 agent_id="finance_agent",
                 required_capabilities=["financial_query"],
+                input_data={
+                    "domain_planning_scope": finance_scope.model_dump(
+                        mode="json"
+                    )
+                },
             )
         ],
     )

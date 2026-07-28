@@ -11,6 +11,10 @@ from agents.finance_agent.planner.common import (
     repair_plan,
 )
 from agents.finance_agent.planner.validate import validate_and_normalize_tasks
+from agents.finance_agent.planner.scope import (
+    domain_scope_from_state,
+    scope_prompt,
+)
 
 
 async def repair_plan_node(
@@ -23,6 +27,17 @@ async def repair_plan_node(
     issues = list(state.get("planner_validation_issues") or [])
     conversation_summary = str(state.get("conversation_summary") or "")
     rewritten_query = str(state.get("rewritten_query") or "")
+    try:
+        domain_scope = domain_scope_from_state(state)
+    except (TypeError, ValueError):
+        return {
+            "sub_tasks": [],
+            "planner_raw_tasks": raw_tasks,
+            "planner_needs_repair": False,
+            "planner_repair_attempted": True,
+            "planner_error_reason": "scope_invalid",
+            "steps": ["repair_plan:scope_invalid"],
+        }
 
     try:
         repaired = await repair_plan(
@@ -32,8 +47,16 @@ async def repair_plan_node(
             config,
             conversation_summary=conversation_summary,
             rewritten_query=rewritten_query,
+            domain_scope_prompt=scope_prompt(domain_scope),
         )
-        validation = validate_and_normalize_tasks(repaired.tasks)
+        validation = validate_and_normalize_tasks(
+            repaired.tasks,
+            max_subtasks=(
+                domain_scope.max_subtasks
+                if domain_scope is not None
+                else None
+            ),
+        )
     except Exception:
         logger.exception("planner repair invoke failed")
         return {

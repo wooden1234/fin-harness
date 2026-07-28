@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -17,7 +18,12 @@ from agents.orchestrator.contracts import (
     Evidence,
     MarketQueryPlan,
 )
-from agents.runtime_context import AgentRuntimeContext
+from agents.runtime_context import (
+    AgentRuntimeContext,
+    RunHardDeadlineExceeded,
+    RunSoftDeadlineExceeded,
+)
+from app.core.config import settings
 from harness.context import build_run_context
 from skills.loader import load_skill
 from tools import execute_tool, load_all_tools, validate_tool_ids
@@ -265,12 +271,53 @@ async def run_iwencai_source_tool(
                     "call_type": str(task_input.get("call_type") or "normal"),
                 }
             )
-        tool_result = await execute_tool(
-            tool_id,
-            _run_context(runtime, agent_id=agent_id),
-            arguments=arguments,
-            allowed_tool_ids={tool_id},
-        )
+        context = runtime.context if runtime is not None else None
+        configured_timeout = float(settings.AGENT_V2_TOOL_SKILL_TIMEOUT_SEC)
+        if context is not None and context.unit_timeouts:
+            timeout_seconds, timeout_limit = context.execution_timeout_for(
+                "tool_skill",
+                default_seconds=configured_timeout,
+            )
+        else:
+            timeout_seconds, timeout_limit = 0.0, "disabled"
+        if timeout_limit == "disabled":
+            tool_result = await execute_tool(
+                tool_id,
+                _run_context(runtime, agent_id=agent_id),
+                arguments=arguments,
+                allowed_tool_ids={tool_id},
+            )
+        elif timeout_seconds <= 0:
+            if timeout_limit == "hard":
+                raise RunHardDeadlineExceeded("run_hard_deadline_exceeded")
+            if timeout_limit == "soft":
+                raise RunSoftDeadlineExceeded("run_soft_deadline_exceeded")
+            raise TimeoutError("tool_skill_timeout")
+        else:
+            try:
+                async with asyncio.timeout(timeout_seconds):
+                    tool_result = await execute_tool(
+                        tool_id,
+                        _run_context(runtime, agent_id=agent_id),
+                        arguments=arguments,
+                        allowed_tool_ids={tool_id},
+                    )
+            except TimeoutError as exc:
+                if timeout_limit == "hard":
+                    raise RunHardDeadlineExceeded(
+                        "run_hard_deadline_exceeded"
+                    ) from exc
+                if timeout_limit == "soft":
+                    raise RunSoftDeadlineExceeded(
+                        "run_soft_deadline_exceeded"
+                    ) from exc
+                return AgentResult(
+                    task_id=task_id,
+                    agent_id=agent_id,
+                    status="failed",
+                    error_code="tool_skill_timeout",
+                    gaps=[f"Tool/Skill 未在 {timeout_seconds:.1f} 秒内完成"],
+                )
     except (TypeError, ValueError, KeyError) as exc:
         return AgentResult(
             task_id=task_id,

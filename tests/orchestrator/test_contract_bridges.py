@@ -11,6 +11,7 @@ from agents.orchestrator.contracts import (
     AgentResult,
     CandidateSet,
     DocumentHitSet,
+    DomainPlanningScope,
     Evidence,
     MarketFilter,
     MarketQueryPlan,
@@ -177,6 +178,50 @@ async def test_invoke_agent_passes_complete_dependency_state(monkeypatch) -> Non
     assert forwarded.structured_data["dataset_id"] == "candidate-1"
     assert forwarded.evidence[0].evidence_id == "e-1"
     assert captured["state"]["task_input"] == {"top_k": 5}
+
+
+@pytest.mark.asyncio
+async def test_invoke_finance_agent_preserves_domain_scope(monkeypatch) -> None:
+    captured: dict = {}
+
+    class FakeFinanceAgent:
+        async def ainvoke(self, state, config=None):
+            del config
+            captured.update(state)
+            return {"summary": "ok"}
+
+    import importlib
+
+    finance_module = importlib.import_module("agents.finance_agent")
+    monkeypatch.setattr(
+        finance_module,
+        "finance_agent",
+        FakeFinanceAgent(),
+        raising=False,
+    )
+    scope = DomainPlanningScope(
+        parent_task_id="finance",
+        parent_logical_task_id="finance",
+        allowed_capabilities=["financial_query"],
+        allowed_intents=["structured_metric"],
+    )
+
+    await invoke_agent(
+        TaskSpec(
+            task_id="finance",
+            objective="查询营收",
+            agent_id="finance_agent",
+            input_data={
+                "domain_planning_scope": scope.model_dump(mode="json"),
+            },
+        ),
+        dependency_results=[],
+    )
+
+    assert captured["domain_planning_scope"]["parent_task_id"] == "finance"
+    assert captured["task_input"]["domain_planning_scope"] == captured[
+        "domain_planning_scope"
+    ]
 
 
 def test_finance_worker_projection_emits_unified_agent_result() -> None:

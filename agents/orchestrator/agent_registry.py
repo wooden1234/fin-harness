@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from langchain_core.messages import HumanMessage
@@ -13,7 +13,7 @@ from agents.orchestrator.adapters import (
     agent_result_from_task_result,
     evidence_from_citation,
 )
-from agents.orchestrator.contracts import AgentResult, TaskSpec
+from agents.orchestrator.contracts import AgentResult, EvidencePolicy, TaskSpec
 from agents.runtime_context import AgentRuntimeContext
 
 
@@ -25,6 +25,7 @@ class AgentSpec:
     description: str
     capabilities: tuple[str, ...]
     kind: str = "agent"
+    evidence_policy: EvidencePolicy = field(default_factory=EvidencePolicy)
 
 
 AGENT_SPECS: tuple[AgentSpec, ...] = (
@@ -37,6 +38,11 @@ AGENT_SPECS: tuple[AgentSpec, ...] = (
         agent_id="finance_agent",
         description="处理金融知识、财务数据库和 RAG 分析",
         capabilities=("faq", "pdf", "financial_query"),
+        evidence_policy=EvidencePolicy(
+            required=True,
+            min_count=1,
+            require_provenance=True,
+        ),
     ),
     AgentSpec(
         agent_id="market_acquisition_workflow",
@@ -48,6 +54,12 @@ AGENT_SPECS: tuple[AgentSpec, ...] = (
             "iwencai.fund.screen",
         ),
         kind="workflow",
+        evidence_policy=EvidencePolicy(
+            required=True,
+            min_count=1,
+            require_provenance=True,
+            require_structured_data=True,
+        ),
     ),
     AgentSpec(
         agent_id="research_retrieval_workflow",
@@ -58,23 +70,45 @@ AGENT_SPECS: tuple[AgentSpec, ...] = (
             "iwencai.rating.query",
         ),
         kind="workflow",
+        evidence_policy=EvidencePolicy(
+            required=True,
+            min_count=1,
+            require_provenance=True,
+        ),
     ),
     AgentSpec(
         agent_id="stock_screening_agent",
         description="理解复杂自然语言选股条件并调用受治理选股工具",
         capabilities=("iwencai.screen",),
+        evidence_policy=EvidencePolicy(
+            required=True,
+            min_count=1,
+            require_provenance=True,
+            require_structured_data=True,
+        ),
     ),
     AgentSpec(
         agent_id="market.compute",
         description="对上游 CandidateSet 执行确定性过滤、排序和截取",
         capabilities=("market.compute",),
         kind="deterministic",
+        evidence_policy=EvidencePolicy(
+            required=True,
+            min_count=1,
+            require_provenance=True,
+            require_structured_data=True,
+        ),
     ),
     AgentSpec(
         agent_id="research_workflow",
         description="围绕一个问题完成多源采集、Deep Agent 分析和质量收敛",
         capabilities=("deep.research",),
         kind="workflow",
+        evidence_policy=EvidencePolicy(
+            required=True,
+            min_count=2,
+            require_provenance=True,
+        ),
     ),
 )
 
@@ -112,7 +146,17 @@ async def invoke_agent(
         "messages": [HumanMessage(content=query)],
         "dependency_results": _dependency_payload(dependency_results),
         "task_input": dict(task.input_data),
+        "task_identity": {
+            "task_id": task.task_id,
+            "logical_task_id": task.logical_task_id or task.task_id,
+            "attempt_id": task.attempt_id,
+            "attempt_number": task.attempt_number,
+            "idempotency_key": task.idempotency_key,
+        },
     }
+    planning_scope = task.input_data.get("domain_planning_scope")
+    if isinstance(planning_scope, dict):
+        invocation_state["domain_planning_scope"] = dict(planning_scope)
 
     if task.agent_id == "market_acquisition_workflow":
         from agents.market_acquisition_workflow import (

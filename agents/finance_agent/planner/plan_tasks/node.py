@@ -14,6 +14,10 @@ from agents.finance_agent.planner.common import (
     logger,
     plan_with_retry,
 )
+from agents.finance_agent.planner.scope import (
+    domain_scope_from_state,
+    scope_prompt,
+)
 
 
 async def plan_tasks_node(
@@ -36,6 +40,19 @@ async def plan_tasks_node(
     rewritten_query = str(state.get("rewritten_query") or "").strip()
     rewrite_status = str(state.get("rewrite_status") or "").strip()
     conversation_summary = str(state.get("conversation_summary") or "")
+    try:
+        domain_scope = domain_scope_from_state(state)
+    except (TypeError, ValueError):
+        logger.warning("planner rejected invalid domain planning scope")
+        return {
+            **empty_plan(step="plan_tasks", reason="scope_invalid"),
+            "planner_query": original_query,
+            "planner_raw_tasks": [],
+            "planner_validation_issues": ["domain_planning_scope_invalid"],
+            "planner_needs_repair": False,
+            "planner_repair_attempted": False,
+            "planner_error_reason": "scope_invalid",
+        }
 
     # 改写节点明确判定上下文不足时，不再让 Planner 对缺失字段猜测。
     # 空计划会沿 dispatch_workers 的现有澄清兜底链返回用户可读追问。
@@ -54,6 +71,7 @@ async def plan_tasks_node(
     prompt_parts = [
         f"此前对话摘要：\n{conversation_summary or '无'}",
         f"当前用户问题（原文）：\n{original_query}",
+        scope_prompt(domain_scope),
     ]
     if rewritten_query and rewritten_query != original_query:
         prompt_parts.append(f"改写后的完整问题：\n{rewritten_query}")

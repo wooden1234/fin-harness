@@ -1,4 +1,4 @@
-"""独立金融研究工作流：采集证据、DeepAgent 研究、质量收敛。"""
+"""独立金融研究工作流：采集证据、内部 DeepAgent 研究、质量收敛。"""
 
 from __future__ import annotations
 
@@ -16,7 +16,12 @@ from agents.research_workflow.contracts import ResearchPlan
 from agents.research_workflow.planner import plan_research_adaptive
 from agents.research_workflow.spec import RESEARCH_WORKFLOW_SPEC
 from agents.research_workflow.state import ResearchWorkflowState
-from agents.runtime_context import AgentRuntimeContext
+from agents.runtime_context import (
+    AgentRuntimeContext,
+    RunHardDeadlineExceeded,
+    RunSoftDeadlineExceeded,
+)
+from app.core.config import settings
 
 
 async def plan_research(
@@ -47,27 +52,77 @@ async def collect_research_sources(
     if not tasks:
         return {"source_tasks": [], "source_results": []}
 
-    from agents.orchestrator.agent_registry import invoke_agent
+    from agents.orchestrator.agent_registry import get_agent_spec, invoke_agent
 
-    calls = [
-        invoke_agent(
-            task,
-            dependency_results=[],
-            config=config,
-            runtime=runtime,
+    semaphore = asyncio.Semaphore(
+        max(1, int(settings.AGENT_V2_MAX_CONCURRENCY))
+    )
+
+    async def _invoke_source(task):
+        context = runtime.context if runtime is not None else None
+        agent_kind = get_agent_spec(task.agent_id).kind
+        configured_timeout = {
+            "deterministic": float(settings.AGENT_V2_DETERMINISTIC_TIMEOUT_SEC),
+            "workflow": float(settings.AGENT_V2_WORKFLOW_TIMEOUT_SEC),
+        }.get(
+            agent_kind,
+            float(settings.AGENT_V2_AGENT_TIMEOUT_SEC),
         )
-        for task in tasks
-    ]
+        if context is not None:
+            timeout_seconds, timeout_limit = context.execution_timeout_for(
+                agent_kind,
+                default_seconds=configured_timeout,
+            )
+        else:
+            timeout_seconds, timeout_limit = configured_timeout, "unit"
+        if timeout_seconds <= 0:
+            if timeout_limit == "hard":
+                raise RunHardDeadlineExceeded("run_hard_deadline_exceeded")
+            if timeout_limit == "soft":
+                raise RunSoftDeadlineExceeded("run_soft_deadline_exceeded")
+            raise TimeoutError("task_timeout")
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                async with semaphore:
+                    return await invoke_agent(
+                        task,
+                        dependency_results=[],
+                        config=config,
+                        runtime=runtime,
+                    )
+        except TimeoutError as exc:
+            if timeout_limit == "hard":
+                raise RunHardDeadlineExceeded(
+                    "run_hard_deadline_exceeded"
+                ) from exc
+            if timeout_limit == "soft":
+                raise RunSoftDeadlineExceeded(
+                    "run_soft_deadline_exceeded"
+                ) from exc
+            raise
+
+    calls = [_invoke_source(task) for task in tasks]
     outputs = await asyncio.gather(*calls, return_exceptions=True)
     results: list[AgentResult] = []
     for task, output in zip(tasks, outputs, strict=True):
+        if isinstance(output, asyncio.CancelledError):
+            raise output
+        if isinstance(output, RunHardDeadlineExceeded):
+            raise output
+        if isinstance(output, RunSoftDeadlineExceeded):
+            raise output
         if isinstance(output, BaseException):
+            error_code = (
+                "task_timeout"
+                if isinstance(output, TimeoutError)
+                else type(output).__name__
+            )
             results.append(
                 AgentResult(
                     task_id=task.task_id,
                     agent_id=task.agent_id,
                     status="failed",
-                    error_code=type(output).__name__,
+                    error_code=error_code,
                     gaps=[str(output)],
                 )
             )
@@ -82,7 +137,7 @@ async def run_deep_research(
     runtime: Runtime[AgentRuntimeContext] | None = None,
 ) -> dict[str, Any]:
     """把来源任务和外部依赖统一交给受限 DeepAgent 分析。"""
-    from agents.deep_research_agent import run_deep_research_agent
+    from agents.research_workflow.deep_agent import run_deep_research_agent
 
     plan = state.get("research_plan")
     dependencies = [
@@ -192,7 +247,7 @@ async def finalize_research(
 
 
 def build_research_workflow() -> StateGraph:
-    """构建独立研究子图，DeepAgent 只是其中的研究节点。"""
+    """构建独立研究子图，DeepAgent 是其中的内部研究节点。"""
     builder = StateGraph(
         ResearchWorkflowState,
         context_schema=AgentRuntimeContext,

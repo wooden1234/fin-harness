@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -16,7 +17,12 @@ from langgraph.runtime import Runtime
 from langgraph.prebuilt import ToolNode
 
 from agents.context import conversation_messages
-from agents.runtime_context import AgentRuntimeContext
+from agents.runtime_context import (
+    AgentRuntimeContext,
+    RunHardDeadlineExceeded,
+    RunSoftDeadlineExceeded,
+)
+from app.core.config import settings
 from app.core.logger import get_logger
 from harness.context import RunContext, build_run_context
 from tools import execute_tool, list_bindable_tools, load_all_tools
@@ -96,17 +102,58 @@ async def run_with_tools(
         tool_id = name
         try:
             tool_id = get_tool_id_by_name(name)
-            result = await execute_tool(
-                tool_id,
-                run_context,
-                arguments=args,
-                allowed_tool_ids=allowed_tool_ids,
-            )
+            context = runtime.context if runtime is not None else None
+            configured_timeout = float(settings.AGENT_V2_TOOL_SKILL_TIMEOUT_SEC)
+            if context is not None and context.unit_timeouts:
+                timeout_seconds, timeout_limit = context.execution_timeout_for(
+                    "tool_skill",
+                    default_seconds=configured_timeout,
+                )
+            else:
+                timeout_seconds, timeout_limit = 0.0, "disabled"
+            if timeout_limit == "disabled":
+                result = await execute_tool(
+                    tool_id,
+                    run_context,
+                    arguments=args,
+                    allowed_tool_ids=allowed_tool_ids,
+                )
+            elif timeout_seconds <= 0:
+                if timeout_limit == "hard":
+                    raise RunHardDeadlineExceeded("run_hard_deadline_exceeded")
+                if timeout_limit == "soft":
+                    raise RunSoftDeadlineExceeded("run_soft_deadline_exceeded")
+                raise TimeoutError("tool_skill_timeout")
+            else:
+                try:
+                    async with asyncio.timeout(timeout_seconds):
+                        result = await execute_tool(
+                            tool_id,
+                            run_context,
+                            arguments=args,
+                            allowed_tool_ids=allowed_tool_ids,
+                        )
+                except TimeoutError as exc:
+                    if timeout_limit == "hard":
+                        raise RunHardDeadlineExceeded(
+                            "run_hard_deadline_exceeded"
+                        ) from exc
+                    if timeout_limit == "soft":
+                        raise RunSoftDeadlineExceeded(
+                            "run_soft_deadline_exceeded"
+                        ) from exc
+                    raise
             payload: dict[str, Any] = (
                 {"ok": True, "data": result.data}
                 if result.ok
                 else {"ok": False, "error": result.error}
             )
+        except (RunHardDeadlineExceeded, RunSoftDeadlineExceeded):
+            raise
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError:
+            payload = {"ok": False, "error": "tool_skill_timeout"}
         except Exception as exc:  # noqa: BLE001
             logger.exception("{} tool failed name={}", agent_name, name)
             payload = {"ok": False, "error": str(exc)}
@@ -203,6 +250,12 @@ async def run_with_tools(
             if stream_final
             else await _invoke_final_answer()
         )
+    except (
+        asyncio.CancelledError,
+        RunHardDeadlineExceeded,
+        RunSoftDeadlineExceeded,
+    ):
+        raise
     except Exception:
         logger.exception("{} llm invoke failed", agent_name)
         return _response(busy_answer)

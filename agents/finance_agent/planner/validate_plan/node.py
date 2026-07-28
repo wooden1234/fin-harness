@@ -8,6 +8,7 @@ from langgraph.types import Overwrite
 from agents.states import FinAgentState
 from agents.finance_agent.planner.common import assign_task_ids, logger
 from agents.finance_agent.planner.validate import validate_and_normalize_tasks
+from agents.finance_agent.planner.scope import domain_scope_from_state
 
 
 async def validate_plan_node(
@@ -36,7 +37,28 @@ async def validate_plan_node(
             "steps": ["validate_plan:needs_repair"],
         }
 
-    validation = validate_and_normalize_tasks(raw_tasks)
+    try:
+        domain_scope = domain_scope_from_state(state)
+    except (TypeError, ValueError):
+        return {
+            "sub_tasks": [],
+            "task_results": Overwrite([]),
+            "planner_validation_issues": [
+                *preset_issues,
+                "domain_planning_scope_invalid",
+            ],
+            "planner_needs_repair": False,
+            "planner_error_reason": "scope_invalid",
+            "steps": ["validate_plan:scope_invalid"],
+        }
+    validation = validate_and_normalize_tasks(
+        raw_tasks,
+        max_subtasks=(
+            domain_scope.max_subtasks
+            if domain_scope is not None
+            else None
+        ),
+    )
     issues = preset_issues + validation.issues
     if validation.needs_repair:
         logger.warning(

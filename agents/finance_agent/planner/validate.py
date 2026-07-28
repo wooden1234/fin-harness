@@ -17,6 +17,12 @@ ALLOWED_INTENTS = frozenset(
     }
 )
 ALLOWED_TASK_TYPES = frozenset({"faq", "pdf", "financial_query", "web_search"})
+_LEGACY_TYPE_TO_INTENT = {
+    "faq": "concept_explain",
+    "pdf": "document_qa",
+    "financial_query": "structured_metric",
+    "web_search": "market_event",
+}
 MAX_SUBTASKS = 4
 
 _WS_RE = re.compile(r"\s+")
@@ -51,6 +57,15 @@ def _resolve_intent(task: SubTask, issues: list[str]) -> str | None:
     intent = str(getattr(task, "intent", "") or "").strip()
     if intent in ALLOWED_INTENTS:
         return intent
+    legacy_type = str(getattr(task, "type", "") or "").strip()
+    explicit_fields = set(getattr(task, "model_fields_set", set()))
+    if (
+        not intent
+        and "type" in explicit_fields
+        and legacy_type in _LEGACY_TYPE_TO_INTENT
+    ):
+        issues.append(f"legacy_type_mapped:{legacy_type}")
+        return _LEGACY_TYPE_TO_INTENT[legacy_type]
     if intent:
         issues.append(f"unknown_intent:{intent}")
     else:
@@ -58,7 +73,11 @@ def _resolve_intent(task: SubTask, issues: list[str]) -> str | None:
     return None
 
 
-def validate_and_normalize_tasks(tasks: list[SubTask] | None) -> ValidationResult:
+def validate_and_normalize_tasks(
+    tasks: list[SubTask] | None,
+    *,
+    max_subtasks: int | None = None,
+) -> ValidationResult:
     """丢弃空问句 / 非法意图，合并同意图近义，截断超拆。
 
     ``needs_repair``：出现无法仅靠确定性规则放心留下的脏数据
@@ -114,8 +133,9 @@ def validate_and_normalize_tasks(tasks: list[SubTask] | None) -> ValidationResul
                 reason=task.reason or kept.reason,
             )
 
-    if len(merged) > MAX_SUBTASKS:
-        issues.append(f"exceeds_max:{len(merged)}>{MAX_SUBTASKS}")
-        merged = merged[:MAX_SUBTASKS]
+    maximum = max(1, int(max_subtasks or MAX_SUBTASKS))
+    if len(merged) > maximum:
+        issues.append(f"exceeds_max:{len(merged)}>{maximum}")
+        merged = merged[:maximum]
 
     return ValidationResult(tasks=merged, issues=issues, needs_repair=needs_repair)

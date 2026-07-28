@@ -82,6 +82,7 @@ def build_finance_agent_subgraph() -> StateGraph:
         "financial_query_agent",
         route_after_retrieval_worker,
         {
+            "pdf_agent": "pdf_agent",
             "web_search_agent": "web_search_agent",
             "join": "join",
         },

@@ -15,7 +15,17 @@ from compliance.policies import ComplianceDecision
 
 logger = get_logger(service="final_answer")
 
-KNOWLEDGE_SOURCE_TYPES = frozenset({"faq", "pdf", "web", "iwencai"})
+KNOWLEDGE_SOURCE_TYPES = frozenset(
+    {
+        "faq",
+        "pdf",
+        "web",
+        "iwencai",
+        "financial_db",
+        "financial_fact",
+        "financial_query",
+    }
+)
 COMPLIANCE_BLOCKED_ANSWER = (
     "抱歉，我不能提供保证收益、确定涨跌或直接交易指令。"
     "我可以继续为您整理相关公开信息、数据依据和风险因素。"
@@ -31,21 +41,83 @@ ROUTE_CLARIFICATION_ANSWER = (
 
 
 def _current_sub_task_ids(state: FinAgentState) -> set[str]:
-    return {t.id for t in (state.get("sub_tasks") or []) if getattr(t, "id", None)}
+    task_ids = {
+        t.id for t in (state.get("sub_tasks") or []) if getattr(t, "id", None)
+    }
+    task_plan = state.get("task_plan")
+    if task_plan is not None:
+        task_ids.update(
+            task.task_id
+            for task in task_plan.tasks
+            if getattr(task, "task_id", None)
+        )
+    task_ids.update(
+        result.task_id
+        for result in (state.get("agent_results") or [])
+        if getattr(result, "task_id", None)
+    )
+    task_ids.update(
+        evidence.task_id
+        for evidence in (state.get("evidence") or [])
+        if getattr(evidence, "task_id", None)
+    )
+    return task_ids
+
+
+def _has_citation_provenance(citation: dict) -> bool:
+    """确认 Citation 至少包含可展示的来源信息。"""
+    source_type = str(citation.get("source_type") or "")
+    if not source_type:
+        return False
+    if source_type in KNOWLEDGE_SOURCE_TYPES or source_type.startswith("iwencai."):
+        return True
+    return any(
+        citation.get(key)
+        for key in (
+            "source",
+            "title",
+            "url",
+            "doc_id",
+            "document_id",
+            "table_id",
+            "source_cell_id",
+        )
+    )
 
 
 def _filter_current_turn_citations(
     state: FinAgentState,
     citations: list[dict],
 ) -> list[dict]:
-    """保留本轮 worker 产生的可展示引用（faq/pdf/web）。"""
+    """按统一 Evidence 契约保留本轮可展示引用，兼容 V1 和 V2。"""
     current_ids = _current_sub_task_ids(state)
+    constrained_answer = state.get("constrained_answer")
+    used_evidence_ids: set[str] | None = None
+    if constrained_answer is not None:
+        statements = (
+            constrained_answer.statements
+            if hasattr(constrained_answer, "statements")
+            else constrained_answer.get("statements", [])
+        )
+        used_evidence_ids = {
+            str(evidence_id)
+            for statement in statements
+            for evidence_id in (
+                statement.evidence_ids
+                if hasattr(statement, "evidence_ids")
+                else statement.get("evidence_ids", [])
+            )
+        }
     filtered: list[dict] = []
     for citation in citations:
-        source_type = str(citation.get("source_type") or "")
-        if source_type not in KNOWLEDGE_SOURCE_TYPES:
+        if not _has_citation_provenance(citation):
             continue
         if current_ids and citation.get("sub_task_id") not in current_ids:
+            continue
+        if (
+            used_evidence_ids is not None
+            and str(citation.get("evidence_id") or "") not in used_evidence_ids
+        ):
             continue
         filtered.append(citation)
     return filtered

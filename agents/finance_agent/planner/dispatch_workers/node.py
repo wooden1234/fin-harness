@@ -39,6 +39,7 @@ def _task_chain(task: SubTask) -> list[str]:
 def route_after_dispatch_workers(state: FinAgentState) -> list[Send]:
     """根据子任务的首选证据工具派发到 worker，并随任务下发降级链。"""
     sub_tasks: list[SubTask] = list(state.get("sub_tasks") or [])
+    scope_blocked = set(state.get("scope_blocked_task_ids") or [])
     if not sub_tasks:
         return [
             Send(
@@ -59,6 +60,25 @@ def route_after_dispatch_workers(state: FinAgentState) -> list[Send]:
 
     sends: list[Send] = []
     for task in sub_tasks:
+        if task.id in scope_blocked:
+            sends.append(
+                Send(
+                    "join",
+                    {
+                        "task_results": [
+                            {
+                                "sub_task_id": task.id or "",
+                                "question": task.question,
+                                "type": "scope_blocked",
+                                "coverage": "uncovered",
+                                "context": "授权范围内没有可用于该子任务的证据渠道。",
+                                "error_code": "domain_capability_unavailable",
+                            }
+                        ]
+                    },
+                )
+            )
+            continue
         worker = TASK_TYPE_TO_WORKER.get(task.type)
         if worker is None or task.type not in ALLOWED_TASK_TYPES:
             logger.warning("planner unknown task type={} question={}", task.type, task.question)

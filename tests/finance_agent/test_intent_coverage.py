@@ -13,8 +13,10 @@ from app.agents.finance_agent.planner.dispatch_workers import (
 from app.agents.finance_agent.planner.eval_cases import load_eval_cases, score_case
 from app.agents.finance_agent.planner.resolve_evidence import (
     INTENT_TO_EVIDENCE_CHAIN,
+    resolve_evidence_node,
     resolve_task_evidence,
 )
+from agents.orchestrator.contracts import DomainPlanningScope
 from app.agents.finance_agent.planner.prompts import (
     PLANNER_REPAIR_SYSTEM_PROMPT,
     PLANNER_SYSTEM_PROMPT,
@@ -39,6 +41,70 @@ def test_resolve_task_evidence_fills_type_and_chain():
     resolved = resolve_task_evidence(task)
     assert resolved.type == "faq"
     assert resolved.evidence_chain == ["faq", "web_search"]
+
+
+@pytest.mark.asyncio
+async def test_domain_scope_intersects_structured_metric_evidence_chain():
+    scope = DomainPlanningScope(
+        parent_task_id="finance",
+        parent_logical_task_id="finance",
+        allowed_capabilities=["faq", "pdf", "financial_query"],
+        allowed_intents=[
+            "concept_explain",
+            "product_policy",
+            "document_qa",
+            "structured_metric",
+        ],
+    )
+    update = await resolve_evidence_node(
+        {
+            "domain_planning_scope": scope.model_dump(mode="json"),
+            "sub_tasks": [
+                SubTask(
+                    id="t1",
+                    question="宁德时代 2024 年营业收入",
+                    intent="structured_metric",
+                )
+            ],
+        }
+    )
+
+    assert update["sub_tasks"][0].evidence_chain == ["financial_query", "pdf"]
+    assert update["scope_blocked_task_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_domain_scope_blocks_ungranted_market_event():
+    scope = DomainPlanningScope(
+        parent_task_id="finance",
+        parent_logical_task_id="finance",
+        allowed_capabilities=["faq", "pdf", "financial_query"],
+        allowed_intents=["structured_metric"],
+    )
+    update = await resolve_evidence_node(
+        {
+            "task_input": {
+                "domain_planning_scope": scope.model_dump(mode="json"),
+            },
+            "sub_tasks": [
+                SubTask(
+                    id="w1",
+                    question="最近证监会程序化交易新规",
+                    intent="market_event",
+                )
+            ],
+        }
+    )
+    sends = route_after_dispatch_workers(update)
+
+    assert update["sub_tasks"][0].evidence_chain == []
+    assert update["scope_blocked_task_ids"] == ["w1"]
+    assert sends[0].node == "join"
+    assert sends[0].arg["task_results"][0]["coverage"] == "uncovered"
+    assert (
+        sends[0].arg["task_results"][0]["error_code"]
+        == "domain_capability_unavailable"
+    )
 
 
 def test_validate_accepts_intent_not_type():

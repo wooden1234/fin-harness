@@ -3,31 +3,294 @@
 from agents.orchestrator.analyzer import heuristic_profile
 from agents.orchestrator.graph import (
     build_plan,
+    build_orchestrator_graph,
     detect_evidence_conflicts,
     detect_result_gaps,
     dispatch_wave,
+    execute_task,
+    evaluate_results,
+    _effective_results,
     quality_gate,
     replan,
+    route_after_query_rewrite,
     synthesize,
-    build_orchestrator_graph,
 )
+from agents.orchestrator.error_policy import classify_error
 from agents.orchestrator.contracts import (
     AgentResult,
     CandidateSet,
+    DomainPlanningScope,
     Evidence,
     QualityReport,
     TaskPlan,
     TaskSpec,
 )
 from agents.orchestrator.planner import build_plan_from_profile
+from agents.orchestrator.task_identity import validate_task_plan
 
 
 def test_v2_graph_compiles_with_independent_nodes():
     graph = build_orchestrator_graph().compile().get_graph()
+    edges = {(edge.source, edge.target) for edge in graph.edges}
+
+    assert "init_turn" in graph.nodes
+    assert "query_rewrite" in graph.nodes
     assert "analyze_request" in graph.nodes
     assert "execute_task" in graph.nodes
     assert "evaluate_results" in graph.nodes
     assert "final_answer" in graph.nodes
+    assert ("__start__", "init_turn") in edges
+    assert ("init_turn", "guardrails") in edges
+    assert ("context_compressor", "query_rewrite") in edges
+    assert ("query_rewrite", "analyze_request") in edges
+
+
+def test_build_plan_assigns_task_identity_fields():
+    profile = heuristic_profile("查询某公司的财务数据")
+    import asyncio
+
+    update = asyncio.run(build_plan({"request_profile": profile}))
+    task = update["task_plan"].tasks[0]
+
+    assert task.logical_task_id == task.task_id
+    assert task.attempt_id
+    assert task.attempt_number == 1
+    assert task.idempotency_key.startswith("v2:")
+
+
+def test_finance_plan_carries_root_domain_scope():
+    profile = heuristic_profile("查询某公司的财务数据")
+    plan = build_plan_from_profile(profile)
+    task = plan.tasks[0]
+    scope = DomainPlanningScope.model_validate(
+        task.input_data["domain_planning_scope"]
+    )
+
+    assert scope.parent_task_id == task.task_id
+    assert scope.allowed_capabilities == ["faq", "pdf", "financial_query"]
+    assert "web_search" not in scope.allowed_capabilities
+    assert "market_event" not in scope.allowed_intents
+    assert scope.evidence_policy.required is True
+
+
+def test_v2_plan_validation_rejects_finance_scope_expansion():
+    expanded_scope = DomainPlanningScope(
+        parent_task_id="finance",
+        parent_logical_task_id="finance",
+        allowed_capabilities=["financial_query", "web_search"],
+        allowed_intents=["structured_metric", "market_event"],
+    )
+    plan = TaskPlan(
+        plan_id="p-scope-expansion",
+        query="查询财务",
+        tasks=[
+            TaskSpec(
+                task_id="finance",
+                objective="查询财务",
+                agent_id="finance_agent",
+                input_data={
+                    "domain_planning_scope": expanded_scope.model_dump(
+                        mode="json"
+                    )
+                },
+            )
+        ],
+    )
+
+    import pytest
+
+    with pytest.raises(ValueError, match="domain_scope_capability_mismatch"):
+        validate_task_plan(plan)
+
+
+def test_v2_plan_validation_adds_safe_scope_to_finance_replan_task():
+    plan = validate_task_plan(
+        TaskPlan(
+            plan_id="p-replan-scope",
+            query="补充财务证据",
+            tasks=[
+                TaskSpec(
+                    task_id="finance-replan",
+                    objective="补充财务证据",
+                    agent_id="finance_agent",
+                )
+            ],
+        )
+    )
+    scope = DomainPlanningScope.model_validate(
+        plan.tasks[0].input_data["domain_planning_scope"]
+    )
+
+    assert scope.allowed_capabilities == ["faq", "pdf", "financial_query"]
+    assert "web_search" not in scope.allowed_capabilities
+    assert "market_event" not in scope.allowed_intents
+
+
+def test_replan_revalidates_suggested_task_capabilities():
+    plan = TaskPlan(
+        plan_id="p1",
+        query="查询财务",
+        max_replans=1,
+        tasks=[
+            TaskSpec(
+                task_id="research",
+                objective="查询财务",
+                agent_id="finance_agent",
+            )
+        ],
+    )
+    invalid_suggestion = TaskSpec(
+        task_id="unsupported",
+        objective="执行未注册能力",
+        agent_id="finance_agent",
+        required_capabilities=["capability.that.does.not.exist"],
+    )
+
+    import asyncio
+
+    update = asyncio.run(
+        replan(
+            {
+                "task_plan": plan,
+                "replan_count": 0,
+                "quality_report": QualityReport(
+                    passed=False,
+                    suggested_tasks=[invalid_suggestion],
+                ),
+                "agent_results": [],
+            }
+        )
+    )
+
+    assert update["next_action"] == "synthesize"
+    assert update["execution_status"] == "replan_validation_failed"
+    assert "task_plan" not in update
+
+
+def test_v2_query_rewrite_routes_uncertain_followup_to_clarify():
+    assert route_after_query_rewrite({"rewrite_status": "success"}) == "analyze_request"
+    assert route_after_query_rewrite({"rewrite_status": "passthrough"}) == "analyze_request"
+    assert route_after_query_rewrite({"rewrite_status": "uncertain"}) == "clarify"
+    assert route_after_query_rewrite({"rewrite_status": "fallback"}) == "clarify"
+
+
+def test_error_action_is_recorded_on_task_failure(monkeypatch):
+    import asyncio
+
+    async def fail_invoke(task, **kwargs):
+        del task, kwargs
+        raise TimeoutError("provider timeout")
+
+    monkeypatch.setattr("agents.orchestrator.graph.invoke_agent", fail_invoke)
+    update = asyncio.run(
+        execute_task(
+            {
+                "current_task": TaskSpec(
+                    task_id="research",
+                    objective="查询研报",
+                    agent_id="research_retrieval_workflow",
+                )
+            }
+        )
+    )
+
+    result = update["agent_results"][0]
+    assert result.error_action == "retry"
+    assert result.metadata["retryable"] is True
+
+
+def test_clarify_error_routes_to_clarify():
+    import asyncio
+
+    result = AgentResult(
+        task_id="market_compute",
+        agent_id="market.compute",
+        status="clarify",
+        error_code="market_query_plan_missing",
+        error_action=classify_error("market_query_plan_missing").action,
+    )
+    output = asyncio.run(evaluate_results({"agent_results": [result]}))
+
+    assert output["next_action"] == "clarify"
+
+
+def test_fallback_error_is_not_retried():
+    import asyncio
+
+    plan = TaskPlan(
+        plan_id="p-fallback",
+        query="查询研报",
+        tasks=[
+            TaskSpec(
+                task_id="research",
+                objective="查询研报",
+                agent_id="research_retrieval_workflow",
+            )
+        ],
+    )
+    output = asyncio.run(
+        replan(
+            {
+                "task_plan": plan,
+                "replan_count": 0,
+                "quality_report": QualityReport(
+                    passed=False,
+                    failed_task_ids=["research"],
+                ),
+                "agent_results": [
+                    AgentResult(
+                        task_id="research",
+                        agent_id="research_retrieval_workflow",
+                        status="failed",
+                        error_code="source_tool_failed",
+                        error_action="fallback",
+                    )
+                ],
+            }
+        )
+    )
+
+    assert output["next_action"] == "synthesize"
+    assert output["execution_status"] == "partial"
+
+
+async def test_retry_result_supersedes_original_failure(monkeypatch):
+    async def fake_invoke_agent(task, **kwargs):
+        del kwargs
+        return AgentResult(
+            task_id=task.task_id,
+            agent_id=task.agent_id,
+            status="completed",
+            answer="重试成功",
+            evidence=[Evidence(evidence_id="retry-evidence", source_type="web")],
+        )
+
+    monkeypatch.setattr("agents.orchestrator.graph.invoke_agent", fake_invoke_agent)
+    retry_task = TaskSpec(
+        task_id="research:retry:1",
+        objective="补充执行：查询研究",
+        agent_id="finance_agent",
+        metadata={"replan_of": "research"},
+    )
+    update = await execute_task({"current_task": retry_task})
+    retry_result = update["agent_results"][0]
+
+    effective = _effective_results(
+        {
+            "agent_results": [
+                AgentResult(
+                    task_id="research",
+                    agent_id="finance_agent",
+                    status="failed",
+                    error_code="timeout",
+                ),
+                retry_result,
+            ]
+        }
+    )
+
+    assert retry_result.metadata["replan_of"] == "research"
+    assert [item.task_id for item in effective] == ["research:retry:1"]
 
 
 def test_compound_stock_query_creates_independent_research_workflow():
@@ -109,6 +372,115 @@ def test_quality_gate_detects_result_gap_and_conflicting_claims():
     assert detect_evidence_conflicts(state)
 
 
+def test_quality_gate_does_not_require_evidence_for_general_agent():
+    import asyncio
+
+    output = asyncio.run(
+        quality_gate(
+            {
+                "task_plan": TaskPlan(
+                    plan_id="p-general",
+                    query="你好",
+                    tasks=[
+                        TaskSpec(
+                            task_id="general",
+                            objective="你好",
+                            agent_id="general_agent",
+                        )
+                    ],
+                ),
+                "agent_results": [
+                    AgentResult(
+                        task_id="general",
+                        agent_id="general_agent",
+                        status="completed",
+                        answer="你好！",
+                    )
+                ],
+                "evidence": [],
+            }
+        )
+    )
+
+    assert output["quality_report"].passed is True
+    assert output["quality_report"].missing_evidence == []
+
+
+def test_quality_gate_requires_finance_evidence_and_provenance():
+    import asyncio
+
+    output = asyncio.run(
+        quality_gate(
+            {
+                "task_plan": TaskPlan(
+                    plan_id="p-finance",
+                    query="查询营收",
+                    tasks=[
+                        TaskSpec(
+                            task_id="finance",
+                            objective="查询营收",
+                            agent_id="finance_agent",
+                        )
+                    ],
+                ),
+                "agent_results": [
+                    AgentResult(
+                        task_id="finance",
+                        agent_id="finance_agent",
+                        status="completed",
+                        answer="营收增长",
+                        evidence=[Evidence(evidence_id="e-1", source_type="pdf")],
+                    )
+                ],
+                "evidence": [],
+            }
+        )
+    )
+
+    assert output["quality_report"].passed is False
+    assert "finance: evidence_provenance_missing:1" in output["quality_report"].missing_evidence
+
+
+def test_quality_gate_requires_structured_market_result():
+    import asyncio
+
+    output = asyncio.run(
+        quality_gate(
+            {
+                "task_plan": TaskPlan(
+                    plan_id="p-market",
+                    query="查询行情",
+                    tasks=[
+                        TaskSpec(
+                            task_id="market",
+                            objective="查询行情",
+                            agent_id="market_acquisition_workflow",
+                        )
+                    ],
+                ),
+                "agent_results": [
+                    AgentResult(
+                        task_id="market",
+                        agent_id="market_acquisition_workflow",
+                        status="completed",
+                        evidence=[
+                            Evidence(
+                                evidence_id="e-1",
+                                source_type="iwencai.market.query",
+                                provider="iwencai",
+                            )
+                        ],
+                    )
+                ],
+                "evidence": [],
+            }
+        )
+    )
+
+    assert output["quality_report"].passed is False
+    assert "market: structured_data_missing" in output["quality_report"].missing_evidence
+
+
 def test_replan_adds_retry_task_with_budget():
     plan = TaskPlan(
         plan_id="p1",
@@ -144,7 +516,12 @@ def test_replan_adds_retry_task_with_budget():
     update = asyncio.run(replan(state))
     assert update["replan_count"] == 1
     assert update["next_action"] == "schedule"
-    assert update["task_plan"].tasks[-1].task_id == "research:retry:1"
+    retry = update["task_plan"].tasks[-1]
+    assert retry.task_id == "research:retry:1"
+    assert retry.logical_task_id == "research"
+    assert retry.attempt_number == 2
+    assert retry.attempt_id
+    assert retry.idempotency_key.startswith("v2:research:2:")
 
 
 def test_synthesize_marks_partial_results_and_unresolved_gaps():

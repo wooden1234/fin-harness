@@ -143,6 +143,7 @@ async def repair_plan(
     *,
     conversation_summary: str = "",
     rewritten_query: str = "",
+    domain_scope_prompt: str = "",
 ) -> PlannerOutput:
     payload = PlannerOutput(tasks=raw_tasks).model_dump_json()
     parts = [
@@ -152,6 +153,8 @@ async def repair_plan(
     rewritten = rewritten_query.strip()
     if rewritten and rewritten != query.strip():
         parts.append(f"改写后的完整问题：\n{rewritten}")
+    if domain_scope_prompt:
+        parts.append(domain_scope_prompt)
     parts.append(f"校验问题：{', '.join(issues)}")
     parts.append(f"待修正输出：{payload}")
     return await ainvoke_planner(

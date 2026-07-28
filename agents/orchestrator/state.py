@@ -9,7 +9,12 @@ from typing_extensions import TypedDict
 from app.shared import Citation, CoreState
 from agents.orchestrator.contracts import (
     AgentResult,
+    Claim,
+    ClaimEvidenceLink,
+    ConstrainedAnswer,
     Evidence,
+    EvidenceAssessment,
+    EvidenceConflict,
     QualityReport,
     RequestProfile,
     TaskPlan,
@@ -28,6 +33,11 @@ class OrchestratorState(CoreState):
 
     agent_results: NotRequired[Annotated[list[AgentResult], add]]
     evidence: NotRequired[Annotated[list[Evidence], add]]
+    claims: NotRequired[list[Claim]]
+    claim_evidence_links: NotRequired[list[ClaimEvidenceLink]]
+    evidence_assessments: NotRequired[list[EvidenceAssessment]]
+    evidence_conflicts: NotRequired[list[EvidenceConflict]]
+    constrained_answer: NotRequired[ConstrainedAnswer]
     citations: NotRequired[Annotated[list[Citation], add]]
     quality_report: NotRequired[QualityReport]
 

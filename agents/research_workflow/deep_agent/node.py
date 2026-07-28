@@ -1,4 +1,4 @@
-"""Deep Research Agent 的 v2 调用入口。"""
+"""Research Workflow 内部 Deep Research Agent 的 v2 调用入口。"""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.runtime import Runtime
 
-from agents.deep_research_agent.deep_runtime import run_deep_research_agent
-from agents.deep_research_agent.spec import DEEP_RESEARCH_SPEC
+from agents.research_workflow.deep_agent.runtime import run_deep_research_agent
+from agents.research_workflow.deep_agent.spec import DEEP_RESEARCH_SPEC
 from agents.orchestrator.adapters import citation_from_evidence
 from agents.orchestrator.contracts import AgentResult
 from agents.runtime_context import AgentRuntimeContext

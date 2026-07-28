@@ -15,6 +15,8 @@ from app.shared import Citation, SubTask, TaskResult
 
 class PlannerState(TypedDict):
     """Planner 写入的多意图拆分结果"""
+    # Root 传入的领域规划权限边界；运行时使用统一 DomainPlanningScope 校验。
+    domain_planning_scope: NotRequired[Any]
     planner_query: NotRequired[str]
     planner_raw_tasks: NotRequired[list[SubTask]]
     planner_validation_issues: NotRequired[list[str]]
@@ -27,6 +29,7 @@ class PlannerState(TypedDict):
     # Send 派发时随任务下发的证据降级链（如 ["faq", "web_search"]），
     # 供 worker 后条件边决定 uncovered 时的下一跳
     evidence_chain: NotRequired[list[str]]
+    scope_blocked_task_ids: NotRequired[list[str]]
 
 
 class WorkerOutputState(TypedDict):

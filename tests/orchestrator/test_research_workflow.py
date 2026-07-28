@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from agents.orchestrator.contracts import AgentResult, Evidence
 from agents.research_workflow import (
     build_research_plan,
@@ -181,7 +183,7 @@ async def test_research_workflow_returns_single_result(monkeypatch) -> None:
         fake_invoke_agent,
     )
     monkeypatch.setattr(
-        "agents.deep_research_agent.run_deep_research_agent",
+        "agents.research_workflow.deep_agent.run_deep_research_agent",
         fake_deep_research,
     )
 
@@ -203,3 +205,43 @@ async def test_research_workflow_returns_single_result(monkeypatch) -> None:
         "research:report",
     ]
     assert len(result.evidence) == 2
+
+
+async def test_research_source_collection_limits_concurrency(
+    monkeypatch,
+) -> None:
+    from agents.research_workflow.workflow import collect_research_sources
+
+    active = 0
+    max_active = 0
+
+    async def fake_invoke_agent(task, **kwargs):
+        nonlocal active, max_active
+        del kwargs
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.02)
+        active -= 1
+        return AgentResult(
+            task_id=task.task_id,
+            agent_id=task.agent_id,
+            status="completed",
+        )
+
+    monkeypatch.setattr(
+        "agents.orchestrator.agent_registry.invoke_agent",
+        fake_invoke_agent,
+    )
+    monkeypatch.setattr(
+        "agents.research_workflow.workflow.settings.AGENT_V2_MAX_CONCURRENCY",
+        2,
+    )
+    plan = build_research_plan(
+        "研究测试公司",
+        {"data_sources": ["market", "research", "finance_rag"]},
+    )
+
+    result = await collect_research_sources({"research_plan": plan})
+
+    assert len(result["source_results"]) == 4
+    assert max_active == 2

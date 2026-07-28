@@ -67,6 +67,10 @@ _COMPUTE_ACTION_MARKERS = ("过滤", "排序", "最高", "最低", "前", "后")
 
 
 def latest_query(state: dict[str, Any]) -> str:
+    rewritten_query = str(state.get("rewritten_query") or "").strip()
+    rewrite_status = str(state.get("rewrite_status") or "").strip()
+    if rewritten_query and rewrite_status in {"success", "passthrough"}:
+        return rewritten_query
     for message in reversed(list(state.get("messages") or [])):
         if isinstance(message, HumanMessage):
             return str(message.content or "").strip()

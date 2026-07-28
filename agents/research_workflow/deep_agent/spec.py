@@ -1,4 +1,4 @@
-"""深度研究 Deep Agent 的静态配置。"""
+"""Research Workflow 内部深度研究 Deep Agent 的静态配置。"""
 
 from __future__ import annotations
 

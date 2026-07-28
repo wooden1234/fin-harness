@@ -38,6 +38,7 @@ from agents.finance_agent.financial_query_agent.workflows.text_to_sql import (  
 )
 from agents.finance_agent.graph import build_finance_agent_subgraph  # noqa: E402
 from agents.orchestrator.graph import get_orchestrator_graph  # noqa: E402
+from agents.research_workflow.workflow import build_research_workflow  # noqa: E402
 
 v1_graph = import_module("agent-v1.graph").get_graph(with_checkpointer=False)
 orchestrator_graph = get_orchestrator_graph(with_checkpointer=False)
@@ -48,3 +49,4 @@ financial_query_graph = build_financial_query_agent_graph().compile()
 predefined_graph = build_predefined_workflow_graph().compile()
 text_to_sql_graph = build_text_to_sql_workflow_graph().compile()
 combined_graph = build_combined_overview_graph().compile()
+research_workflow_graph = build_research_workflow().compile()

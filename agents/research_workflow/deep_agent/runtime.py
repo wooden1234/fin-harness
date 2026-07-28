@@ -1,4 +1,4 @@
-"""受限 Deep Agent 深度研究运行时。"""
+"""Research Workflow 内部受限 Deep Agent 深度研究运行时。"""
 
 from __future__ import annotations
 
@@ -18,7 +18,10 @@ from agents.deep_agent_support import (
     ensure_financial_deep_agent_profile,
     run_context_from_runtime,
 )
-from agents.deep_research_agent.spec import DEEP_RESEARCH_SPEC, DeepResearchSpec
+from agents.research_workflow.deep_agent.spec import (
+    DEEP_RESEARCH_SPEC,
+    DeepResearchSpec,
+)
 from agents.llm import get_faq_llm
 from agents.orchestrator.contracts import AgentResult, DeepResearchReport, Evidence
 from agents.runtime_context import AgentRuntimeContext

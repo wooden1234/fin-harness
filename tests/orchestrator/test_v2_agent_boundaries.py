@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage
 
-from agents.deep_research_agent.deep_runtime import run_deep_research_agent
+from agents.research_workflow.deep_agent.runtime import run_deep_research_agent
 from agents.market_acquisition_workflow import run_market_acquisition_workflow
 from agents.market_compute.executor import run_market_compute
 from agents.orchestrator.contracts import (
@@ -246,7 +246,7 @@ async def test_deep_research_requires_tool_evidence(monkeypatch) -> None:
         return FakeDeepAgent()
 
     monkeypatch.setattr(
-        "agents.deep_research_agent.deep_runtime.build_deep_research_agent",
+        "agents.research_workflow.deep_agent.runtime.build_deep_research_agent",
         fake_build,
     )
     result = await run_deep_research_agent(

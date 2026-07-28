@@ -41,6 +41,7 @@ AgentResultStatus = Literal[
     "clarify",
     "failed",
 ]
+ErrorAction = Literal["retry", "fallback", "clarify", "fail"]
 MarketFilterOperator = Literal[
     "eq",
     "ne",
@@ -55,6 +56,18 @@ MarketFilterOperator = Literal[
 ]
 MarketSortDirection = Literal["asc", "desc"]
 DocumentChannel = Literal["report", "announcement", "news", "unknown"]
+ClaimType = Literal["fact", "calculation", "inference", "opinion"]
+ClaimImportance = Literal["critical", "major", "minor"]
+EvidenceRelation = Literal["supports", "refutes", "context"]
+SourceGrade = Literal["A", "B", "C", "D", "E"]
+ConflictType = Literal[
+    "hard_conflict",
+    "temporal_update",
+    "scope_difference",
+    "definition_difference",
+]
+StatementType = Literal["fact", "inference", "caveat"]
+DomainFallbackPolicy = Literal["deny", "within_scope"]
 
 
 class MarketFilter(BaseModel):
@@ -156,10 +169,39 @@ class RequestProfile(BaseModel):
     preferred_agent: str | None = None
 
 
+class EvidencePolicy(BaseModel):
+    """定义单个任务完成时必须满足的证据条件。"""
+
+    required: bool = False
+    min_count: int = Field(default=0, ge=0, le=100)
+    require_provenance: bool = False
+    require_structured_data: bool = False
+
+
+class DomainPlanningScope(BaseModel):
+    """Root 授予领域 Planner 的能力、来源和任务预算边界。"""
+
+    parent_task_id: str = Field(min_length=1)
+    parent_logical_task_id: str = Field(min_length=1)
+    allowed_capabilities: list[str] = Field(default_factory=list)
+    allowed_data_sources: list[str] = Field(default_factory=list)
+    allowed_intents: list[str] = Field(default_factory=list)
+    fallback_policy: DomainFallbackPolicy = "within_scope"
+    freshness_required: bool = False
+    evidence_policy: EvidencePolicy = Field(default_factory=EvidencePolicy)
+    entities: list[str] = Field(default_factory=list)
+    constraints: dict[str, Any] = Field(default_factory=dict)
+    max_subtasks: int = Field(default=4, ge=1, le=16)
+
+
 class TaskSpec(BaseModel):
     """任务图中的一个可执行任务。"""
 
     task_id: str
+    logical_task_id: str | None = None
+    attempt_id: str = ""
+    attempt_number: int = Field(default=1, ge=1)
+    idempotency_key: str = ""
     objective: str
     agent_id: str
     depends_on: list[str] = Field(default_factory=list)
@@ -167,6 +209,7 @@ class TaskSpec(BaseModel):
     input_data: dict[str, Any] = Field(default_factory=dict)
     output_schema: str = "AgentResult"
     priority: int = Field(default=0, ge=0)
+    evidence_policy: EvidencePolicy | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -233,10 +276,88 @@ class Evidence(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class Claim(BaseModel):
+    """答案中的一条可独立核验陈述。"""
+
+    claim_id: str
+    task_id: str = ""
+    text: str = Field(min_length=1)
+    subject: str = ""
+    predicate: str = ""
+    value: Any = None
+    unit: str = ""
+    currency: str = ""
+    period: str | None = None
+    as_of: str | None = None
+    claim_type: ClaimType = "fact"
+    importance: ClaimImportance = "major"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ClaimEvidenceLink(BaseModel):
+    """Claim 与 Evidence 之间可审计的支撑关系。"""
+
+    claim_id: str
+    evidence_id: str
+    relation: EvidenceRelation = "supports"
+    strength: float = Field(default=1.0, ge=0.0, le=1.0)
+    evidence_span: str = ""
+    reason: str = ""
+
+
+class EvidenceAssessment(BaseModel):
+    """由系统规则计算的证据可靠性与时效结果。"""
+
+    evidence_id: str
+    source_grade: SourceGrade
+    authority_score: float = Field(ge=0.0, le=1.0)
+    freshness_score: float = Field(ge=0.0, le=1.0)
+    completeness_score: float = Field(ge=0.0, le=1.0)
+    usable: bool = False
+    stale: bool = False
+    rejection_reasons: list[str] = Field(default_factory=list)
+
+
+class EvidenceConflict(BaseModel):
+    """同一规范化事实下的证据冲突。"""
+
+    conflict_id: str
+    claim_key: str
+    conflict_type: ConflictType
+    claim_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    values: list[str] = Field(default_factory=list)
+    resolved: bool = False
+    preferred_claim_id: str | None = None
+    resolution: str = ""
+
+
+class AnswerStatement(BaseModel):
+    """受约束答案中的一个句子及其事实依据。"""
+
+    text: str = Field(min_length=1)
+    claim_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    statement_type: StatementType = "fact"
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class ConstrainedAnswer(BaseModel):
+    """只能引用已通过质量检查 Claim 的结构化答案。"""
+
+    statements: list[AnswerStatement] = Field(default_factory=list)
+    unresolved_claim_ids: list[str] = Field(default_factory=list)
+    caveats: list[str] = Field(default_factory=list)
+
+
 class AgentResult(BaseModel):
     """专业 Agent 对一个任务的标准输出。"""
 
     task_id: str
+    logical_task_id: str | None = None
+    attempt_id: str | None = None
+    attempt_number: int = Field(default=1, ge=1)
+    idempotency_key: str = ""
     agent_id: str
     status: AgentResultStatus
     answer: str = ""
@@ -245,6 +366,7 @@ class AgentResult(BaseModel):
     gaps: list[str] = Field(default_factory=list)
     suggested_tasks: list[TaskSpec] = Field(default_factory=list)
     error_code: str = ""
+    error_action: ErrorAction | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -254,6 +376,11 @@ class QualityReport(BaseModel):
     passed: bool = False
     missing_evidence: list[str] = Field(default_factory=list)
     conflicts: list[str] = Field(default_factory=list)
+    unsupported_claim_ids: list[str] = Field(default_factory=list)
+    stale_evidence_ids: list[str] = Field(default_factory=list)
+    rejected_evidence_ids: list[str] = Field(default_factory=list)
+    conflict_ids: list[str] = Field(default_factory=list)
+    claim_coverage: float = Field(default=1.0, ge=0.0, le=1.0)
     failed_task_ids: list[str] = Field(default_factory=list)
     suggested_tasks: list[TaskSpec] = Field(default_factory=list)
     reason: str = ""
@@ -261,13 +388,27 @@ class QualityReport(BaseModel):
 
 __all__ = [
     "AgentResult",
+    "AnswerStatement",
     "CandidateSet",
+    "Claim",
+    "ClaimEvidenceLink",
+    "ClaimImportance",
+    "ClaimType",
+    "ConflictType",
+    "ConstrainedAnswer",
     "DataSourceType",
     "DeepResearchReport",
+    "DomainFallbackPolicy",
+    "DomainPlanningScope",
     "DocumentChannel",
     "DocumentHit",
     "DocumentHitSet",
+    "ErrorAction",
     "Evidence",
+    "EvidenceAssessment",
+    "EvidenceConflict",
+    "EvidenceRelation",
+    "EvidencePolicy",
     "MarketFilter",
     "MarketFilterOperator",
     "MarketQueryPlan",
@@ -277,6 +418,8 @@ __all__ = [
     "QualityReport",
     "RequestComplexity",
     "RequestProfile",
+    "SourceGrade",
+    "StatementType",
     "TaskPlan",
     "TaskSpec",
     "TaskStatus",

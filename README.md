@@ -89,6 +89,7 @@ langgraph dev
 | `finance_agent` | Finance 编排子图 |
 | `financial_query_agent` / `predefined_workflow` / `text_to_sql_workflow` | 财务查数相关子图 |
 | `fin_agent_combined` | 合图总览 |
+| `research_workflow_graph` | 多源研究 + 内部 Deep Research 工作流 |
 
 ## 架构要点
 
@@ -110,9 +111,88 @@ Orchestrator V2 可调度的主要处理器（见 `agents/orchestrator/agent_reg
 | `market_acquisition_workflow` | 受治理市场/行业/指数/基金数据采集 |
 | `research_retrieval_workflow` | 公告、研报、机构评级检索 |
 | `market.compute` | 对 `CandidateSet` 做确定性 filter / sort / limit |
-| `research_workflow` | 多源研究与 Deep Agent 分析 |
+| `research_workflow` | 多源研究与内部 Deep Agent 分析 |
 
 图版本由 `AGENT_GRAPH_MODE`（`v1` / `v2` / `rollout`）控制，详见 `agents/graph_selector.py`。
+
+## 项目图结构
+
+```mermaid
+flowchart TB
+    U[用户] --> FE[React / Vite 前端]
+    FE --> API[FastAPI API + SSE]
+    API --> SEL{Graph Selector}
+    SEL -->|v1| V1[Supervisor V1 固定路由图]
+    SEL -->|v2 / rollout| V2[Orchestrator V2]
+
+    V1 --> V1N[Guardrails → Memory → Query Rewrite → Supervisor]
+    V2 --> INIT[Init Turn]
+    INIT --> GUARD[Guardrails]
+    GUARD --> MEM[Memory Recall]
+    MEM --> REWRITE[Query Rewrite]
+    REWRITE --> ANALYZER[Analyzer：请求画像]
+    ANALYZER --> PLANNER[Planner：任务与依赖波次]
+    PLANNER --> DISPATCH[Agent Registry：并行调度]
+    DISPATCH --> SPECIALIZED_ENTRY[专业 Agent / Workflow]
+    SPECIALIZED_ENTRY --> QUALITY[Quality Gate / 结果合并]
+    QUALITY --> FINAL[Final Answer]
+
+    subgraph SPECIALIZED[专业 Agent / Workflow]
+        GENERAL[General Agent]
+        FINANCE[Finance Agent]
+        SCREEN[Stock Screening Agent]
+        MARKET[Market Acquisition Workflow]
+        RETRIEVAL[Research Retrieval Workflow]
+        COMPUTE[market.compute 确定性计算]
+        RESEARCH[Research Workflow]
+    end
+
+    RESEARCH --> PLAN[plan_research]
+    PLAN --> SOURCES[collect_sources：并行来源任务]
+    SOURCES --> DEEP[deep_agent：受限 Deep Research]
+    DEEP --> RESEARCH_FINAL[finalize_research：质量收敛]
+    RESEARCH_FINAL --> ONE[单一 AgentResult]
+
+    subgraph FOUNDATION[共享基础设施]
+        TOOLS[Tools / MCP / 问财]
+        SKILLS[Skills / Skill Binding]
+        EVIDENCE[Evidence / Citation]
+        COMPLIANCE[Compliance / Policies]
+        AUDIT[Audit / Replay]
+        RAG[RAG / pgvector]
+    end
+
+    SPECIALIZED --> TOOLS
+    SPECIALIZED --> SKILLS
+    DEEP --> EVIDENCE
+    QUALITY --> EVIDENCE
+    V2 --> COMPLIANCE
+    V2 --> AUDIT
+    FINANCE --> RAG
+```
+
+研究工作流内部图：
+
+```mermaid
+flowchart LR
+    A[Root Orchestrator 任务] --> B[plan_research]
+    B --> C[collect_sources]
+    C --> D[run_deep_research]
+    D --> E[finalize_research]
+    E --> F[research_workflow AgentResult]
+    C --> C1[stock_screening_agent]
+    C --> C2[research_retrieval_workflow]
+    C --> C3[finance_agent]
+    C1 --> D
+    C2 --> D
+    C3 --> D
+    D --> G[research_workflow.deep_agent]
+    G --> H[受治理 Tools + 只读 Skills]
+    G --> I[DeepResearchReport + Evidence]
+    I --> E
+```
+
+`agents/research_workflow/deep_agent/` 是研究工作流的内部实现，不再作为 Root Orchestrator 的独立注册 Agent 暴露。
 
 ## 项目结构
 

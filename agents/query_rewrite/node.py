@@ -16,6 +16,47 @@ logger = get_logger(service="query_rewrite")
 
 _RECENT_MESSAGE_LIMIT = 8
 RewriteTarget = Literal["supervisor", "final_answer"]
+_CONTEXT_REFERENCE_MARKERS = (
+    "它",
+    "该公司",
+    "这家公司",
+    "上述",
+    "上面",
+    "前者",
+    "后者",
+    "其中",
+    "这些",
+    "那些",
+    "这个",
+    "那个",
+    "刚才",
+    "之前",
+    "上一步",
+)
+_FOLLOWUP_PREFIXES = (
+    "那",
+    "再",
+    "继续",
+    "另外",
+    "然后",
+    "顺便",
+    "改成",
+    "改为",
+    "换成",
+    "只看",
+    "再看",
+    "再分析",
+)
+_SHORT_FOLLOWUP_SUFFIXES = (
+    "呢",
+    "如何",
+    "怎么样",
+    "多少",
+    "为什么",
+    "怎么看",
+    "有什么风险",
+)
+_MAX_SHORT_FOLLOWUP_LENGTH = 18
 
 
 def _latest_user_query(messages: list[AnyMessage]) -> str:
@@ -61,12 +102,25 @@ def _needs_rewrite(
     existing_summary: str,
     recent_dialogue: str,
 ) -> bool:
-    """无上文可依赖时跳过 LLM，直接沿用原问题。"""
-    if not query.strip():
+    """仅对明确依赖上文的指代、省略或续问调用改写模型。"""
+    compact_query = "".join(query.split())
+    normalized_query = compact_query.rstrip("？?！!。")
+    if not normalized_query:
         return False
-    if existing_summary.strip():
+    has_context = bool(existing_summary.strip()) or recent_dialogue.strip() not in {
+        "",
+        "无",
+    }
+    if not has_context:
+        return False
+    if any(marker in normalized_query for marker in _CONTEXT_REFERENCE_MARKERS):
         return True
-    return recent_dialogue.strip() not in {"", "无"}
+    if normalized_query.startswith(_FOLLOWUP_PREFIXES):
+        return True
+    return (
+        len(normalized_query) <= _MAX_SHORT_FOLLOWUP_LENGTH
+        and normalized_query.endswith(_SHORT_FOLLOWUP_SUFFIXES)
+    )
 
 
 async def query_rewrite_node(
