@@ -150,6 +150,9 @@ class ConversationState(TypedDict):
     # uncertain=上下文不足不可安全补全，fallback=模型异常回退原文。
     rewrite_status: NotRequired[str]
 
+    # 含糊修改/删除的管理候选，跨轮保留直到用户确认或取消。
+    pending_memory_action: NotRequired[dict[str, object]]
+
 
 class CoreState(ConversationState):
     """所有子图的公共字段基类。"""
@@ -159,3 +162,12 @@ class CoreState(ConversationState):
 
     # 跨会话长期偏好；每轮从权威表重新召回，不写入 messages。
     memory_context: NotRequired[dict[str, object]]
+
+    # 本轮临时偏好；由当前用户输入确定性提取，final_answer 后清空。
+    turn_preferences: NotRequired[dict[str, object]]
+
+    # 本轮是否已由记忆管理节点生成确定性回复。
+    memory_action_handled: NotRequired[bool]
+
+    # 同步记忆动作后的当前轮必须绕过 Redis，避免清理失败时读取旧值。
+    memory_cache_bypass: NotRequired[bool]

@@ -30,10 +30,12 @@ from agents.orchestrator.task_identity import validate_task_plan
 
 
 def test_v2_graph_compiles_with_independent_nodes():
-    graph = build_orchestrator_graph().compile().get_graph()
+    builder = build_orchestrator_graph()
+    graph = builder.compile().get_graph()
     edges = {(edge.source, edge.target) for edge in graph.edges}
 
     assert "init_turn" in graph.nodes
+    assert "memory_action" in graph.nodes
     assert "query_rewrite" in graph.nodes
     assert "analyze_request" in graph.nodes
     assert "execute_task" in graph.nodes
@@ -41,6 +43,16 @@ def test_v2_graph_compiles_with_independent_nodes():
     assert "final_answer" in graph.nodes
     assert ("__start__", "init_turn") in edges
     assert ("init_turn", "guardrails") in edges
+    assert ("guardrails", "memory_action") in edges
+    assert "memory_recall" not in graph.nodes
+    assert ("memory_action", "context_compressor") in edges
+    assert ("build_plan", "memory_plan") in edges
+    assert ("memory_plan", "load_task_memories") in edges
+    assert ("load_task_memories", "prepare_wave") in edges
+    assert builder.branches["replan"]["route_after_replan"].ends == {
+        "memory_plan": "memory_plan",
+        "synthesize": "synthesize",
+    }
     assert ("context_compressor", "query_rewrite") in edges
     assert ("query_rewrite", "analyze_request") in edges
 

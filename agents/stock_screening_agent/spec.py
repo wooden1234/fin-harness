@@ -13,7 +13,6 @@ class StockScreeningSpec:
     skills: tuple[str, ...] = ("stock-screening",)
     busy_answer: str = "问财选股暂时无法完成，请稍后重试。"
     default_task_id: str = "stock-screening"
-    max_retries: int = 1
 
 STOCK_SCREENING_SPEC = StockScreeningSpec()
 

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import re
-from collections import Counter
 from collections.abc import Mapping
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, TypedDict, cast
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.runnables import RunnableConfig
@@ -38,7 +37,6 @@ class ScreeningPlanDraft(BaseModel):
     """LLM 生成的结构化选股计划。"""
 
     plan: MarketQueryPlan
-    adjustment: str = ""
 
 
 class StockScreeningWorkflowState(TypedDict, total=False):
@@ -46,18 +44,13 @@ class StockScreeningWorkflowState(TypedDict, total=False):
 
     original_query: str
     current_query: str
-    adjustment: str
     task_input: dict[str, Any]
     query_history: list[str]
-    retry_count: int
-    retry_planning_failed: bool
     parse_errors: list[str]
     parsed_plan: MarketQueryPlan
-    previous_plan: MarketQueryPlan
     validation_errors: list[str]
     validation_failed: bool
     tool_result: AgentResult
-    should_retry: bool
     final_result: AgentResult
 
 
@@ -76,6 +69,8 @@ _SCREENING_PLAN_SYSTEM_PROMPT = """你负责把 A 股自然语言选股要求转
 6. 常用字段优先使用 pe_ttm、pb、roe、revenue_growth、net_profit_growth、
    market_cap、price_change_pct、volume_ratio。
 7. “前 N 只”写入 limit；“最高/最低”同时写入 sort。
+8. 不支持分组聚合，禁止填写 group_by；如用户要求分组统计，请改用 sort/limit
+   或在 rationale 之外的字段留空，不得编造。
 
 示例一：
 用户：筛选新能源行业，市盈率低于30，ROE大于15%，取前10只
@@ -93,21 +88,6 @@ _SCREENING_PLAN_SYSTEM_PROMPT = """你负责把 A 股自然语言选股要求转
 {"field":"industry","operator":"contains","value":"半导体"}
 ],"sort":[{"field":"net_profit_growth","direction":"desc"}],"limit":5}
 """
-
-_SCREENING_RETRY_SYSTEM_PROMPT = """你负责调整一个未返回候选股票的 A 股选股计划。
-
-要求：
-1. 只输出新的 MarketQueryPlan，不生成问财 query。
-2. 保留 universe、行业、概念以及用户明确指定的硬条件。
-3. 最多删除或放宽一个非核心过滤条件。
-4. 不得增加新的过滤条件、行业、股票或阈值。
-5. adjustment 必须准确说明删除或放宽了哪个条件。
-
-示例：
-原计划包含“新能源、PE<20、ROE>20”，结果为空；
-可以调整为“新能源、PE<30、ROE>20”，并说明“将PE上限从20放宽到30”。
-"""
-
 
 async def _invoke_screening_plan(
     *,
@@ -154,31 +134,6 @@ async def parse_screening_plan(
     )
 
 
-async def relax_screening_plan(
-    *,
-    original_query: str,
-    previous_plan: MarketQueryPlan,
-    previous_result: AgentResult,
-    binding: SkillBinding,
-    config: RunnableConfig | None,
-    llm: BaseChatModel | None,
-) -> ScreeningPlanDraft:
-    """空结果时生成一次受限的放宽计划。"""
-    return await _invoke_screening_plan(
-        system_prompt=_SCREENING_RETRY_SYSTEM_PROMPT,
-        human_prompt=(
-            f"用户原始要求：\n{original_query}\n\n"
-            f"上一次结构化计划：\n{previous_plan.model_dump_json()}\n\n"
-            f"上一次结果：status={previous_result.status}, "
-            f"error_code={previous_result.error_code}, "
-            f"gaps={previous_result.gaps}"
-        ),
-        binding=binding,
-        config=config,
-        llm=llm,
-    )
-
-
 _FIELD_NAME_RE = re.compile(
     r"^(?:[A-Za-z][A-Za-z0-9_.]{0,63}|[\u4e00-\u9fff]{1,32})$"
 )
@@ -206,6 +161,9 @@ _OPERATOR_LABELS = {
     "lte": "小于等于",
     "contains": "包含",
 }
+_MAX_METRICS = 20
+_MAX_ENRICHMENTS = 20
+_MAX_FREEFORM_FIELD_LENGTH = 64
 
 
 def _render_value(value: Any) -> str:
@@ -245,6 +203,21 @@ def build_iwencai_query(plan: MarketQueryPlan) -> str:
     return "，".join(parts)
 
 
+def _validate_freeform_fields(
+    values: list[str],
+    *,
+    label: str,
+    max_length: int,
+    errors: list[str],
+) -> None:
+    """校验 metrics/enrichments 等自由文本字段，避免非法或超长内容流入 Tool 查询。"""
+    for index, value in enumerate(values):
+        if not isinstance(value, str) or not value.strip():
+            errors.append(f"{label}_invalid:{index}")
+        elif len(value) > max_length:
+            errors.append(f"{label}_too_long:{index}")
+
+
 def validate_screening_plan(
     plan: MarketQueryPlan,
 ) -> list[str]:
@@ -258,6 +231,26 @@ def validate_screening_plan(
         errors.append("too_many_filters")
     if len(plan.sort) > 10:
         errors.append("too_many_sort_fields")
+    if plan.group_by:
+        # 选股工作流和下游 market.compute 都不支持分组聚合，
+        # 与其静默丢弃 group_by 不如直接判定计划不可执行。
+        errors.append("group_by_not_supported_by_screening")
+    if len(plan.metrics) > _MAX_METRICS:
+        errors.append("too_many_metrics")
+    if len(plan.enrichments) > _MAX_ENRICHMENTS:
+        errors.append("too_many_enrichments")
+    _validate_freeform_fields(
+        plan.metrics,
+        label="metric",
+        max_length=_MAX_FREEFORM_FIELD_LENGTH,
+        errors=errors,
+    )
+    _validate_freeform_fields(
+        plan.enrichments,
+        label="enrichment",
+        max_length=_MAX_FREEFORM_FIELD_LENGTH,
+        errors=errors,
+    )
     for index, condition in enumerate(plan.filters):
         if not _FIELD_NAME_RE.fullmatch(condition.field):
             errors.append(f"filter_field_invalid:{index}")
@@ -282,73 +275,11 @@ def validate_screening_plan(
     return errors
 
 
-def validate_retry_plan(
-    previous: MarketQueryPlan,
-    current: MarketQueryPlan,
-) -> list[str]:
-    """校验重试只能放宽一个条件，且不能改变核心范围。"""
-    errors: list[str] = []
-    if current.universe != previous.universe:
-        errors.append("retry_universe_changed")
-    if current.sort != previous.sort:
-        errors.append("retry_sort_changed")
-    if current.limit != previous.limit:
-        errors.append("retry_limit_changed")
-    if current.metrics != previous.metrics:
-        errors.append("retry_metrics_changed")
-    if current.enrichments != previous.enrichments:
-        errors.append("retry_enrichments_changed")
-    if current.group_by != previous.group_by:
-        errors.append("retry_group_by_changed")
-    if current.as_of != previous.as_of:
-        errors.append("retry_as_of_changed")
-
-    previous_fields = Counter(item.field for item in previous.filters)
-    current_fields = Counter(item.field for item in current.filters)
-    if current_fields - previous_fields:
-        errors.append("retry_added_filter_field")
-
-    previous_signatures = Counter(
-        item.model_dump_json() for item in previous.filters
-    )
-    current_signatures = Counter(
-        item.model_dump_json() for item in current.filters
-    )
-    removed = sum((previous_signatures - current_signatures).values())
-    added = sum((current_signatures - previous_signatures).values())
-    if removed == 0 and added == 0:
-        errors.append("retry_plan_unchanged")
-    if removed > 1 or added > 1:
-        errors.append("retry_changed_more_than_one_filter")
-
-    for hard_field in ("industry", "concept"):
-        before = [
-            item.model_dump()
-            for item in previous.filters
-            if item.field == hard_field
-        ]
-        after = [
-            item.model_dump()
-            for item in current.filters
-            if item.field == hard_field
-        ]
-        if before != after:
-            errors.append(f"retry_hard_filter_changed:{hard_field}")
-    return errors
-
-
 def _skill_for_tool(binding: SkillBinding, tool_id: str) -> str:
     for document in binding.documents:
         if tool_id in document.tool_ids:
             return document.name
     raise ValueError(f"skill_tool_binding_missing:{tool_id}")
-
-
-def _is_empty_result(result: AgentResult) -> bool:
-    return (
-        result.status == "uncovered"
-        and result.error_code.endswith("_empty_result")
-    )
 
 
 def _final_answer(result: AgentResult) -> str:
@@ -365,7 +296,7 @@ def build_stock_screening_workflow(
     llm: BaseChatModel | None = None,
     spec: StockScreeningSpec = STOCK_SCREENING_SPEC,
 ):
-    """构建 parse、validate、execute、evaluate、finalize 工作流。"""
+    """构建 parse、validate、execute、finalize 工作流。"""
     binding = resolve_skill_binding(spec.skills)
     required_tool = binding.primary_required_tool
     skill_name = _skill_for_tool(binding, required_tool)
@@ -374,43 +305,21 @@ def build_stock_screening_workflow(
         state: StockScreeningWorkflowState,
     ) -> StockScreeningWorkflowState:
         original_query = state["original_query"]
-        retry_count = int(state.get("retry_count") or 0)
         parse_errors = list(state.get("parse_errors") or [])
         try:
-            previous_plan = state.get("parsed_plan")
-            previous_result = state.get("tool_result")
-            if retry_count:
-                if previous_plan is None or previous_result is None:
-                    raise ValueError("retry_context_missing")
-                draft = await relax_screening_plan(
-                    original_query=original_query,
-                    previous_plan=previous_plan,
-                    previous_result=previous_result,
-                    binding=binding,
-                    config=config,
-                    llm=llm,
-                )
-            else:
-                draft = await parse_screening_plan(
-                    original_query=original_query,
-                    binding=binding,
-                    config=config,
-                    llm=llm,
-                )
-            updates: StockScreeningWorkflowState = {
-                "adjustment": draft.adjustment.strip(),
+            draft = await parse_screening_plan(
+                original_query=original_query,
+                binding=binding,
+                config=config,
+                llm=llm,
+            )
+            return {
                 "parsed_plan": draft.plan,
-                "retry_planning_failed": False,
                 "parse_errors": parse_errors,
             }
-            if retry_count and previous_plan is not None:
-                updates["previous_plan"] = previous_plan
-            return updates
         except Exception as exc:  # noqa: BLE001
             parse_errors.append(f"{type(exc).__name__}:{exc}")
             return {
-                "adjustment": "",
-                "retry_planning_failed": True,
                 "parse_errors": parse_errors,
                 "validation_failed": True,
                 "validation_errors": ["screening_plan_parse_failed"],
@@ -419,11 +328,10 @@ def build_stock_screening_workflow(
     async def validate_node(
         state: StockScreeningWorkflowState,
     ) -> StockScreeningWorkflowState:
-        if state.get("retry_planning_failed"):
-            return {
-                "validation_failed": True,
-                "validation_errors": ["screening_plan_parse_failed"],
-            }
+        if state.get("validation_failed"):
+            # parse_node 已经记录了更具体的失败原因（如 LLM 调用异常），
+            # 这里直接透传，避免被下面通用的 screening_plan_missing 覆盖掉。
+            return {}
         plan = state.get("parsed_plan")
         if plan is None:
             return {
@@ -431,9 +339,6 @@ def build_stock_screening_workflow(
                 "validation_errors": ["screening_plan_missing"],
             }
         errors = validate_screening_plan(plan)
-        previous_plan = state.get("previous_plan")
-        if int(state.get("retry_count") or 0) and previous_plan is not None:
-            errors.extend(validate_retry_plan(previous_plan, plan))
         return {
             "current_query": build_iwencai_query(plan) if not errors else "",
             "validation_failed": bool(errors),
@@ -443,13 +348,11 @@ def build_stock_screening_workflow(
     async def execute_node(
         state: StockScreeningWorkflowState,
     ) -> StockScreeningWorkflowState:
-        if state.get("validation_failed") or state.get("retry_planning_failed"):
+        if state.get("validation_failed"):
             return {}
         query = state.get("current_query") or state["original_query"]
         task_input = dict(state.get("task_input") or {})
-        task_input["call_type"] = (
-            "retry" if int(state.get("retry_count") or 0) else "normal"
-        )
+        task_input["call_type"] = "normal"
         result = await run_iwencai_source_tool(
             tool_id=required_tool,
             skill_name=skill_name,
@@ -464,47 +367,42 @@ def build_stock_screening_workflow(
             "query_history": [*state.get("query_history", []), query],
         }
 
-    async def evaluate_node(
-        state: StockScreeningWorkflowState,
-    ) -> StockScreeningWorkflowState:
-        result = state.get("tool_result")
-        retry_count = int(state.get("retry_count") or 0)
-        should_retry = bool(
-            result is not None
-            and _is_empty_result(result)
-            and retry_count < spec.max_retries
-            and not state.get("retry_planning_failed")
-        )
-        return {
-            "should_retry": should_retry,
-            "retry_count": retry_count + 1 if should_retry else retry_count,
-        }
-
     async def finalize_node(
         state: StockScreeningWorkflowState,
     ) -> StockScreeningWorkflowState:
         result = state.get("tool_result")
         if result is None:
-            result = AgentResult(
-                task_id=spec.default_task_id,
-                agent_id=spec.agent_id,
-                status="clarify" if state.get("validation_failed") else "failed",
-                answer=(
-                    "选股条件无法通过结构化校验，请补充明确的 A 股范围、指标或排序条件。"
-                    if state.get("validation_failed")
-                    else spec.busy_answer
-                ),
-                error_code=(
-                    "screening_plan_invalid"
-                    if state.get("validation_failed")
-                    else "screening_result_missing"
-                ),
-                gaps=(
-                    list(state.get("validation_errors") or [])
-                    if state.get("validation_failed")
-                    else ["选股工作流未产生工具结果"]
-                ),
-            )
+            if state.get("validation_failed"):
+                # parse_node/validate_node 现在都不会覆盖彼此的失败原因，
+                # 这里把两边记录的具体原因合并进 gaps，方便排查到底是
+                # LLM 解析异常（screening_plan_parse_failed）还是结构化
+                # 计划本身不合规（如 universe_not_allowed 等），同时对外
+                # 仍统一保持 clarify 语义，不因原因不同而改变响应契约。
+                gaps = list(
+                    dict.fromkeys(
+                        [
+                            *(state.get("validation_errors") or []),
+                            *(state.get("parse_errors") or []),
+                        ]
+                    )
+                )
+                result = AgentResult(
+                    task_id=spec.default_task_id,
+                    agent_id=spec.agent_id,
+                    status="clarify",
+                    answer="选股条件无法通过结构化校验，请补充明确的 A 股范围、指标或排序条件。",
+                    error_code="screening_plan_invalid",
+                    gaps=gaps,
+                )
+            else:
+                result = AgentResult(
+                    task_id=spec.default_task_id,
+                    agent_id=spec.agent_id,
+                    status="failed",
+                    answer=spec.busy_answer,
+                    error_code="screening_result_missing",
+                    gaps=["选股工作流未产生工具结果"],
+                )
         normalized = normalize_screening_result(
             result,
             query=state.get("current_query") or state["original_query"],
@@ -517,8 +415,8 @@ def build_stock_screening_workflow(
             "runtime": "workflow",
             "original_query": state["original_query"],
             "query_history": list(state.get("query_history") or []),
-            "retry_count": int(state.get("retry_count") or 0),
-            "adjustment": state.get("adjustment") or "",
+            "retry_count": 0,
+            "adjustment": "",
             "parse_errors": list(state.get("parse_errors") or []),
             "validation_errors": list(state.get("validation_errors") or []),
             "parsed_plan": (
@@ -536,26 +434,15 @@ def build_stock_screening_workflow(
             )
         }
 
-    async def route_after_evaluate(
-        state: StockScreeningWorkflowState,
-    ) -> Literal["retry", "finalize"]:
-        return "retry" if state.get("should_retry") else "finalize"
-
     builder = StateGraph(StockScreeningWorkflowState)
     builder.add_node("parse", parse_node)
     builder.add_node("validate", validate_node)
     builder.add_node("execute", execute_node)
-    builder.add_node("evaluate", evaluate_node)
     builder.add_node("finalize", finalize_node)
     builder.add_edge(START, "parse")
     builder.add_edge("parse", "validate")
     builder.add_edge("validate", "execute")
-    builder.add_edge("execute", "evaluate")
-    builder.add_conditional_edges(
-        "evaluate",
-        route_after_evaluate,
-        {"retry": "parse", "finalize": "finalize"},
-    )
+    builder.add_edge("execute", "finalize")
     builder.add_edge("finalize", END)
     return builder.compile()
 
@@ -585,8 +472,6 @@ async def run_stock_screening_workflow(
                 dict(task_input) if isinstance(task_input, Mapping) else {}
             ),
             "query_history": [],
-            "retry_count": 0,
-            "retry_planning_failed": False,
             "parse_errors": [],
         },
         config=config,
@@ -603,8 +488,6 @@ __all__ = [
     "build_iwencai_query",
     "build_stock_screening_workflow",
     "parse_screening_plan",
-    "relax_screening_plan",
     "run_stock_screening_workflow",
-    "validate_retry_plan",
     "validate_screening_plan",
 ]

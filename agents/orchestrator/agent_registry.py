@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from copy import deepcopy
 from typing import Any
 
 from langchain_core.messages import HumanMessage
@@ -24,6 +25,8 @@ class AgentSpec:
     agent_id: str
     description: str
     capabilities: tuple[str, ...]
+    memory_keys: tuple[str, ...] = ()
+    semantic_memory_types: tuple[str, ...] = ()
     kind: str = "agent"
     evidence_policy: EvidencePolicy = field(default_factory=EvidencePolicy)
 
@@ -33,11 +36,27 @@ AGENT_SPECS: tuple[AgentSpec, ...] = (
         agent_id="general_agent",
         description="处理无需外部事实依据的普通对话",
         capabilities=(),
+        memory_keys=(
+            "response_language",
+            "response_detail_level",
+            "preferred_output_format",
+        ),
+        semantic_memory_types=("episodic",),
     ),
     AgentSpec(
         agent_id="finance_agent",
         description="处理金融知识、财务数据库和 RAG 分析",
         capabilities=("faq", "pdf", "financial_query"),
+        memory_keys=(
+            "response_language",
+            "response_detail_level",
+            "preferred_output_format",
+            "default_currency",
+            "default_market",
+            "default_compare_period",
+            "citation_preference",
+        ),
+        semantic_memory_types=("episodic",),
         evidence_policy=EvidencePolicy(
             required=True,
             min_count=1,
@@ -53,6 +72,7 @@ AGENT_SPECS: tuple[AgentSpec, ...] = (
             "iwencai.index.query",
             "iwencai.fund.screen",
         ),
+        memory_keys=("default_currency", "default_market"),
         kind="workflow",
         evidence_policy=EvidencePolicy(
             required=True,
@@ -69,6 +89,7 @@ AGENT_SPECS: tuple[AgentSpec, ...] = (
             "iwencai.report.search",
             "iwencai.rating.query",
         ),
+        memory_keys=("response_language", "citation_preference"),
         kind="workflow",
         evidence_policy=EvidencePolicy(
             required=True,
@@ -80,6 +101,12 @@ AGENT_SPECS: tuple[AgentSpec, ...] = (
         agent_id="stock_screening_agent",
         description="理解复杂自然语言选股条件并调用受治理选股工具",
         capabilities=("iwencai.screen",),
+        memory_keys=(
+            "response_language",
+            "preferred_output_format",
+            "default_currency",
+            "default_market",
+        ),
         evidence_policy=EvidencePolicy(
             required=True,
             min_count=1,
@@ -91,6 +118,11 @@ AGENT_SPECS: tuple[AgentSpec, ...] = (
         agent_id="market.compute",
         description="对上游 CandidateSet 执行确定性过滤、排序和截取",
         capabilities=("market.compute",),
+        memory_keys=(
+            "default_currency",
+            "default_market",
+            "default_compare_period",
+        ),
         kind="deterministic",
         evidence_policy=EvidencePolicy(
             required=True,
@@ -103,6 +135,13 @@ AGENT_SPECS: tuple[AgentSpec, ...] = (
         agent_id="research_workflow",
         description="围绕一个问题完成多源采集、Deep Agent 分析和质量收敛",
         capabilities=("deep.research",),
+        memory_keys=(
+            "response_language",
+            "response_detail_level",
+            "preferred_output_format",
+            "citation_preference",
+        ),
+        semantic_memory_types=("episodic",),
         kind="workflow",
         evidence_policy=EvidencePolicy(
             required=True,
@@ -136,6 +175,7 @@ async def invoke_agent(
     task: TaskSpec,
     *,
     dependency_results: list[AgentResult],
+    memory_context: dict[str, Any] | None = None,
     config: RunnableConfig | None = None,
     runtime: Runtime[AgentRuntimeContext] | None = None,
 ) -> AgentResult:
@@ -153,6 +193,8 @@ async def invoke_agent(
             "attempt_number": task.attempt_number,
             "idempotency_key": task.idempotency_key,
         },
+        # 调用边界只接收当前 task 的投影，禁止传入完整任务映射。
+        "memory_context": deepcopy(memory_context or {}),
     }
     planning_scope = task.input_data.get("domain_planning_scope")
     if isinstance(planning_scope, dict):

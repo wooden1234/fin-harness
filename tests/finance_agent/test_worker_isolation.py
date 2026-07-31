@@ -97,8 +97,10 @@ def test_input_guardrail_checks_return_standard_decisions():
 
     assert injection.action == GuardrailAction.BLOCK
     assert injection.reason_code == "prompt_injection_detected"
-    assert pii.action == GuardrailAction.BLOCK
-    assert pii.reason_code == "pii_detected"
+    assert len(injection.findings) == 2
+    assert pii.action == GuardrailAction.REDACT
+    assert pii.reason_code == "pii_redacted"
+    assert pii.safe_content == "联系电话是138****8000"
 
 
 def test_main_graph_runs_guardrails_before_memory_recall():

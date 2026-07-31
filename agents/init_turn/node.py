@@ -5,7 +5,8 @@ from __future__ import annotations
 from langchain_core.runnables import RunnableConfig
 
 from agents.states import FinAgentState
-from agents.turn_workspace import begin_turn_workspace
+
+from .turn_workspace import begin_turn_workspace
 
 
 async def init_turn_node(

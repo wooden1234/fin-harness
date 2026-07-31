@@ -341,13 +341,20 @@ async def run_iwencai_source_tool(
         if isinstance(tool_result.data, dict)
         else {"data": tool_result.data}
     )
+    fetched_at = datetime.now(timezone.utc)
+    # 附加抓取时间摘要，避免同一查询在不同时间点重复执行时产生相同的
+    # evidence_id：下游按 evidence_id 去重时会误把新鲜数据当成旧证据丢弃。
+    digest = hashlib.sha256(
+        f"{tool_id}:{query}:{fetched_at.isoformat()}".encode("utf-8")
+    ).hexdigest()[:16]
     evidence = Evidence(
-        evidence_id=f"{tool_id}:{query}",
+        evidence_id=f"{tool_id}:{digest}",
         task_id=task_id,
         source_type=tool_id,
         provider="iwencai",
         title=tool_id,
         content=f"问财 {tool_id} 查询：{query}",
+        observed_at=fetched_at.isoformat(),
     )
     structured_data: dict[str, Any] = data
     answer = f"已完成问财 {tool_id} 查询。"

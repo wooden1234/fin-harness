@@ -93,5 +93,9 @@ Desktop.ini
 evals/
 tests/*
 !tests/
+!tests/core/
+!tests/core/*.py
+!tests/memory/
+!tests/memory/*.py
 !tests/orchestrator/
 !tests/orchestrator/*.py

@@ -14,6 +14,11 @@ from app.models.persistence.outbox_event import OutboxEvent
 from app.services.agent.agent_run_service import AgentRunService
 from app.services.conversation.conversation_service import ConversationService
 from app.services.memory.memory_index_service import MemoryIndexService
+from app.services.memory.memory_cache import MemoryCache
+from app.services.memory.memory_audit import MemoryAuditContext
+from app.services.memory.memory_command import parse_memory_rule_action
+from app.services.memory.memory_extraction import extract_preference
+from app.services.memory.memory_service import MemoryService
 from agents.checkpoint import delete_thread_checkpoint
 
 logger = get_logger(service="outbox")
@@ -48,6 +53,50 @@ class OutboxService:
             event = OutboxEvent(
                 event_key=event_key,
                 event_type="assistant_message.persist",
+                aggregate_id=run_id,
+                payload=payload,
+                status="pending",
+            )
+            db.add(event)
+            await db.commit()
+            await db.refresh(event)
+            return event
+
+    @staticmethod
+    async def enqueue_memory_extraction(
+        *,
+        run_id: str,
+        user_id: int,
+        source_text: str,
+        tenant_id: str = "default",
+        conversation_id: int | None = None,
+        message_id: int | None = None,
+        agent_id: str | None = None,
+        task_id: str | None = None,
+        trace_id: str | None = None,
+    ) -> OutboxEvent:
+        """登记回答后执行的隐含偏好提取任务。"""
+        event_key = f"memory:extract:{run_id}"
+        payload = {
+            "run_id": run_id,
+            "user_id": user_id,
+            "tenant_id": tenant_id,
+            "conversation_id": conversation_id,
+            "message_id": message_id,
+            "source_text": source_text,
+            "agent_id": agent_id,
+            "task_id": task_id,
+            "trace_id": trace_id or run_id,
+        }
+        async with AsyncSessionLocal() as db:
+            existing = await db.scalar(
+                select(OutboxEvent).where(OutboxEvent.event_key == event_key)
+            )
+            if existing is not None:
+                return existing
+            event = OutboxEvent(
+                event_key=event_key,
+                event_type="memory.preference.extract",
                 aggregate_id=run_id,
                 payload=payload,
                 status="pending",
@@ -134,6 +183,44 @@ class OutboxService:
                 await MemoryIndexService.upsert_from_event(payload)
             elif event.event_type == "memory.index.delete":
                 await MemoryIndexService.delete_from_event(payload)
+            elif event.event_type == "memory.cache.invalidate":
+                await MemoryCache.invalidate_user(
+                    tenant_id=str(payload["tenant_id"]),
+                    user_id=int(payload["user_id"]),
+                    memory_type=str(payload.get("memory_type") or "preference"),
+                    raise_on_error=True,
+                )
+            elif event.event_type == "memory.preference.extract":
+                source_text = str(payload["source_text"])
+                # 防御性复核：同步、临时和敏感动作绝不进入大模型提取。
+                if parse_memory_rule_action(source_text).kind == "implicit":
+                    preference = await extract_preference(source_text)
+                    if preference is not None:
+                        await MemoryService.create(
+                            tenant_id=str(payload.get("tenant_id") or "default"),
+                            user_id=int(payload["user_id"]),
+                            memory_key=preference.memory_key,
+                            value=preference.value,
+                            provenance={
+                                "source_type": preference.source,
+                                "conversation_id": payload.get("conversation_id"),
+                                "message_id": payload.get("message_id"),
+                                "run_id": payload.get("run_id"),
+                                "evidence": preference.evidence[:500],
+                                "excerpt": source_text[:500],
+                            },
+                            actor_id=str(payload["user_id"]),
+                            confidence=preference.confidence,
+                            audit_context=MemoryAuditContext(
+                                tenant_id=str(
+                                    payload.get("tenant_id") or "default"
+                                ),
+                                user_id=int(payload["user_id"]),
+                                agent_id=payload.get("agent_id"),
+                                task_id=payload.get("task_id"),
+                                trace_id=payload.get("trace_id"),
+                            ),
+                        )
             else:
                 raise ValueError(f"未知 outbox event_type: {event.event_type}")
             await cls._finish(event.id, success=True)

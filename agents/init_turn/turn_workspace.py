@@ -35,6 +35,12 @@ def begin_turn_workspace() -> dict:
         "compliance_action": "",
         "compliance_reason_code": "",
         "compliance_reason": "",
+        "turn_preferences": {},
+        "memory_action_handled": False,
+        "memory_cache_bypass": False,
+        "memory_requirements": {},
+        "task_memory_context": {},
+        "current_task_memory_context": {},
 
         # ── Planner / 派发工作区 ──
         "planner_query": "",

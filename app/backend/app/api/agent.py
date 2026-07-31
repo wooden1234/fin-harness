@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
 from agents.checkpoint import make_thread_config
+from agents.guardrails.input.secrets import check_secrets
 from agents.orchestrator.graph import get_orchestrator_graph
 from agents.runtime_context import AgentRuntimeContext
 from app.api.agent_progress import (
@@ -16,6 +17,7 @@ from app.api.agent_progress import (
 )
 from app.core.config import settings
 from app.core.logger import get_logger
+from app.core.redis_client import redis_metrics
 from app.core.security import get_current_user
 from app.models.identity.user import User
 from app.services.conversation.conversation_service import ConversationService
@@ -27,11 +29,7 @@ from app.services.conversation.conversation_lock_service import (
 )
 from app.services.agent.checkpoint_rebuild_service import CheckpointRebuildService
 from app.services.agent.checkpoint_registry_service import CheckpointRegistryService
-from app.services.memory.memory_command import (
-    extract_memory_candidate,
-    parse_memory_command,
-)
-from app.services.memory.memory_service import MemoryService
+from app.services.memory.memory_command import parse_memory_rule_action
 
 
 router = APIRouter(prefix="/agent", tags=["agent"])
@@ -100,7 +98,9 @@ async def agent_health(current_user: User = Depends(get_current_user)):
 @router.get("/metrics")
 async def agent_metrics(current_user: User = Depends(get_current_user)):
     """返回运行与 outbox 基础指标；生产环境应接入 Prometheus。"""
-    return await AgentRunService.metrics()
+    metrics: dict[str, Any] = await AgentRunService.metrics()
+    metrics["redis"] = redis_metrics()
+    return metrics
 
 @router.post("/query")
 async def agent_query(
@@ -108,6 +108,12 @@ async def agent_query(
     conversation_id: Optional[str] = Form(None),
     client_message_id: Optional[str] = Form(None),
     current_user: User = Depends(get_current_user)):
+    secret_decision = check_secrets(query)
+    if not secret_decision.should_continue:
+        raise HTTPException(
+            status_code=400,
+            detail="输入中包含密码、Token、验证码、私钥或其他凭据，请删除秘密值后重试",
+        )
     conversation_pk: int | None = None
     if conversation_id is not None:
         try:
@@ -157,41 +163,7 @@ async def agent_query(
                 run_id=run_id,
                 client_message_id=client_message_id,
             )
-        explicit_memory = parse_memory_command(query)
-        if explicit_memory is not None:
-            memory_key, memory_value = explicit_memory
-            await MemoryService.create(
-                tenant_id=current_user.tenant_id,
-                user_id=current_user.id,
-                memory_key=memory_key,
-                value=memory_value,
-                provenance={
-                    "source_type": "explicit_user_message",
-                    "conversation_id": conversation_pk,
-                    "message_id": user_message.id if user_message else None,
-                    "run_id": run_id,
-                    "excerpt": query[:500],
-                },
-                actor_id=str(current_user.id),
-            )
-        else:
-            candidate = extract_memory_candidate(query)
-            if candidate is not None:
-                candidate_key, candidate_value = candidate
-                await MemoryService.create_candidate(
-                    tenant_id=current_user.tenant_id,
-                    user_id=current_user.id,
-                    memory_key=candidate_key,
-                    value=candidate_value,
-                    provenance={
-                        "source_type": "candidate_extractor",
-                        "conversation_id": conversation_pk,
-                        "message_id": user_message.id if user_message else None,
-                        "run_id": run_id,
-                        "excerpt": query[:500],
-                    },
-                    actor_id=str(current_user.id),
-                )
+        memory_action = parse_memory_rule_action(query)
     except Exception as start_err:
         try:
             await AgentRunService.mark_failed(run_id, error_message=str(start_err))
@@ -386,6 +358,23 @@ async def agent_query(
             elif conversation_pk is None:
                 # 无业务会话时，checkpoint 已保存运行态，消息留档由调用方后续关联。
                 persistence_status = "checkpoint_only"
+
+            if memory_action.kind == "implicit":
+                try:
+                    await OutboxService.enqueue_memory_extraction(
+                        run_id=run_id,
+                        user_id=current_user.id,
+                        tenant_id=current_user.tenant_id,
+                        conversation_id=conversation_pk,
+                        message_id=user_message.id if user_message else None,
+                        source_text=query,
+                        agent_id="orchestrator",
+                        task_id="memory-extraction",
+                        trace_id=run_id,
+                    )
+                except Exception:
+                    # 异步偏好提取是增强能力，登记失败不能改变本轮回答结果。
+                    logger.exception("failed to enqueue memory extraction: {}", run_id)
 
             yield _sse({
                 "type": "done",

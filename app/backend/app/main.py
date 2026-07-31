@@ -8,14 +8,17 @@ from dotenv import load_dotenv
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 load_dotenv(_PROJECT_ROOT / ".env", override=False)
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response, status
 
 from agents.checkpoint import close_checkpoint, init_checkpoint
+from agents.orchestrator.agent_registry import list_agent_specs
 from app.services.memory.memory_store import close_memory_store, init_memory_store
+from app.services.memory.memory_catalog import validate_memory_configuration
 from app.api import api_router
 from app.core.config import settings
 from app.core.logger import get_logger
 from app.core.middleware import LoggingMiddleware  # 需从 AssistGen 迁 middleware.py
+from app.core.redis_client import close_redis, init_redis, redis_health
 from fastapi.middleware.cors import CORSMiddleware
 
 logger = get_logger(service="main")
@@ -23,15 +26,19 @@ logger = get_logger(service="main")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动
     logger.info("fin-agent-platform 启动中")
     logger.info(f"环境: {settings.APP_ENV}")
-    await init_checkpoint()
-    await init_memory_store()
-    yield
-    await close_checkpoint()
-    await close_memory_store()
-    logger.info("fin-agent-platform 正在关闭")
+    validate_memory_configuration(list_agent_specs())
+    try:
+        await init_checkpoint()
+        await init_memory_store()
+        await init_redis()
+        yield
+    finally:
+        await close_redis()
+        await close_checkpoint()
+        await close_memory_store()
+        logger.info("fin-agent-platform 正在关闭")
 
 
 app = FastAPI(
@@ -62,5 +69,15 @@ logger.info("已挂载 api_router，前缀 /api")
 
 
 @app.get("/health")
-async def health():
-    return {"status": "ok", "service": "fin-agent-platform"}
+async def health(response: Response):
+    redis_status = await redis_health()
+    degraded = redis_status["status"] == "degraded"
+    if degraded and settings.REDIS_REQUIRED:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return {
+        "status": "degraded" if degraded else "ok",
+        "service": "fin-agent-platform",
+        "components": {
+            "redis": redis_status,
+        },
+    }

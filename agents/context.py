@@ -16,8 +16,9 @@ def conversation_messages(
     history = list(state.get("messages") or [])
     summary = str(state.get("conversation_summary") or "").strip()
     memory_context = state.get("memory_context") or {}
+    turn_preferences = state.get("turn_preferences") or {}
 
-    if not summary and not memory_context:
+    if not summary and not memory_context and not turn_preferences:
         return history
 
     system_messages: list[SystemMessage] = []
@@ -33,6 +34,19 @@ def conversation_messages(
                     "[用户长期偏好]\n"
                     f"{preferences}\n"
                     "仅在当前请求未明确指定时参考长期偏好；当前轮用户要求优先。"
+                )
+            )
+        )
+    if turn_preferences:
+        preferences = "\n".join(
+            f"- {key}={value}" for key, value in sorted(turn_preferences.items())
+        )
+        system_messages.append(
+            SystemMessage(
+                content=(
+                    "[本轮临时要求]\n"
+                    f"{preferences}\n"
+                    "这些要求只在当前轮生效，并覆盖冲突的长期偏好。"
                 )
             )
         )

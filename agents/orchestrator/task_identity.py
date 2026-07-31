@@ -54,10 +54,11 @@ def ensure_task_identity(task: TaskSpec, *, scope: str = "") -> TaskSpec:
 
 def validate_task_plan(plan: TaskPlan, *, scope: str = "") -> TaskPlan:
     """重新构造并校验 TaskPlan，确保依赖和 capability 都经过验证。"""
+    validation_scope = scope or plan.plan_id
     tasks = [
         ensure_task_identity(
             ensure_task_domain_scope(task),
-            scope=scope or plan.plan_id,
+            scope=validation_scope,
         )
         for task in plan.tasks
     ]
@@ -84,6 +85,10 @@ def validate_task_plan(plan: TaskPlan, *, scope: str = "") -> TaskPlan:
         raise ValueError("attempt_id_must_be_unique")
     if len({item[3] for item in identities}) != len(identities):
         raise ValueError("idempotency_key_must_be_unique")
+    for task in validated.tasks:
+        expected_key = build_idempotency_key(task, scope=validation_scope)
+        if task.idempotency_key != expected_key:
+            raise ValueError(f"idempotency_key_mismatch:{task.task_id}")
     return validated
 
 

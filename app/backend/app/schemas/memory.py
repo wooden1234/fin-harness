@@ -35,7 +35,7 @@ class MemoryUpdate(BaseModel):
     value: Any | None = None
     display_text: str | None = Field(default=None, max_length=500)
     ttl_days: int | None = Field(default=None, ge=1, le=3650)
-    expected_version: int | None = Field(default=None, ge=1)
+    expected_version: int = Field(..., ge=1)
 
 
 class MemoryCorrection(MemoryUpdate):

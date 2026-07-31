@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
@@ -14,7 +15,12 @@ from agents.context_compressor import compress_context
 from agents.final_answer import final_answer_node
 from agents.guardrails import guardrails_edge, guardrails_node
 from agents.init_turn import init_turn_node
-from agents.memory_recall import memory_recall_node
+from agents.memory_recall import (
+    load_task_memories_node,
+    memory_action_edge,
+    memory_action_node,
+    memory_plan_node,
+)
 from agents.orchestrator.agent_registry import get_agent_spec, invoke_agent
 from agents.orchestrator.analyzer import analyze_request, heuristic_profile, latest_query
 from agents.orchestrator.contracts import (
@@ -105,6 +111,7 @@ async def build_plan(
         build_plan_from_profile(profile),
         scope=_task_scope(runtime),
     )
+    planning_status = str(plan.metadata.get("planning_status") or "")
     prior_results = (
         list(state.get("agent_results") or [])
         if profile.operation_type == "compute"
@@ -112,6 +119,8 @@ async def build_plan(
     )
     return {
         "task_plan": plan,
+        "execution_status": planning_status or "running",
+        "next_action": "synthesize" if planning_status == "uncovered" else "schedule",
         "route": "plan",
         "replan_count": 0,
         "agent_results": Overwrite([]),
@@ -259,6 +268,12 @@ def dispatch_wave(state: OrchestratorState) -> list[Send]:
                 {
                     "current_task": task,
                     "current_dependency_results": dependencies,
+                    "current_task_memory_context": deepcopy(
+                        (state.get("task_memory_context") or {}).get(
+                            task.task_id,
+                            {},
+                        )
+                    ),
                 },
             )
         )
@@ -301,6 +316,9 @@ async def execute_task(
                         dependency_results=list(
                             state.get("current_dependency_results") or []
                         ),
+                        memory_context=dict(
+                            state.get("current_task_memory_context") or {}
+                        ),
                         config=config,
                         runtime=runtime,
                     )
@@ -309,6 +327,9 @@ async def execute_task(
                     task,
                     dependency_results=list(
                         state.get("current_dependency_results") or []
+                    ),
+                    memory_context=dict(
+                        state.get("current_task_memory_context") or {}
                     ),
                     config=config,
                     runtime=runtime,
@@ -774,7 +795,7 @@ def route_after_quality_gate(state: OrchestratorState) -> str:
 
 
 def route_after_replan(state: OrchestratorState) -> str:
-    return "prepare_wave" if state.get("next_action") == "schedule" else "synthesize"
+    return "memory_plan" if state.get("next_action") == "schedule" else "synthesize"
 
 
 async def synthesize(
@@ -784,6 +805,16 @@ async def synthesize(
 ) -> dict[str, Any]:
     results = _effective_results(state)
     if not results:
+        plan = state.get("task_plan")
+        if (
+            state.get("execution_status") == "uncovered"
+            and plan is not None
+        ):
+            return {
+                "summary": "当前请求没有落在已授权的金融能力范围内，无法安全执行。",
+                "route": "plan",
+                "planning_error": plan.metadata.get("error_code"),
+            }
         if state.get("execution_status") == "soft_timeout":
             return {
                 "summary": "已达到本轮软时限，尚未获得可用结果，请缩小查询范围后重试。",
@@ -944,11 +975,13 @@ def build_orchestrator_graph() -> StateGraph:
     )
     builder.add_node("init_turn", init_turn_node)
     builder.add_node("guardrails", guardrails_node)
-    builder.add_node("memory_recall", memory_recall_node)
+    builder.add_node("memory_action", memory_action_node)
     builder.add_node("context_compressor", compress_context)
     builder.add_node("query_rewrite", query_rewrite_node)
     builder.add_node("analyze_request", analyze_request)
     builder.add_node("build_plan", build_plan)
+    builder.add_node("memory_plan", memory_plan_node)
+    builder.add_node("load_task_memories", load_task_memories_node)
     builder.add_node("prepare_wave", prepare_wave)
     builder.add_node("execute_task", execute_task)
     builder.add_node("wave_join", lambda state: {"steps": ["orchestrator:wave_join"]})
@@ -965,9 +998,13 @@ def build_orchestrator_graph() -> StateGraph:
     builder.add_conditional_edges(
         "guardrails",
         guardrails_edge,
-        {"memory_recall": "memory_recall", "final_answer": "final_answer"},
+        {"memory_action": "memory_action", "final_answer": "final_answer"},
     )
-    builder.add_edge("memory_recall", "context_compressor")
+    builder.add_conditional_edges(
+        "memory_action",
+        memory_action_edge,
+        {"continue": "context_compressor", "final_answer": "final_answer"},
+    )
     builder.add_edge("context_compressor", "query_rewrite")
     builder.add_conditional_edges(
         "query_rewrite",
@@ -978,7 +1015,9 @@ def build_orchestrator_graph() -> StateGraph:
         },
     )
     builder.add_edge("analyze_request", "build_plan")
-    builder.add_edge("build_plan", "prepare_wave")
+    builder.add_edge("build_plan", "memory_plan")
+    builder.add_edge("memory_plan", "load_task_memories")
+    builder.add_edge("load_task_memories", "prepare_wave")
     builder.add_conditional_edges("prepare_wave", dispatch_wave)
     builder.add_edge("execute_task", "wave_join")
     builder.add_conditional_edges(
@@ -1005,7 +1044,7 @@ def build_orchestrator_graph() -> StateGraph:
     builder.add_conditional_edges(
         "replan",
         route_after_replan,
-        {"prepare_wave": "prepare_wave", "synthesize": "synthesize"},
+        {"memory_plan": "memory_plan", "synthesize": "synthesize"},
     )
     builder.add_edge("synthesize", "final_answer")
     builder.add_edge("clarify", "final_answer")

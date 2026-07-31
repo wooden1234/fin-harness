@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from contextlib import AsyncExitStack
-from typing import Any
 from time import perf_counter
 
 from langgraph.store.postgres.aio import AsyncPostgresStore
@@ -11,6 +10,7 @@ from langgraph.store.postgres.base import PostgresIndexConfig
 
 from app.core.config import settings
 from retrieval.clients.embeddings import get_embed_model
+from app.services.memory.memory_catalog import MEMORY_TYPES
 from app.services.memory.memory_metrics import increment, observe
 
 _store: AsyncPostgresStore | None = None
@@ -26,8 +26,18 @@ async def _embed_texts(texts: list[str]) -> list[list[float]]:
     return result
 
 
-def memory_namespace(tenant_id: str, user_id: int, memory_type: str = "preference") -> tuple[str, str, str]:
+def memory_namespace(
+    tenant_id: str,
+    user_id: int,
+    memory_type: str,
+) -> tuple[str, str, str]:
     return (str(tenant_id), str(user_id), memory_type)
+
+
+def _require_vectorizable(memory_type: str) -> None:
+    definition = MEMORY_TYPES.get(memory_type)
+    if definition is None or not definition.vectorizable:
+        raise ValueError(f"memory_type_not_vectorizable:{memory_type}")
 
 
 async def init_memory_store() -> AsyncPostgresStore | None:
@@ -70,10 +80,9 @@ async def upsert_memory_index(
     user_id: int,
     memory_type: str,
     search_text: str,
-    memory_key: str,
-    value: Any,
     version: int,
 ) -> None:
+    _require_vectorizable(memory_type)
     store = get_memory_store()
     if store is None:
         raise RuntimeError("长期记忆 Store 未初始化")
@@ -82,12 +91,69 @@ async def upsert_memory_index(
         memory_id,
         {
             "memory_id": memory_id,
-            "memory_key": memory_key,
-            "value": value,
             "version": version,
             "search_text": search_text,
         },
     )
+
+
+async def search_memory_ids(
+    *,
+    tenant_id: str,
+    user_id: int,
+    memory_type: str,
+    query: str,
+    limit: int,
+) -> list[str]:
+    """向量层只暴露候选 ID，业务字段必须返回 PostgreSQL 核验。"""
+    _require_vectorizable(memory_type)
+    if not query.strip() or limit <= 0:
+        return []
+    store = get_memory_store()
+    if store is None:
+        return []
+    items = await store.asearch(
+        memory_namespace(tenant_id, user_id, memory_type),
+        query=query,
+        limit=limit,
+    )
+    return list(dict.fromkeys(str(item.key) for item in items))
+
+
+async def list_memory_index_entries(
+    *,
+    tenant_id: str,
+    user_id: int,
+    memory_type: str,
+    page_size: int = 500,
+) -> list[tuple[str, int | None]]:
+    """供一致性扫描读取索引键和版本；不作为 Agent 召回接口。"""
+    _require_vectorizable(memory_type)
+    store = get_memory_store()
+    if store is None:
+        return []
+    result: list[tuple[str, int | None]] = []
+    offset = 0
+    while True:
+        items = await store.asearch(
+            memory_namespace(tenant_id, user_id, memory_type),
+            query=None,
+            limit=max(1, min(page_size, 5000)),
+            offset=offset,
+        )
+        for item in items:
+            value = item.value if isinstance(item.value, dict) else {}
+            version = value.get("version")
+            result.append(
+                (
+                    str(item.key),
+                    int(version) if version is not None else None,
+                )
+            )
+        if len(items) < max(1, min(page_size, 5000)):
+            break
+        offset += len(items)
+    return result
 
 
 async def delete_memory_index(

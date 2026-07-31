@@ -30,6 +30,9 @@ class OrchestratorState(CoreState):
     current_task: NotRequired[TaskSpec]
     current_dependency_results: NotRequired[list[AgentResult]]
     prior_agent_results: NotRequired[list[AgentResult]]
+    memory_requirements: NotRequired[dict[str, dict[str, object]]]
+    task_memory_context: NotRequired[dict[str, dict[str, object]]]
+    current_task_memory_context: NotRequired[dict[str, object]]
 
     agent_results: NotRequired[Annotated[list[AgentResult], add]]
     evidence: NotRequired[Annotated[list[Evidence], add]]
@@ -47,6 +50,7 @@ class OrchestratorState(CoreState):
     execution_status: NotRequired[str]
     summary: NotRequired[str]
     route: NotRequired[str]
+    guardrail_decision: NotRequired[dict[str, object]]
     guardrails_pass: NotRequired[bool]
     guardrails_reason: NotRequired[str]
 

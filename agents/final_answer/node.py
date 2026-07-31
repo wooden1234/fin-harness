@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Overwrite
 
+from agents.guardrails.contracts import GuardrailAction, GuardrailDecision
 from agents.guardrails.output.finance_compliance import (
     review_finance_answer as review_answer,
 )
@@ -38,6 +39,58 @@ ROUTE_CLARIFICATION_ANSWER = (
     "我暂时无法明确判断您的查询目标。"
     "请补充更具体的对象和问题，例如公司或产品名称、年份、指标或查询口径。"
 )
+GUARDRAIL_RESPONSES = {
+    "prompt_injection_detected": (
+        "无法执行修改系统规则、披露内部指令或绕过安全限制的请求。"
+        "请直接描述需要解决的金融问题。"
+    ),
+    "prompt_injection_suspected": (
+        "你的请求可能包含角色切换或指令覆盖内容。"
+        "请去除这些内容，并直接描述需要解决的金融问题。"
+    ),
+    "pii_detected": (
+        "输入中包含敏感个人信息，请先完成脱敏后再提交。"
+    ),
+    "pii_redacted": "输入中的敏感个人信息已脱敏。",
+    "secret_detected": (
+        "输入中包含密码、Token、验证码、私钥或其他凭据，请删除秘密值后重新提交。"
+    ),
+    "harmful_content_detected": (
+        "无法协助处理该高风险内容。你可以改为咨询相关风险、法规或公开信息。"
+    ),
+    "harmful_instructions_detected": (
+        "无法协助提供高风险行为的实施方法。"
+        "你可以改为咨询相关风险、预防措施、法规或公开信息。"
+    ),
+    "harmful_content_needs_context": (
+        "你的请求涉及敏感内容，但目的尚不明确。"
+        "请说明你需要的是风险分析、法规信息、预防建议还是公开资料。"
+    ),
+    "self_harm_crisis_detected": (
+        "如果你或他人正面临立即危险，请立即联系当地紧急服务，"
+        "并尽快联系身边可信任的人或专业支持人员。"
+    ),
+}
+
+
+def _guardrail_response(state: FinAgentState) -> str | None:
+    """根据结构化原因返回准确且不暴露命中内容的话术。"""
+    decision_payload = state.get("guardrail_decision")
+    if decision_payload:
+        decision = GuardrailDecision.model_validate(decision_payload)
+        if decision.should_continue:
+            return None
+        reason_response = GUARDRAIL_RESPONSES.get(decision.reason_code)
+        if reason_response is not None:
+            return reason_response
+        if decision.action == GuardrailAction.ESCALATE:
+            return "该请求需要人工进一步审核，请联系人工服务。"
+        return "当前请求未通过安全检查，请调整内容后重新提交。"
+
+    if state.get("guardrails_pass") is False:
+        reason = state.get("guardrails_reason", "输入超出业务范围")
+        return f"抱歉，{reason}。请调整内容后重新提交。"
+    return None
 
 
 def _current_sub_task_ids(state: FinAgentState) -> set[str]:
@@ -160,10 +213,10 @@ async def final_answer_node(
     """统一格式化最终回答，附加引用来源"""
 
     force_empty_citations = False
+    guardrail_response = _guardrail_response(state)
 
-    if state.get("guardrails_pass") is False:
-        reason = state.get("guardrails_reason", "输入超出业务范围")
-        answer = f"抱歉，{reason}。我只能回答金融相关的问题，请重新提问。"
+    if guardrail_response is not None:
+        answer = guardrail_response
         force_empty_citations = True
     elif state.get("supervisor_action") in {"rewrite", "clarify"}:
         answer = ROUTE_CLARIFICATION_ANSWER
@@ -230,6 +283,7 @@ async def final_answer_node(
         # 本轮派生字段收口清空，避免跨轮残留。
         "rewritten_query": "",
         "rewrite_status": "",
+        "turn_preferences": {},
         "compliance_action": compliance_decision.action,
         "compliance_reason_code": compliance_decision.reason_code,
         "compliance_reason": compliance_decision.reason,

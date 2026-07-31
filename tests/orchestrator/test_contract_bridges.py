@@ -171,6 +171,7 @@ async def test_invoke_agent_passes_complete_dependency_state(monkeypatch) -> Non
             input_data={"top_k": 5},
         ),
         dependency_results=[dependency],
+        memory_context={"default_market": "US"},
     )
 
     assert captured["query"] == "继续过滤候选股票"
@@ -178,6 +179,8 @@ async def test_invoke_agent_passes_complete_dependency_state(monkeypatch) -> Non
     assert forwarded.structured_data["dataset_id"] == "candidate-1"
     assert forwarded.evidence[0].evidence_id == "e-1"
     assert captured["state"]["task_input"] == {"top_k": 5}
+    assert captured["state"]["memory_context"] == {"default_market": "US"}
+    assert "task_memory_context" not in captured["state"]
 
 
 @pytest.mark.asyncio

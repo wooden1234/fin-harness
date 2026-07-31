@@ -17,6 +17,7 @@ from agents.orchestrator.analyzer.validate import (
     validate_and_normalize,
 )
 from agents.orchestrator.contracts import RequestProfile, TaskSpec
+from agents.orchestrator.capability_resolver import resolve_finance_capabilities
 from agents.orchestrator.planner import build_plan_from_profile
 
 
@@ -35,6 +36,49 @@ def test_heuristic_finance_query():
     plan = build_plan_from_profile(profile)
     assert [task.task_id for task in plan.tasks] == ["finance"]
     assert_plan_capabilities(plan)
+
+
+def test_finance_capability_resolver_selects_structured_metric():
+    profile = heuristic_profile("贵州茅台营收多少")
+    plan = build_plan_from_profile(profile)
+
+    assert plan.tasks[0].required_capabilities == ["financial_query"]
+
+
+def test_finance_capability_resolver_selects_pdf_for_annual_report():
+    profile = RequestProfile(
+        original_query="根据贵州茅台年报分析现金流",
+        normalized_query="根据贵州茅台年报分析现金流",
+        intents=["financial_research"],
+        data_sources=["finance_rag"],
+        preferred_agent="finance_agent",
+    )
+    plan = build_plan_from_profile(profile)
+
+    assert plan.tasks[0].required_capabilities == ["pdf"]
+
+
+def test_finance_capability_resolver_fails_closed_for_no_source():
+    profile = RequestProfile(
+        original_query="回答这个问题",
+        normalized_query="回答这个问题",
+        intents=["financial_research"],
+        data_sources=["none"],
+        preferred_agent="finance_agent",
+    )
+    plan = build_plan_from_profile(profile)
+
+    assert plan.tasks == []
+    assert plan.metadata == {
+        "planning_status": "uncovered",
+        "error_code": "no_finance_capability_in_scope",
+    }
+
+
+def test_finance_capability_resolver_intersects_allowed_scope():
+    profile = heuristic_profile("贵州茅台营收多少")
+
+    assert resolve_finance_capabilities(profile, allowed_capabilities=["faq"]) == []
 
 
 def test_heuristic_metric_question_is_finance_not_stock():
@@ -229,6 +273,27 @@ def test_heuristic_research_query_uses_research_retrieval_workflow():
     assert plan.tasks[0].input_data == {
         "research_tool_id": "iwencai.announcement.search"
     }
+
+
+def test_heuristic_bare_report_keyword_uses_report_search():
+    """裸词“研报”曾经无法命中 iwencai.report.search，误判为 finance_agent。"""
+    for query in ("查询研报", "新能源研报", "帮我看下贵州茅台的研报", "宁德时代最新研报"):
+        profile = heuristic_profile(query)
+        plan = build_plan_from_profile(profile)
+
+        assert profile.preferred_agent == "research_retrieval_workflow", query
+        assert plan.tasks[0].input_data == {
+            "research_tool_id": "iwencai.report.search"
+        }, query
+
+
+def test_heuristic_rating_keyword_takes_priority_over_bare_report():
+    """“研报评级”应命中机构评级 Tool，不能被裸词“研报”抢先匹配。"""
+    profile = heuristic_profile("看一下机构对贵州茅台的研报评级")
+    plan = build_plan_from_profile(profile)
+
+    assert profile.preferred_agent == "research_retrieval_workflow"
+    assert plan.tasks[0].input_data == {"research_tool_id": "iwencai.rating.query"}
 
 
 def test_heuristic_upstream_filter_uses_market_compute():

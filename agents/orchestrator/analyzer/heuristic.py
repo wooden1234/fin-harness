@@ -49,8 +49,9 @@ _FINANCE_MARKERS = (
 
 _RESEARCH_TOOL_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("iwencai.announcement.search", ("公告", "回购", "分红派息", "资产重组")),
-    ("iwencai.report.search", ("研报搜索", "研究报告", "券商研报")),
+    # 评级/目标价 markers 需先于裸词“研报”匹配，避免“研报评级”被误判为研报搜索。
     ("iwencai.rating.query", ("机构评级", "研报评级", "目标价", "业绩预测", "ESG")),
+    ("iwencai.report.search", ("研报", "研报搜索", "研究报告", "券商研报")),
 )
 
 _MARKET_TOOL_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (

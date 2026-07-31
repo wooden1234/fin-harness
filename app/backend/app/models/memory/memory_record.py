@@ -1,6 +1,6 @@
 """长期记忆权威记录。"""
 
-from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, JSON, Numeric, String, Text, func
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, JSON, Numeric, String, Text, func, text
 
 from app.core.database import Base
 
@@ -10,6 +10,16 @@ class MemoryRecord(Base):
     __table_args__ = (
         Index("ix_memory_records_scope_status", "tenant_id", "user_id", "memory_type", "status"),
         Index("ix_memory_records_expiry", "status", "expires_at"),
+        Index(
+            "uq_active_memory",
+            "tenant_id",
+            "user_id",
+            "memory_type",
+            "memory_key",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+            sqlite_where=text("status = 'active'"),
+        ),
         {"schema": "app"},
     )
 

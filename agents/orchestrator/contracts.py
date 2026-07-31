@@ -210,6 +210,8 @@ class TaskSpec(BaseModel):
     output_schema: str = "AgentResult"
     priority: int = Field(default=0, ge=0)
     evidence_policy: EvidencePolicy | None = None
+    semantic_history: bool = False
+    semantic_memory_type: str = "episodic"
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

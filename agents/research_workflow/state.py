@@ -6,7 +6,10 @@ from typing import Any
 from typing_extensions import TypedDict
 
 from agents.orchestrator.contracts import AgentResult, TaskSpec
-from agents.research_workflow.contracts import ResearchPlan
+from agents.research_workflow.contracts import (
+    QuestionEvidenceAssessment,
+    ResearchPlan,
+)
 
 
 class ResearchWorkflowState(TypedDict, total=False):
@@ -15,11 +18,13 @@ class ResearchWorkflowState(TypedDict, total=False):
     messages: list[Any]
     query: str
     task_input: dict[str, Any]
+    task_identity: dict[str, Any]
     dependency_results: list[AgentResult]
     research_plan: ResearchPlan
     source_tasks: list[TaskSpec]
     source_results: list[AgentResult]
     deep_result: AgentResult
+    question_evidence_assessments: list[QuestionEvidenceAssessment]
     result: AgentResult
 
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -12,18 +11,14 @@ from app.core.database import AsyncSessionLocal
 from app.models.memory.memory_event import MemoryEvent
 from app.models.memory.memory_record import MemoryRecord
 from app.models.persistence.outbox_event import OutboxEvent
-
-_SENSITIVE_RULES = (
-    ("phone", re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")),
-    ("id_card", re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")),
-    ("bank_card", re.compile(r"(?<!\d)\d{16,19}(?!\d)")),
-    ("asset_or_holding", re.compile(r"持仓|资产|负债|银行卡|账户余额")),
-)
+from app.services.memory.memory_audit import MemoryAuditContext, add_audit, context_for
+from app.services.memory.memory_cache import MemoryCache
+from app.services.memory.memory_policy import find_sensitive_memory_rules
 
 
 def scan_memory(record: MemoryRecord) -> dict[str, Any]:
     text = f"{record.display_text} {record.search_text}"
-    matches = [name for name, pattern in _SENSITIVE_RULES if pattern.search(text)]
+    matches = list(find_sensitive_memory_rules(text))
     return {
         "memory_id": record.id,
         "risk": "high" if matches else "none",
@@ -50,7 +45,12 @@ class MemoryComplianceService:
 
     @staticmethod
     async def revoke(
-        *, memory_id: str, tenant_id: str, actor_id: int, reason: str
+        *,
+        memory_id: str,
+        tenant_id: str,
+        actor_id: int,
+        reason: str,
+        audit_context: MemoryAuditContext | None = None,
     ) -> MemoryRecord | None:
         async with AsyncSessionLocal() as db:
             record = await db.scalar(
@@ -62,6 +62,20 @@ class MemoryComplianceService:
             )
             if record is None:
                 return None
+            context = (
+                MemoryAuditContext(
+                    tenant_id=tenant_id,
+                    user_id=int(record.user_id),
+                    agent_id=audit_context.agent_id,
+                    task_id=audit_context.task_id,
+                    trace_id=audit_context.trace_id,
+                )
+                if audit_context is not None
+                else context_for(
+                    tenant_id=tenant_id,
+                    user_id=int(record.user_id),
+                )
+            )
             now = datetime.now(timezone.utc)
             record.status = "revoked"
             record.consent_status = "withdrawn"
@@ -77,9 +91,47 @@ class MemoryComplianceService:
                         "tenant_id": record.tenant_id,
                         "user_id": record.user_id,
                         "memory_type": record.memory_type,
+                        "agent_id": context.agent_id,
+                        "task_id": context.task_id,
+                        "trace_id": context.trace_id,
                     },
                     status="pending",
                 )
+            )
+            if record.memory_type == "preference":
+                db.add(
+                    OutboxEvent(
+                        event_key=(
+                            f"memory:cache:invalidate:{tenant_id}:"
+                            f"{record.user_id}:admin:{record.id}:v:{record.version}"
+                        ),
+                        event_type="memory.cache.invalidate",
+                        aggregate_id=f"{tenant_id}:{record.user_id}",
+                        payload={
+                            "tenant_id": tenant_id,
+                            "user_id": int(record.user_id),
+                            "memory_type": "preference",
+                            "agent_id": context.agent_id,
+                            "task_id": context.task_id,
+                            "trace_id": context.trace_id,
+                        },
+                        status="pending",
+                    )
+                )
+            add_audit(
+                db,
+                context=MemoryAuditContext(
+                    tenant_id=tenant_id,
+                    user_id=int(record.user_id),
+                    agent_id=context.agent_id,
+                    task_id=context.task_id,
+                    trace_id=context.trace_id,
+                ),
+                action="memory.delete",
+                resource_id=record.id,
+                memory_type=record.memory_type,
+                memory_key=record.memory_key,
+                details={"reason": reason, "admin": True},
             )
             db.add(
                 MemoryEvent(
@@ -96,4 +148,9 @@ class MemoryComplianceService:
             )
             await db.commit()
             await db.refresh(record)
-            return record
+        if record.memory_type == "preference":
+            await MemoryCache.invalidate_user(
+                tenant_id=record.tenant_id,
+                user_id=int(record.user_id),
+            )
+        return record
