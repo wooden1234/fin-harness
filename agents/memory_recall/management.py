@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
 import re
 from typing import Any
 
@@ -12,6 +13,10 @@ from agents.runtime_context import AgentRuntimeContext
 from agents.states import FinAgentState
 from app.services.memory.memory_command import parse_memory_rule_action
 from app.services.memory.memory_audit import MemoryAuditContext
+from app.services.memory.memory_episodic_extraction import (
+    detect_important_state_change,
+    extract_episodic_memory,
+)
 from app.services.memory.memory_policy import validate_preference
 from app.services.memory.memory_service import MemoryService
 
@@ -84,6 +89,11 @@ def _selected_candidate(
     return None
 
 
+def _state_change_key(subject_key: str) -> str:
+    digest = sha256(subject_key.encode("utf-8")).hexdigest()[:12]
+    return f"state_change:{subject_key[:36]}:{digest}"
+
+
 async def _execute_resolved_action(
     *,
     action,
@@ -144,6 +154,46 @@ async def memory_action_node(
             "summary": "已取消本次长期记忆操作。",
             "route": "memory_management",
         }
+
+    if not pending and detect_important_state_change(query):
+        extracted = await extract_episodic_memory(
+            query,
+            trigger_reason="explicit_state_change",
+            forced=True,
+            expected_event_type="state_change",
+        )
+        if extracted is not None:
+            try:
+                conversation_id = (
+                    int(context.conversation_id)
+                    if context.conversation_id is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                conversation_id = None
+            await MemoryService.create_episodic(
+                tenant_id=str(context.tenant_id),
+                user_id=int(context.user_id),
+                event_key=_state_change_key(extracted.subject_key),
+                value=extracted.value(),
+                display_text=extracted.summary,
+                source_conversation_id=conversation_id,
+                source_run_id=context.run_id,
+                provenance={
+                    "source_type": "explicit_state_change",
+                    "evidence": list(extracted.evidence),
+                    "excerpt": query[:500],
+                },
+                actor_id=str(context.user_id),
+                audit_context=MemoryAuditContext(
+                    tenant_id=str(context.tenant_id),
+                    user_id=int(context.user_id),
+                    agent_id="memory_management",
+                    task_id="state-change",
+                    trace_id=context.run_id,
+                ),
+            )
+        return {"memory_action_handled": False}
 
     candidates = list(pending.get("candidates") or [])
     selected = _selected_candidate(query, candidates) if pending else None

@@ -86,7 +86,11 @@ async def test_task_loader_keeps_parallel_agent_contexts_isolated(monkeypatch):
     ):
         del tenant_id, user_id
         assert bypass_cache is False
-        assert audit_context.task_id == "general"
+        expected_task_id = {
+            "general_agent": "general",
+            "finance_agent": "finance",
+        }[agent_id]
+        assert audit_context.task_id == expected_task_id
         keys = tuple(memory_keys)
         calls.append((agent_id, keys))
         values = {

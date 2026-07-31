@@ -10,6 +10,7 @@ from agents.checkpoint import make_thread_config
 from agents.guardrails.input.secrets import check_secrets
 from agents.orchestrator.graph import get_orchestrator_graph
 from agents.runtime_context import AgentRuntimeContext
+from agents.context_compressor.tokens import estimate_message_tokens
 from app.api.agent_progress import (
     VISIBLE_TASK_NODES,
     build_public_step_event,
@@ -30,6 +31,11 @@ from app.services.conversation.conversation_lock_service import (
 from app.services.agent.checkpoint_rebuild_service import CheckpointRebuildService
 from app.services.agent.checkpoint_registry_service import CheckpointRegistryService
 from app.services.memory.memory_command import parse_memory_rule_action
+from app.services.memory.memory_episodic_extraction import (
+    decide_post_turn_trigger,
+    detect_important_state_change,
+    is_substantive_progress,
+)
 
 
 router = APIRouter(prefix="/agent", tags=["agent"])
@@ -375,6 +381,71 @@ async def agent_query(
                 except Exception:
                     # 异步偏好提取是增强能力，登记失败不能改变本轮回答结果。
                     logger.exception("failed to enqueue memory extraction: {}", run_id)
+
+            state_messages = list(values.get("messages") or [])
+            task_plan = values.get("task_plan")
+            if isinstance(task_plan, dict):
+                tasks = list(task_plan.get("tasks") or [])
+            elif task_plan is not None:
+                tasks = list(getattr(task_plan, "tasks", []) or [])
+            else:
+                tasks = []
+            execution_status = str(values.get("execution_status") or "")
+            episodic_decision = decide_post_turn_trigger(
+                query=query,
+                final_response=final_response,
+                execution_status=execution_status,
+                task_count=len(tasks),
+                turn_count=sum(
+                    1
+                    for message in state_messages
+                    if isinstance(message, HumanMessage)
+                ),
+                uncompressed_tokens=sum(
+                    estimate_message_tokens(message)
+                    for message in state_messages
+                ),
+            )
+            needs_progress_check = (
+                conversation_pk is not None
+                and is_substantive_progress(
+                    query=query,
+                    final_response=final_response,
+                    execution_status=execution_status,
+                )
+            )
+            if (
+                not detect_important_state_change(query)
+                and (episodic_decision.should_enqueue or needs_progress_check)
+            ):
+                try:
+                    trigger_reasons = (
+                        episodic_decision.reasons
+                        if episodic_decision.reasons
+                        else ("progress_check",)
+                    )
+                    await OutboxService.enqueue_episodic_extraction(
+                        run_id=run_id,
+                        user_id=current_user.id,
+                        tenant_id=current_user.tenant_id,
+                        conversation_id=conversation_pk,
+                        message_id=assistant_message_id,
+                        query=query,
+                        final_response=final_response,
+                        execution_status=execution_status,
+                        task_count=len(tasks),
+                        trigger_reasons=trigger_reasons,
+                        forced=episodic_decision.forced,
+                        agent_id="orchestrator",
+                        task_id="episodic-extraction",
+                        trace_id=run_id,
+                    )
+                except Exception:
+                    # 事件摘要属于回答后的增强能力，登记失败不改变本轮结果。
+                    logger.exception(
+                        "failed to enqueue episodic extraction: {}",
+                        run_id,
+                    )
 
             yield _sse({
                 "type": "done",

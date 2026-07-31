@@ -74,6 +74,9 @@ async def test_preference_outbox_event_is_rejected_before_vector_write(
         nonlocal vector_writes
         vector_writes += 1
 
+    async def fake_audit(**_kwargs):
+        return None
+
     monkeypatch.setattr(
         memory_index_service,
         "AsyncSessionLocal",
@@ -83,6 +86,11 @@ async def test_preference_outbox_event_is_rejected_before_vector_write(
         memory_index_service,
         "upsert_memory_index",
         fake_upsert,
+    )
+    monkeypatch.setattr(
+        memory_index_service,
+        "record_audit",
+        fake_audit,
     )
 
     await memory_index_service.MemoryIndexService.upsert_from_event(
@@ -185,6 +193,9 @@ async def test_forged_cross_tenant_vector_id_never_enters_agent_state(
     async def fake_load_for_agent(**_kwargs):
         return SimpleNamespace(as_dict=lambda: {})
 
+    async def fake_audit(**_kwargs):
+        return None
+
     def fake_increment(name: str, value: int = 1):
         metrics[name] = metrics.get(name, 0) + value
 
@@ -199,6 +210,7 @@ async def test_forged_cross_tenant_vector_id_never_enters_agent_state(
         fake_verify,
     )
     monkeypatch.setattr(memory_loader, "increment", fake_increment)
+    monkeypatch.setattr(memory_loader, "record_audit", fake_audit)
     monkeypatch.setattr(
         planning.MemoryLoader,
         "load_for_agent",

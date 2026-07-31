@@ -4,6 +4,7 @@ from langchain_core.messages import HumanMessage
 import pytest
 
 from agents.memory_recall import management
+from app.services.memory.memory_episodic_extraction import ExtractedEpisodicMemory
 
 
 def _runtime():
@@ -86,3 +87,44 @@ async def test_confirmed_candidate_delete_executes_synchronously(monkeypatch):
     assert result["pending_memory_action"] == {}
     assert result["memory_cache_bypass"] is True
     assert result["summary"] == "已删除选中的长期记忆。"
+
+
+@pytest.mark.asyncio
+async def test_explicit_state_change_is_persisted_before_answer(monkeypatch):
+    created: list[dict] = []
+
+    async def fake_extract(*_args, **_kwargs):
+        return ExtractedEpisodicMemory(
+            event_type="state_change",
+            subject_key="retrieval_strategy",
+            topic="检索策略变化",
+            summary="检索策略调整为混合检索。",
+            facts=("旧策略为纯向量检索", "新策略为混合检索"),
+            conclusion="后续使用混合检索。",
+            evidence=("不再使用纯向量检索，改成混合检索",),
+            confidence=0.95,
+            quality_score=0.99,
+        )
+
+    async def fake_create(**kwargs):
+        created.append(kwargs)
+
+    monkeypatch.setattr(management, "extract_episodic_memory", fake_extract)
+    monkeypatch.setattr(
+        management.MemoryService,
+        "create_episodic",
+        fake_create,
+    )
+
+    result = await management.memory_action_node(
+        {
+            "messages": [
+                HumanMessage(content="不再使用纯向量检索，改成混合检索。")
+            ]
+        },
+        _runtime(),
+    )
+
+    assert result["memory_action_handled"] is False
+    assert created[0]["event_key"].startswith("state_change:retrieval_strategy")
+    assert created[0]["value"]["event_type"] == "state_change"

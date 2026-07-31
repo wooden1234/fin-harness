@@ -68,11 +68,16 @@ class MemoryResponse(BaseModel):
 
     @classmethod
     def from_record(cls, record: Any) -> "MemoryResponse":
+        value_json = record.value_json or {}
         return cls(
             id=record.id,
             memory_type=record.memory_type,
             memory_key=record.memory_key,
-            value=(record.value_json or {}).get("value"),
+            value=(
+                value_json.get("value")
+                if record.memory_type == "preference"
+                else value_json
+            ),
             display_text=record.display_text,
             consent_status=record.consent_status,
             confidence=float(record.confidence or 0),

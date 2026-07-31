@@ -430,6 +430,44 @@ class MemoryService:
         ttl_days = max(30, min(90, settings.EPISODIC_MEMORY_TTL_DAYS))
         effective_expires_at = expires_at or (now + timedelta(days=ttl_days))
         async with AsyncSessionLocal() as db:
+            current = await db.scalar(
+                MemoryService._scope(
+                    select(MemoryRecord).where(
+                        MemoryRecord.memory_type == "episodic",
+                        MemoryRecord.memory_key == event_key,
+                        MemoryRecord.status == "active",
+                    ).with_for_update(),
+                    tenant_id,
+                    user_id,
+                )
+            )
+            if (
+                current is not None
+                and current.value_json == value
+                and current.display_text == display_text
+            ):
+                return current
+            if current is not None:
+                current.status = "superseded"
+                current.updated_at = now
+                db.add(
+                    OutboxEvent(
+                        event_key=(
+                            f"memory:index:delete:{current.id}:"
+                            f"superseded:v:{current.version}"
+                        ),
+                        event_type="memory.index.delete",
+                        aggregate_id=current.id,
+                        payload={
+                            "memory_id": current.id,
+                            "tenant_id": tenant_id,
+                            "user_id": user_id,
+                            "memory_type": "episodic",
+                            **MemoryService._event_context(context),
+                        },
+                        status="pending",
+                    )
+                )
             record = MemoryRecord(
                 id=str(uuid4()),
                 tenant_id=tenant_id,
@@ -449,15 +487,20 @@ class MemoryService:
                 consent_status="granted",
                 consented_at=now,
                 status="active",
+                version=(int(current.version) + 1 if current else 1),
+                supersedes_id=current.id if current else None,
                 expires_at=effective_expires_at,
                 source_conversation_id=source_conversation_id,
                 source_message_id=source_message_id,
                 source_run_id=source_run_id,
             )
             db.add(record)
+            await db.flush()
             db.add(
                 OutboxEvent(
-                    event_key=f"memory:index:upsert:{record.id}:v:1",
+                    event_key=(
+                        f"memory:index:upsert:{record.id}:v:{record.version}"
+                    ),
                     event_type="memory.index.upsert",
                     aggregate_id=record.id,
                     payload={
@@ -465,7 +508,7 @@ class MemoryService:
                         "tenant_id": tenant_id,
                         "user_id": user_id,
                         "memory_type": "episodic",
-                        "version": 1,
+                        "version": int(record.version),
                         **MemoryService._event_context(context),
                     },
                     status="pending",
@@ -478,7 +521,30 @@ class MemoryService:
                 resource_id=record.id,
                 memory_type=record.memory_type,
                 memory_key=record.memory_key,
-                details={"version": 1, "source": "create_episodic"},
+                details={
+                    "version": int(record.version),
+                    "source": "create_episodic",
+                    "supersedes_id": current.id if current else None,
+                },
+            )
+            db.add(
+                MemoryEvent(
+                    id=str(uuid4()),
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    memory_id=record.id,
+                    event_type="updated" if current else "activated",
+                    event_key=(
+                        f"memory:{record.id}:v:{record.version}:"
+                        f"{'updated' if current else 'activated'}"
+                    ),
+                    payload_json={
+                        "memory_key": event_key,
+                        "supersedes_id": current.id if current else None,
+                    },
+                    actor_type="user",
+                    actor_id=actor_id,
+                )
             )
             await db.commit()
             await db.refresh(record)
@@ -500,6 +566,48 @@ class MemoryService:
                 ).order_by(MemoryRecord.created_at.desc())
             )
             return list(result.scalars().all())
+
+    @staticmethod
+    async def latest_episodic_for_conversation(
+        *,
+        tenant_id: str,
+        user_id: int,
+        conversation_id: int,
+    ) -> MemoryRecord | None:
+        """返回会话最近一次 active 事件摘要，供时间和消息增量阈值判断。"""
+        async with AsyncSessionLocal() as db:
+            return await db.scalar(
+                MemoryService._scope(
+                    select(MemoryRecord).where(
+                        MemoryRecord.memory_type == "episodic",
+                        MemoryRecord.source_conversation_id == conversation_id,
+                        MemoryRecord.status == "active",
+                    ),
+                    tenant_id,
+                    user_id,
+                ).order_by(MemoryRecord.created_at.desc()).limit(1)
+            )
+
+    @staticmethod
+    async def find_duplicate_episodic(
+        *,
+        tenant_id: str,
+        user_id: int,
+        display_text: str,
+    ) -> MemoryRecord | None:
+        """对 LLM 摘要执行 SQL 精确去重，向量相似只作为后续增强。"""
+        async with AsyncSessionLocal() as db:
+            return await db.scalar(
+                MemoryService._scope(
+                    select(MemoryRecord).where(
+                        MemoryRecord.memory_type == "episodic",
+                        MemoryRecord.display_text == display_text,
+                        MemoryRecord.status == "active",
+                    ),
+                    tenant_id,
+                    user_id,
+                ).limit(1)
+            )
 
     @staticmethod
     async def list_active_vectorizable(

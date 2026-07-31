@@ -136,7 +136,7 @@ async def load_task_memories_node(
                 user_id=int(runtime_context.user_id),
                 agent_id=agent_id,
                 task_id=task_id,
-                trace_id=runtime_context.run_id,
+                trace_id=getattr(runtime_context, "run_id", None),
             )
             effective: dict[str, Any] = {}
             if memory_keys:
