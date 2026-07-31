@@ -9,6 +9,8 @@ RESEARCH_PLANNER_SYSTEM_PROMPT = """你是金融研究工作流的研究计划�
 3. 必须包含批判检查：支持证据、反方证据、冲突和未解决缺口。
 4. 不生成投资建议、收益预测或无证据结论。
 5. 只输出结构化结果。
+6. local_documents 表示已通过质量准入的本地 PDF；stable_rules 表示稳定 FAQ 或企业制度模板。
+7. local_documents 与 stable_rules 只声明语义来源，不得输出 Skill 名称或知识工具 ID。
 """
 
 

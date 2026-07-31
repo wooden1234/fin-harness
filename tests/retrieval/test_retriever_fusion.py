@@ -3,10 +3,12 @@ from retrieval.retrievers.retriever import (
     RetrievalHit,
     VectorRetriever,
     _auto_merge_parent_hits,
+    _milvus_filter_expr,
     _rrf_fuse_hits,
     _scale_vector_diversity_penalty,
     _select_vector_hits,
     _weighted_fuse_hits,
+    get_faq_retriever,
 )
 
 
@@ -102,6 +104,75 @@ def test_vector_search_returns_list_when_enforce_on_empty_false(monkeypatch):
     assert hits is not None
     assert len(hits) == 1
     assert hits[0].node_id == "a"
+
+
+def test_milvus_filter_expr_keeps_faq_scope() -> None:
+    expression = _milvus_filter_expr(
+        {"domain": "capital_market", "doc_type": "faq"}
+    )
+
+    assert "domain in ['capital_market']" in expression
+    assert "doc_type in ['faq']" in expression
+
+
+def test_faq_retriever_falls_back_to_pg_bm25_and_keeps_domain_filter(monkeypatch):
+    monkeypatch.setattr(
+        "retrieval.retrievers.retriever.settings.ELASTICSEARCH_ENABLED",
+        False,
+    )
+    monkeypatch.setattr(
+        "retrieval.retrievers.retriever.rerank_enabled",
+        lambda: False,
+    )
+    retriever = get_faq_retriever(
+        top_k=3,
+        similarity_threshold=None,
+        metadata_filters={"domain": "capital_market"},
+    )
+    assert isinstance(retriever, HybridRetriever)
+    monkeypatch.setattr(retriever.vector_retriever, "search", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        "retrieval.retrievers.retriever._load_pg_bm25_rows",
+        lambda category: [
+            RetrievalHit(
+                text="T+1 是证券交易交收规则。",
+                score=0.0,
+                metadata={"domain": "capital_market", "category": "faq"},
+                node_id="capital",
+                category="faq",
+            ),
+            RetrievalHit(
+                text="T+1 报销应按企业审批制度执行。",
+                score=0.0,
+                metadata={"domain": "corporate_finance", "category": "faq"},
+                node_id="corporate",
+                category="faq",
+            ),
+            RetrievalHit(
+                text="集合竞价用于确定开盘价格。",
+                score=0.0,
+                metadata={"domain": "capital_market", "category": "faq"},
+                node_id="auction",
+                category="faq",
+            ),
+            RetrievalHit(
+                text="基金净值通常在交易日结束后更新。",
+                score=0.0,
+                metadata={"domain": "capital_market", "category": "faq"},
+                node_id="fund",
+                category="faq",
+            ),
+        ],
+    )
+
+    hits = retriever.search(
+        "T+1 交易规则",
+        top_k=3,
+        metadata_filters={"domain": "capital_market"},
+    )
+
+    assert [hit.node_id for hit in hits] == ["capital"]
+    assert hits[0].metadata["bm25_backend"] == "local"
 
 
 def test_rerank_failure_keeps_fusion_score_and_marks_fallback(monkeypatch):

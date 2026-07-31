@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from langchain_core.runnables import RunnableConfig
 
+from agents.context import project_conversation_context
 from agents.states import FinAgentState
 from agents.finance_agent.planner.common import (
     assign_task_ids,
@@ -25,7 +26,7 @@ async def repair_plan_node(
     query = str(state.get("planner_query") or "")
     raw_tasks = list(state.get("planner_raw_tasks") or [])
     issues = list(state.get("planner_validation_issues") or [])
-    conversation_summary = str(state.get("conversation_summary") or "")
+    conversation_summary = project_conversation_context(state, purpose="planning")
     rewritten_query = str(state.get("rewritten_query") or "")
     try:
         domain_scope = domain_scope_from_state(state)

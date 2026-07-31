@@ -19,6 +19,8 @@ if TYPE_CHECKING:
 
 _ROOT_META_FIELDS = (
     "doc_id",
+    "domain",
+    "doc_type",
     "source",
     "file",
     "title",
@@ -164,7 +166,7 @@ def _filter_clauses(filters: MetadataFilters | None) -> list[dict[str, Any]]:
     if categories:
         clauses.append({"terms": {"category": categories}})
 
-    for field in ("doc_id", "ticker"):
+    for field in ("doc_id", "ticker", "domain", "doc_type"):
         values = _filter_values(filters.get(field))
         if values:
             clauses.append({"terms": {field: values}})

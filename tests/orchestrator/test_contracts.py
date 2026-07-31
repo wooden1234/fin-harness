@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from agents.orchestrator.contracts import (
     AgentResult,
     Evidence,
+    ExecutionDecision,
     RequestProfile,
     TaskPlan,
     TaskSpec,
@@ -22,10 +23,13 @@ def _task(task_id: str, *, depends_on: list[str] | None = None) -> TaskSpec:
 
 
 def test_request_profile_defaults_are_stable() -> None:
-    profile = RequestProfile(original_query="筛选新能源股票")
+    profile = RequestProfile(
+        original_query="筛选新能源股票",
+        execution=ExecutionDecision(mode="stock_screen", budget_tier="standard"),
+    )
 
     assert profile.domain == "finance"
-    assert profile.complexity == "simple"
+    assert profile.execution.budget_tier == "standard"
     assert profile.constraints == {}
 
 

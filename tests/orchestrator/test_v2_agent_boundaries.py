@@ -229,7 +229,7 @@ async def test_market_compute_only_uses_upstream_candidate_set() -> None:
     assert result.evidence[0].evidence_id == "e-1"
 
 
-async def test_deep_research_requires_tool_evidence(monkeypatch) -> None:
+async def test_deep_research_rejects_tool_call_placeholder_as_evidence(monkeypatch) -> None:
     class FakeDeepAgent:
         async def ainvoke(self, state, config=None):
             return {"messages": [AIMessage(content="基于公告和研报形成研究结论")]}
@@ -254,9 +254,7 @@ async def test_deep_research_requires_tool_evidence(monkeypatch) -> None:
         query="深度研究宁德时代",
     )
 
-    assert result.status == "completed"
-    assert result.answer == "基于公告和研报形成研究结论"
+    assert result.status == "failed"
+    assert result.error_code == "deep_research_evidence_missing"
     assert result.metadata["runtime"] == "deep_agent"
-    assert result.evidence[0].source_type == "iwencai.report.search"
-    report = DeepResearchReport.model_validate(result.structured_data)
-    assert report.source_tools == ["iwencai.report.search"]
+    assert result.evidence == []

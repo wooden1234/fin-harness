@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Mapping, Sequence
 from functools import lru_cache
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
+from langchain_core.messages import HumanMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 
@@ -17,6 +19,13 @@ from agents.research_workflow.contracts import (
     ResearchPlan,
     ResearchQuestion,
 )
+from agents.context_space import (
+    ContextBudgetPolicy,
+    ContextSpaceType,
+    measure_context,
+)
+from agents.context_space.events import record_context_event
+from agents.research_workflow.context_space import prepare_research_model_context
 from agents.research_workflow.planner import (
     _validate_source_tasks,
     plan_research_adaptive,
@@ -179,6 +188,7 @@ async def run_deep_research(
 ) -> dict[str, Any]:
     """把来源任务和外部依赖统一交给受限 DeepAgent 分析。"""
     from agents.research_workflow.deep_agent import run_deep_research_agent
+    from agents.research_workflow.deep_agent.runtime import skills_for_data_sources
 
     plan = state.get("research_plan")
     if plan is None or bool(plan.metadata.get("scope_blocked")):
@@ -192,10 +202,22 @@ async def run_deep_research(
                 gaps=["Root 明确限制了可用研究来源，无法形成证据链。"],
             )
         }
+    if not bool(state.get("research_context_admitted", True)):
+        return {
+            "deep_result": AgentResult(
+                task_id="deep-research",
+                agent_id="deep_research_agent",
+                status="partial",
+                answer="研究上下文超过安全窗口，已停止扩展来源。",
+                error_code="research_context_admission_rejected",
+                gaps=["研究来源结果在压缩和裁剪后仍超过模型安全窗口。"],
+            )
+        }
+    model_dependencies = list(state.get("model_dependency_results") or [])
     dependencies = [
-        *list(state.get("dependency_results") or []),
         *([_research_plan_result(plan)] if plan is not None else []),
-        *list(state.get("source_results") or []),
+        *(model_dependencies or list(state.get("dependency_results") or [])),
+        *([] if model_dependencies else list(state.get("source_results") or [])),
     ]
     result = await run_deep_research_agent(
         {
@@ -205,8 +227,120 @@ async def run_deep_research(
         query=str(state.get("query") or ""),
         config=config,
         runtime=runtime,
+        parent_compaction_round_count=int(
+            (state.get("research_context_counters") or {}).get(
+                "compaction_round_count", 0
+            )
+        ),
+        allowed_skills=skills_for_data_sources(plan.data_sources),
     )
     return {"deep_result": result}
+
+
+async def prepare_research_context(
+    state: ResearchWorkflowState,
+    config: RunnableConfig = None,
+    runtime: Runtime[AgentRuntimeContext] | None = None,
+) -> dict[str, Any]:
+    """保留完整来源状态，只为模型创建受预算约束的投影。"""
+    plan = state.get("research_plan")
+    if plan is None:
+        return {
+            "model_dependency_results": [],
+            "research_context_admitted": True,
+            "research_context_counters": {},
+        }
+    policy = ContextBudgetPolicy(
+        explicit_max_tokens=int(settings.CONTEXT_RESEARCH_MAX_TOKENS),
+        trigger_ratio=float(settings.CONTEXT_TRIGGER_RATIO),
+        target_ratio=float(settings.CONTEXT_TARGET_RATIO),
+        admission_ratio=float(settings.CONTEXT_ADMISSION_RATIO),
+        approximate_safety_multiplier=float(
+            settings.CONTEXT_APPROXIMATE_SAFETY_MULTIPLIER
+        ),
+        max_compaction_rounds=2,
+    )
+    projected, summary, counters, admitted = await prepare_research_model_context(
+        query=str(state.get("query") or ""),
+        plan=plan,
+        dependency_results=list(state.get("dependency_results") or []),
+        source_results=list(state.get("source_results") or []),
+        policy=policy,
+        config=config,
+    )
+    measurement = measure_context(
+        [HumanMessage(content=str(state.get("query") or ""))],
+        policy=policy,
+        model=None,
+        extra_texts=[
+            plan.model_dump_json(),
+            json.dumps(
+                [item.model_dump(mode="json") for item in projected],
+                ensure_ascii=False,
+                default=str,
+            ),
+        ],
+    )
+    if counters.compaction_round_count:
+        await record_context_event(
+            runtime,
+            space_type=ContextSpaceType.RESEARCH_RUN,
+            event_type="context.threshold_exceeded",
+            measurement=measurement,
+            counters=counters,
+            agent_id="research_context_governor",
+        )
+        await record_context_event(
+            runtime,
+            space_type=ContextSpaceType.RESEARCH_RUN,
+            event_type="context.compaction_completed",
+            measurement=measurement,
+            counters=counters,
+            agent_id="research_context_governor",
+            details={
+                "evidence_ids": [
+                    evidence.evidence_id
+                    for item in projected
+                    for evidence in item.evidence
+                ],
+            },
+        )
+    if counters.summary_attempt_count > 1:
+        await record_context_event(
+            runtime,
+            space_type=ContextSpaceType.RESEARCH_RUN,
+            event_type="context.summary_repair",
+            measurement=measurement,
+            counters=counters,
+            agent_id="research_context_governor",
+        )
+    if counters.snip_count:
+        await record_context_event(
+            runtime,
+            space_type=ContextSpaceType.RESEARCH_RUN,
+            event_type="context.snip_applied",
+            measurement=measurement,
+            counters=counters,
+            agent_id="research_context_governor",
+        )
+    if not admitted:
+        await record_context_event(
+            runtime,
+            space_type=ContextSpaceType.RESEARCH_RUN,
+            event_type="context.admission_rejected",
+            measurement=measurement,
+            counters=counters,
+            agent_id="research_context_governor",
+            details={"admitted": False},
+        )
+    result: dict[str, Any] = {
+        "model_dependency_results": projected,
+        "research_context_admitted": admitted,
+        "research_context_counters": counters.model_dump(mode="json"),
+    }
+    if summary is not None:
+        result["research_context_summary"] = summary
+    return result
 
 
 def _research_plan_result(plan: ResearchPlan) -> AgentResult:
@@ -265,6 +399,16 @@ def _question_evidence(
                 continue
             if item.evidence_id in seen:
                 continue
+            quality_status = str(item.metadata.get("quality_status") or "approved")
+            if quality_status in {"quarantined", "rejected"}:
+                continue
+            question_id = str(item.metadata.get("research_question_id") or "")
+            if (
+                question.question_id != "critical_review"
+                and question_id
+                and question_id != question.question_id
+            ):
+                continue
             seen.add(item.evidence_id)
             evidence.append(item)
     return evidence, relevant_results
@@ -280,6 +424,11 @@ def _assess_question(
         question,
         source_results,
     )
+    source_groups = {
+        str(item.metadata.get("source_group") or item.evidence_id)
+        for item in evidence
+    }
+    evidence_count = len(source_groups)
     required_count = max(policy.min_count, 1) if policy.required else 0
     missing_provenance_count = (
         sum(1 for item in evidence if not _has_provenance(item))
@@ -290,9 +439,9 @@ def _assess_question(
         bool(result.structured_data) for result in relevant_results
     )
     gaps: list[str] = []
-    if policy.required and len(evidence) < required_count:
+    if policy.required and evidence_count < required_count:
         gaps.append(
-            f"evidence_count_below_minimum:{len(evidence)}<{required_count}"
+            f"evidence_source_groups_below_minimum:{evidence_count}<{required_count}"
         )
     if missing_provenance_count:
         gaps.append(
@@ -305,7 +454,7 @@ def _assess_question(
         source_task_ids=list(question.source_task_ids),
         evidence_ids=[item.evidence_id for item in evidence],
         passed=not gaps,
-        evidence_count=len(evidence),
+        evidence_count=evidence_count,
         required_count=required_count,
         missing_provenance_count=missing_provenance_count,
         structured_data_present=structured_data_present,
@@ -323,6 +472,9 @@ async def validate_question_evidence(
     if plan is None:
         return {"question_evidence_assessments": []}
     source_results = list(state.get("source_results") or [])
+    deep_result = state.get("deep_result")
+    if deep_result is not None:
+        source_results.append(deep_result)
     return {
         "question_evidence_assessments": [
             _assess_question(question, source_results)
@@ -430,6 +582,7 @@ def build_research_workflow() -> StateGraph:
     )
     builder.add_node("plan_research", plan_research)
     builder.add_node("collect_sources", collect_research_sources)
+    builder.add_node("prepare_research_context", prepare_research_context)
     builder.add_node("deep_research", run_deep_research)
     builder.add_node(
         "validate_question_evidence",
@@ -438,7 +591,8 @@ def build_research_workflow() -> StateGraph:
     builder.add_node("finalize_research", finalize_research)
     builder.add_edge(START, "plan_research")
     builder.add_edge("plan_research", "collect_sources")
-    builder.add_edge("collect_sources", "deep_research")
+    builder.add_edge("collect_sources", "prepare_research_context")
+    builder.add_edge("prepare_research_context", "deep_research")
     builder.add_edge("deep_research", "validate_question_evidence")
     builder.add_edge("validate_question_evidence", "finalize_research")
     builder.add_edge("finalize_research", END)

@@ -7,36 +7,32 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import HumanMessage
-from langgraph.types import Overwrite
 
-from app.agents.finance_agent.planner.eval_cases import (
+from agents.finance_agent.planner.eval_cases import (
     DEFAULT_EVAL_PATH,
     load_eval_cases,
     score_case,
     summarize,
 )
-from app.agents.finance_agent.planner.common import (
+from agents.finance_agent.planner.common import (
     is_schema_error,
     is_transient_api_error,
 )
-from app.agents.finance_agent.planner.node import (
-    supervisor_node,
-)
-from app.agents.finance_agent.planner.plan_tasks import (
+from agents.finance_agent.planner.plan_tasks import (
     plan_tasks_node,
 )
-from app.agents.finance_agent.planner.repair_plan import (
+from agents.finance_agent.planner.repair_plan import (
     repair_plan_node,
 )
-from app.agents.finance_agent.planner.validate_plan import (
+from agents.finance_agent.planner.validate_plan import (
     route_after_validate_plan,
     validate_plan_node,
 )
-from app.agents.finance_agent.planner.validate import (
+from agents.finance_agent.planner.validate import (
     MAX_SUBTASKS,
     validate_and_normalize_tasks,
 )
-from app.agents.states import PlannerOutput, SubTask
+from app.shared import PlannerOutput, SubTask
 
 EVAL_PATH = DEFAULT_EVAL_PATH
 
@@ -56,8 +52,7 @@ def test_validate_drops_empty_and_forbidden_types():
     assert result.tasks[0].intent == "concept_explain"
     assert result.needs_repair is True
     assert "empty_question" in result.issues
-    assert "forbidden_type:general" in result.issues
-    assert any(i.startswith("unknown_type:") for i in result.issues)
+    assert result.issues.count("missing_intent") == 2
 
 
 def test_validate_merges_near_duplicates_and_caps():
@@ -90,118 +85,6 @@ def test_transient_and_schema_error_detection():
 
     assert is_schema_error(OutputParserException("bad json"))
     assert not is_schema_error(RuntimeError("boom"))
-
-
-@pytest.mark.asyncio
-async def test_supervisor_skip_empty_query_has_reason():
-    out = await supervisor_node({"sub_tasks": []}, {})
-    assert out["sub_tasks"] == []
-    assert out["steps"] == ["validate_plan:skip"]
-    assert out["planner_error_reason"] == "empty_query"
-    assert isinstance(out["task_results"], Overwrite)
-
-
-@pytest.mark.asyncio
-async def test_supervisor_api_error_retries_then_fallback():
-    mock_llm = MagicMock()
-    mock_structured = MagicMock()
-    mock_structured.ainvoke = AsyncMock(side_effect=TimeoutError("timeout"))
-    mock_llm.with_structured_output.return_value = mock_structured
-
-    with patch(
-        "agents.finance_agent.planner.common.get_router_llm",
-        return_value=mock_llm,
-    ):
-        out = await supervisor_node(
-            {"messages": [HumanMessage(content="宁德时代营收")]},
-            {},
-    )
-
-    assert out["sub_tasks"] == []
-    assert out["steps"] == ["validate_plan:skip"]
-    assert out["planner_error_reason"] == "api_error"
-    assert mock_structured.ainvoke.await_count == 2
-
-
-@pytest.mark.asyncio
-async def test_supervisor_schema_error_attempts_repair():
-    class OutputParserException(Exception):
-        pass
-
-    good = PlannerOutput(tasks=[SubTask(id="t1", question="什么是T+1", type="faq")])
-    mock_llm = MagicMock()
-    mock_structured = MagicMock()
-    mock_structured.ainvoke = AsyncMock(
-        side_effect=[OutputParserException("bad json"), good]
-    )
-    mock_llm.with_structured_output.return_value = mock_structured
-
-    with patch(
-        "agents.finance_agent.planner.common.get_router_llm",
-        return_value=mock_llm,
-    ):
-        out = await supervisor_node(
-            {"messages": [HumanMessage(content="什么是 T+1？")]},
-            {},
-    )
-
-    assert len(out["sub_tasks"]) == 1
-    assert out["sub_tasks"][0].type == "faq"
-    assert out["steps"] == ["repair_plan"]
-    assert out["planner_repair_attempted"] is True
-    assert mock_structured.ainvoke.await_count == 2
-
-
-@pytest.mark.asyncio
-async def test_supervisor_validation_repair_then_success():
-    dirty = PlannerOutput(
-        tasks=[
-            SubTask(id="t1", question="", type="faq"),
-            SubTask(id="t2", question="随便", type="general"),
-        ]
-    )
-    fixed = PlannerOutput(
-        tasks=[SubTask(id="t3", question="T+1 交易制度是什么意思", type="faq")]
-    )
-    mock_llm = MagicMock()
-    mock_structured = MagicMock()
-    mock_structured.ainvoke = AsyncMock(side_effect=[dirty, fixed])
-    mock_llm.with_structured_output.return_value = mock_structured
-
-    with patch(
-        "agents.finance_agent.planner.common.get_router_llm",
-        return_value=mock_llm,
-    ):
-        out = await supervisor_node(
-            {"messages": [HumanMessage(content="什么是 T+1？")]},
-            {},
-        )
-
-    assert len(out["sub_tasks"]) == 1
-    assert out["sub_tasks"][0].type == "faq"
-    assert mock_structured.ainvoke.await_count == 2
-
-
-@pytest.mark.asyncio
-async def test_supervisor_unclassifiable_empty_plan():
-    mock_output = PlannerOutput(tasks=[])
-    mock_llm = MagicMock()
-    mock_structured = MagicMock()
-    mock_structured.ainvoke = AsyncMock(return_value=mock_output)
-    mock_llm.with_structured_output.return_value = mock_structured
-
-    with patch(
-        "agents.finance_agent.planner.common.get_router_llm",
-        return_value=mock_llm,
-    ):
-        out = await supervisor_node(
-            {"messages": [HumanMessage(content="帮我看看")]},
-            {},
-        )
-
-    assert out["sub_tasks"] == []
-    assert out["steps"] == ["validate_plan:unclassifiable"]
-    assert out["planner_error_reason"] == "unclassifiable"
 
 
 @pytest.mark.asyncio

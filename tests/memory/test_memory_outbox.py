@@ -4,7 +4,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.services.persistence import outbox_service
-from app.services.memory.memory_episodic_extraction import ExtractedEpisodicMemory
+from app.services.memory.memory_episodic_extraction import (
+    ExtractedEpisodicMemory,
+    estimate_episodic_tokens,
+)
 
 
 @pytest.mark.asyncio
@@ -174,3 +177,85 @@ async def test_outbox_extracts_completed_task_into_episodic_memory(monkeypatch):
     assert created[0]["event_key"] == "task_result:12:11"
     assert created[0]["source_message_id"] == 11
     assert created[0]["value"]["subject_key"] == "stock_analysis"
+
+
+@pytest.mark.asyncio
+async def test_episodic_metrics_use_original_messages_not_compressed_state(
+    monkeypatch,
+):
+    messages = [
+        {"id": 1, "sender": "user", "content": "第一轮问题"},
+        {"id": 2, "sender": "assistant", "content": "第一轮回答" * 100},
+        {"id": 3, "sender": "user", "content": "第二轮问题"},
+        {"id": 4, "sender": "assistant", "content": "第二轮回答" * 100},
+    ]
+
+    async def fake_latest(**_kwargs):
+        return None
+
+    async def fake_messages(*_args, **_kwargs):
+        return messages
+
+    monkeypatch.setattr(
+        outbox_service.MemoryService,
+        "latest_episodic_for_conversation",
+        fake_latest,
+    )
+    monkeypatch.setattr(
+        outbox_service.ConversationService,
+        "get_conversation_messages",
+        fake_messages,
+    )
+
+    window = await outbox_service.OutboxService.episodic_context_window(
+        tenant_id="tenant-1",
+        user_id=7,
+        conversation_id=12,
+        query="第二轮问题",
+        final_response="第二轮回答" * 100,
+    )
+
+    assert window.turn_count == 2
+    assert window.uncompressed_tokens == estimate_episodic_tokens(window.source_text)
+    assert "第一轮问题" in window.source_text
+    assert "第二轮问题" in window.source_text
+
+
+@pytest.mark.asyncio
+async def test_episodic_metrics_restart_after_latest_memory_boundary(monkeypatch):
+    messages = [
+        {"id": 10, "sender": "user", "content": "已经总结的旧问题"},
+        {"id": 11, "sender": "assistant", "content": "已经总结的旧回答"},
+        {"id": 12, "sender": "user", "content": "边界后的新问题"},
+    ]
+
+    async def fake_latest(**_kwargs):
+        return SimpleNamespace(source_message_id=11)
+
+    async def fake_messages(*_args, **_kwargs):
+        return messages
+
+    monkeypatch.setattr(
+        outbox_service.MemoryService,
+        "latest_episodic_for_conversation",
+        fake_latest,
+    )
+    monkeypatch.setattr(
+        outbox_service.ConversationService,
+        "get_conversation_messages",
+        fake_messages,
+    )
+
+    window = await outbox_service.OutboxService.episodic_context_window(
+        tenant_id="tenant-1",
+        user_id=7,
+        conversation_id=12,
+        query="边界后的新问题",
+        final_response="尚未持久化的新回答",
+    )
+
+    assert window.turn_count == 1
+    assert [message["id"] for message in window.messages] == [12]
+    assert "已经总结的旧问题" not in window.source_text
+    assert "边界后的新问题" in window.source_text
+    assert "尚未持久化的新回答" in window.source_text

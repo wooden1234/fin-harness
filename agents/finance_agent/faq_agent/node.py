@@ -11,7 +11,12 @@ from agents.finance_agent.faq_agent.prompts import FAQ_BUSY_ANSWER, FAQ_SYSTEM_P
 from agents.states import Citation, FinAgentState
 from app.core.config import settings
 from app.core.logger import get_logger
-from retrieval import RetrievalHit, get_faq_retriever
+from retrieval import RetrievalHit
+from retrieval.services import (
+    CORPORATE_TEMPLATE_NOTICE,
+    infer_faq_domain,
+    search_faq_knowledge,
+)
 
 logger = get_logger(service="faq_agent")
 
@@ -59,8 +64,8 @@ async def faq_agent(
 
     logger.info("faq_agent query={} sub_task_id={}", query[:80], sub_task_id)
 
-    retriever = get_faq_retriever(top_k=3, similarity_threshold=None)
-    hits = retriever.search(query, top_k=3)
+    domain = infer_faq_domain(query)
+    hits = await search_faq_knowledge(query, domain=domain, top_k=3)
 
     citations = _hits_to_citations(hits, sub_task_id=sub_task_id) if hits else []
 
@@ -87,6 +92,8 @@ async def faq_agent(
         }
 
     context = _build_context(hits)
+    if domain == "corporate_finance":
+        context = f"{context}\n\n[模板说明]\n{CORPORATE_TEMPLATE_NOTICE}"
     citations = _hits_to_citations(hits, sub_task_id=sub_task_id)
 
     llm_messages = [

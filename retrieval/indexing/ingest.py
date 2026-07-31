@@ -20,7 +20,9 @@ load_dotenv(ROOT_DIR / ".env")
 import re
 from typing import List
 
-from llama_index.core import Document, SimpleDirectoryReader
+import yaml
+
+from llama_index.core import Document
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.schema import NodeRelationship, RelatedNodeInfo, TextNode
 
@@ -81,22 +83,37 @@ def enrich_section_metadata(nodes: list[TextNode], docs: list[Document]) -> None
 def load_documents(file_path: Path) -> List[Document]:
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
-    reader = SimpleDirectoryReader(
-        input_dir=str(file_path),
-        recursive=True,
-        required_exts=[".md"],  # 按需
-    )
-
-    docs = reader.load_data()
-    for doc in docs:
-        path = Path(doc.metadata.get("file_path", ""))
-        doc.metadata.setdefault("source", path.name)
-        doc.metadata.setdefault("doc_type", _guess_doc_type(path.name))
-        # section 可在分块后从标题再 enrich，或先留空
+    docs: list[Document] = []
+    for path in sorted(file_path.rglob("*.md")):
+        if path.name.startswith("INDEX") or "_shared" in path.parts:
+            continue
+        raw = path.read_text(encoding="utf-8-sig")
+        metadata: dict[str, object] = {}
+        body = raw
+        if raw.startswith("---\n"):
+            end = raw.find("\n---", 4)
+            if end < 0:
+                raise ValueError(f"frontmatter_not_closed:{path}")
+            parsed = yaml.safe_load(raw[4:end]) or {}
+            if not isinstance(parsed, dict):
+                raise ValueError(f"frontmatter_not_mapping:{path}")
+            metadata.update(parsed)
+            body = raw[end + 4 :].lstrip("\r\n")
+        metadata.update(
+            {
+                "format": "md",
+                "file_path": str(path),
+                "source": path.name,
+                "category": "faq",
+            }
+        )
+        metadata.setdefault("doc_type", _guess_doc_type(path.name))
+        docs.append(Document(text=body, metadata=metadata))
     return docs
 
 # 在 _HEADING_RE 附近增加
 _Q_HEADING_RE = re.compile(r"^### Q\d+.*$", re.MULTILINE)
+_POLICY_SECTION_RE = re.compile(r"^(?:##\s+.+|### Q\d+.*)$", re.MULTILINE)
 
 
 def _section_from_q_heading(line: str) -> str:
@@ -109,19 +126,38 @@ def chunk_documents(
     chunk_size: int = 512,
     chunk_overlap: int = 64,
 ) -> List[TextNode]:
-    """按 ### Q 切题；文首（# 标题、> 引用、## 章节）不生成 node。
-    单题过长时，仅在题内再用 SentenceSplitter 二次切分。
-    """
+    """FAQ 按完整问答切分，Policy 同时保留制度章节和问答块。"""
     splitter = SentenceSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     nodes: list[TextNode] = []
 
     for doc in docs:
         text = doc.get_content(metadata_mode="none")
-        matches = list(_Q_HEADING_RE.finditer(text))
+        doc_type = str(doc.metadata.get("doc_type") or "faq")
+        doc_id = str(doc.metadata.get("doc_id") or "").strip()
+        if not doc_id:
+            raise ValueError(
+                f"faq_doc_id_required:{doc.metadata.get('file_path') or doc.metadata.get('source')}"
+            )
+        pattern = _POLICY_SECTION_RE if doc_type == "policy" else _Q_HEADING_RE
+        matches = list(pattern.finditer(text))
         if not matches:
-            continue  # 无 ### Q 的文档跳过（或可打 warning）
+            continue
 
         base_meta = dict(doc.metadata)
+        chunk_index = 0
+
+        def append_node(node: TextNode) -> None:
+            nonlocal chunk_index
+            chunk_id = f"{doc_id}:faq:{chunk_index:06d}"
+            node.metadata.update(
+                {
+                    "chunk_id": chunk_id,
+                    "chunk_index": chunk_index,
+                }
+            )
+            node.id_ = chunk_id
+            nodes.append(node)
+            chunk_index += 1
 
         for i, m in enumerate(matches):
             start = m.start()
@@ -130,17 +166,18 @@ def chunk_documents(
             if not q_text:
                 continue
 
-            section = _section_from_q_heading(m.group(0))
-            meta = {**base_meta, "section": section}
-            doc_id = str(meta.get("doc_id") or "").strip()
+            heading = m.group(0).strip()
+            section = re.sub(r"^#{2,3}\s+", "", heading)
+            chunk_kind = "qa_block" if heading.startswith("### Q") else "policy_section"
+            meta = {**base_meta, "section": section, "chunk_kind": chunk_kind}
             relationships = (
                 {NodeRelationship.SOURCE: RelatedNodeInfo(node_id=doc_id)}
-                if doc_id and doc_id != "None"
+                if doc_id != "None"
                 else {}
             )
 
             if len(q_text) <= chunk_size:
-                nodes.append(
+                append_node(
                     TextNode(text=q_text, metadata=meta, relationships=relationships)
                 )
             else:
@@ -148,20 +185,78 @@ def chunk_documents(
                 sub_doc = Document(text=q_text, metadata=meta)
                 for sub in splitter.get_nodes_from_documents([sub_doc]):
                     sub.metadata.update(meta)
-                    if doc_id and doc_id != "None":
+                    if doc_id != "None":
                         sub.relationships[NodeRelationship.SOURCE] = RelatedNodeInfo(
                             node_id=doc_id
                         )
-                    nodes.append(sub)
+                    append_node(sub)
 
     return nodes
+
+
+def validate_unique_chunk_ids(nodes: list[TextNode]) -> None:
+    """在连接任何索引存储前拒绝缺失或重复的 chunk ID。"""
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    missing: list[int] = []
+    for position, node in enumerate(nodes):
+        chunk_id = str(node.metadata.get("chunk_id") or "").strip()
+        if not chunk_id:
+            missing.append(position)
+            continue
+        if chunk_id in seen:
+            duplicates.add(chunk_id)
+        seen.add(chunk_id)
+    if missing:
+        raise ValueError(f"faq_chunk_id_missing:positions={missing[:10]}")
+    if duplicates:
+        raise ValueError(
+            "faq_chunk_id_duplicate:ids=" + ",".join(sorted(duplicates)[:10])
+        )
+
+
+def index_faq_nodes(
+    nodes: list[TextNode],
+    *,
+    rebuild: bool = False,
+    index_es: bool = False,
+    index_milvus: bool = False,
+) -> dict[str, int]:
+    """校验后将 FAQ 写入 PGVector，并按显式参数同步其他检索后端。"""
+    validate_unique_chunk_ids(nodes)
+    build_index(
+        nodes,
+        category="faq",
+        rebuild=rebuild,
+        sync_elasticsearch=False,
+    )
+    counts = {"pg": len(nodes), "es": 0, "milvus": 0}
+    if index_es:
+        from retrieval.indexing.es_index import index_nodes_to_elasticsearch
+
+        counts["es"] = index_nodes_to_elasticsearch(
+            "faq",
+            nodes,
+            rebuild=rebuild,
+            require_configured=True,
+        )
+    if index_milvus:
+        from retrieval.indexing.milvus_index import index_chunks_to_milvus
+
+        indexed = index_chunks_to_milvus(
+            {"faq": nodes},
+            rebuild=rebuild,
+        )
+        counts["milvus"] = indexed.get("faq", 0)
+    return counts
 
 
 def run_ingest(raw_dir: Path | None = None) -> list[TextNode]:
     raw_dir = raw_dir or RAW_DIR
     docs = load_documents(raw_dir)
     nodes = chunk_documents(docs)
-    print("section:", nodes[0].metadata.get("section"))
+    if nodes:
+        print("section:", nodes[0].metadata.get("section"))
     return nodes
 
 def main():
@@ -169,14 +264,31 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--raw-dir", type=Path, default=RAW_DIR)
     parser.add_argument("--rebuild", action="store_true")  # Day 3 给 index 用
+    parser.add_argument(
+        "--index-es",
+        action="store_true",
+        help="将 FAQ chunks 同步写入 Elasticsearch",
+    )
+    parser.add_argument(
+        "--index-milvus",
+        action="store_true",
+        help="将 FAQ chunks 同步写入 Milvus",
+    )
     args = parser.parse_args()
 
     nodes = run_ingest(args.raw_dir)
     print(f"documents → nodes: {len(nodes)}")
 
-    from retrieval.indexing.index import build_index
-    build_index(nodes, category="faq", rebuild=args.rebuild)
-    print(f"index built → table={get_table_name('faq')}, dim={EMBED_DIM}")
+    counts = index_faq_nodes(
+        nodes,
+        rebuild=args.rebuild,
+        index_es=args.index_es,
+        index_milvus=args.index_milvus,
+    )
+    print(
+        f"index built → table={get_table_name('faq')}, dim={EMBED_DIM}, "
+        f"pg={counts['pg']}, es={counts['es']}, milvus={counts['milvus']}"
+    )
 
     for i, node in enumerate(nodes[:1]):  # 只看前 5 片
         print(f"\n--- chunk {i} ---")

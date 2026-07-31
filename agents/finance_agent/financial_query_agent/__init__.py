@@ -15,12 +15,32 @@ def build_financial_query_agent_graph():
 
 
 async def _run_financial_query_agent(state, config=None):
-    """按 LangGraph 节点编排运行 financial_query_agent（测试兼容入口）。"""
-    global _BUILT, _financial_query_agent
-    if not _BUILT:
-        _financial_query_agent = _build_subgraph()
-        _BUILT = True
-    return await _financial_query_agent.ainvoke(state, config)
+    """按与子图相同的路由顺序运行，供单元测试和脚本直接调用。"""
+    from agents.finance_agent.financial_query_agent.planner import (
+        financial_query_planner,
+    )
+    from agents.finance_agent.financial_query_agent.workflows import (
+        predefined_workflow,
+        text_to_sql_workflow,
+    )
+
+    merged = dict(state)
+
+    def apply(updates):
+        for key, value in dict(updates or {}).items():
+            if key in {"messages", "task_results", "citations", "steps"}:
+                merged[key] = [*list(merged.get(key) or []), *list(value or [])]
+            else:
+                merged[key] = value
+
+    apply(await financial_query_planner(merged, config))
+    route = str(merged.get("financial_query_plan_route") or "")
+    if route == "predefined":
+        apply(await predefined_workflow(merged, config))
+        route = str(merged.get("financial_query_plan_route") or "")
+    if route == "text_to_sql":
+        apply(await text_to_sql_workflow(merged, config))
+    return merged
 
 
 def _build_subgraph() -> object:

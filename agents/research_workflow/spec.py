@@ -15,6 +15,14 @@ class ResearchWorkflowSpec:
         "market",
         "research",
         "finance_rag",
+        "local_documents",
+    )
+    allowed_data_sources: tuple[str, ...] = (
+        "market",
+        "research",
+        "finance_rag",
+        "local_documents",
+        "stable_rules",
     )
 
 

@@ -19,6 +19,7 @@ from retrieval.clients.rerank_client import (
 )
 from retrieval.core.collections import (
     get_collection_registry,
+    get_table_name,
     pdf_categories,
 )
 from retrieval.core.filters import (
@@ -156,6 +157,8 @@ class VectorRetriever(Retriever):
                 "output_fields": [
                     "chunk_id",
                     "doc_id",
+                    "domain",
+                    "doc_type",
                     "ticker",
                     "issuer",
                     "fiscal_year",
@@ -196,6 +199,8 @@ class VectorRetriever(Retriever):
                 metadata.setdefault("collection", name)
                 metadata.setdefault("chunk_id", entity.get("chunk_id") or raw_hit.get("id"))
                 metadata.setdefault("doc_id", entity.get("doc_id"))
+                metadata.setdefault("domain", entity.get("domain"))
+                metadata.setdefault("doc_type", entity.get("doc_type"))
                 metadata.setdefault("ticker", entity.get("ticker"))
                 metadata.setdefault("issuer", entity.get("issuer"))
                 metadata.setdefault("fiscal_year", entity.get("fiscal_year"))
@@ -565,7 +570,12 @@ class HybridRetriever(Retriever):
         candidates: list[RetrievalHit] = []
         for category in categories:
             try:
-                candidates.extend(_load_pg_bm25_rows(category))
+                category_filters = filters_for_category(filters, category)
+                candidates.extend(
+                    hit
+                    for hit in _load_pg_bm25_rows(category)
+                    if metadata_matches(hit.metadata, category_filters)
+                )
             except Exception as exc:
                 logger.warning("local bm25 load failed category={} error={}", category, exc)
         return _bm25_rerank_hits(query, candidates, top_k=top_k)
@@ -692,12 +702,15 @@ def get_retriever(
 def get_faq_retriever(
     top_k: int = 5,
     similarity_threshold: float | None = None,
+    metadata_filters: MetadataFilters | None = None,
 ) -> Retriever:
     """仅检索 FAQ Markdown 集合。"""
     return get_retriever(
         categories=["faq"],
         top_k=top_k,
         similarity_threshold=similarity_threshold,
+        metadata_filters=metadata_filters,
+        hybrid=True,
     )
 
 
@@ -1184,7 +1197,7 @@ def _milvus_filter_expr(filters: MetadataFilters | None) -> str:
     def quoted(value: Any) -> str:
         return "'" + str(value).replace("\\", "\\\\").replace("'", "\\'") + "'"
 
-    for field in ("doc_id", "ticker", "issuer"):
+    for field in ("doc_id", "ticker", "issuer", "domain", "doc_type"):
         items = values(filters.get(field))
         if items:
             clauses.append(f"{field} in [{', '.join(quoted(item) for item in items)}]")
@@ -1219,6 +1232,34 @@ def _load_pg_bm25_rows(category: str) -> list[RetrievalHit]:
     rows: list[RetrievalHit] = []
     with psycopg.connect(sync_url) as conn:
         with conn.cursor() as cur:
+            if category == "faq":
+                table_name = f"data_{get_table_name(category)}"
+                cur.execute(
+                    sql.SQL(
+                        "SELECT node_id, text, metadata_ FROM {}.{}"
+                    ).format(
+                        sql.Identifier("rag"),
+                        sql.Identifier(table_name),
+                    )
+                )
+                for node_id, text, metadata in cur.fetchall():
+                    meta = _coerce_metadata(metadata)
+                    row_text = str(text or "")
+                    if not row_text:
+                        continue
+                    meta.setdefault("category", category)
+                    meta.setdefault("chunk_id", node_id)
+                    rows.append(
+                        RetrievalHit(
+                            text=row_text,
+                            score=0.0,
+                            metadata=meta,
+                            node_id=str(node_id),
+                            category=category,
+                            collection=get_table_name(category),
+                        )
+                    )
+                return rows
             cur.execute(
                 sql.SQL(
                     """

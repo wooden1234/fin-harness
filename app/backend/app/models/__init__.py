@@ -12,6 +12,7 @@ from app.models.finance.annual_financial_fact import (
 )
 from app.models.persistence.message import Message
 from app.models.agent.agent_run import AgentRun, AgentRunStatus
+from app.models.agent.agent_run_event import AgentRunEvent
 from app.models.persistence.outbox_event import OutboxEvent
 from app.models.agent.conversation_lock import ConversationLock
 from app.models.agent.checkpoint_registry import CheckpointRegistry
@@ -26,6 +27,7 @@ __all__ = [
     "Message",
     "AgentRun",
     "AgentRunStatus",
+    "AgentRunEvent",
     "OutboxEvent",
     "ConversationLock",
     "CheckpointRegistry",

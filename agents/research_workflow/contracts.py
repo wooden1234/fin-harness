@@ -63,10 +63,32 @@ class ResearchPlan(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ResearchFinding(BaseModel):
+    """研究过程中的结论及其证据引用。"""
+
+    claim: str = Field(min_length=1, max_length=500)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=16)
+
+
+class ResearchContextSummary(BaseModel):
+    """只在单次 Research Workflow 内使用的结构化工作摘要。"""
+
+    objective: str = Field(min_length=1, max_length=500)
+    completed_questions: list[str] = Field(default_factory=list, max_length=16)
+    pending_questions: list[str] = Field(default_factory=list, max_length=16)
+    findings: list[ResearchFinding] = Field(default_factory=list, max_length=24)
+    conflicts: list[str] = Field(default_factory=list, max_length=12)
+    failed_sources: list[str] = Field(default_factory=list, max_length=12)
+    next_actions: list[str] = Field(default_factory=list, max_length=12)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=64)
+
+
 __all__ = [
     "QuestionEvidenceAssessment",
     "ResearchPlan",
     "ResearchPlanDraft",
     "ResearchQuestion",
     "ResearchQuestionDraft",
+    "ResearchContextSummary",
+    "ResearchFinding",
 ]

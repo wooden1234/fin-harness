@@ -10,6 +10,7 @@ import pytest
 
 from agents.orchestrator.contracts import (
     AgentResult,
+    ExecutionDecision,
     QualityReport,
     RequestProfile,
     TaskPlan,
@@ -90,7 +91,7 @@ async def test_execute_task_uses_soft_deadline_for_graceful_degrade(
     monkeypatch.setattr("agents.orchestrator.graph.invoke_agent", slow_invoke)
     context = AgentRuntimeContext(max_concurrency=1)
     context.configure_budget(
-        complexity="simple",
+        budget_tier="light",
         soft_seconds=0.01,
         hard_seconds=1,
         unit_timeouts={"agent": 0.5},
@@ -186,7 +187,7 @@ def test_runtime_context_tracks_remaining_deadline() -> None:
     assert context.max_concurrency == 1
 
 
-async def test_build_plan_configures_budget_by_request_complexity(
+async def test_build_plan_configures_deterministic_budget_tier(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
@@ -203,13 +204,17 @@ async def test_build_plan_configures_budget_by_request_complexity(
         {
             "request_profile": RequestProfile(
                 original_query="你好",
-                complexity="simple",
+                intents=["general_chat"],
+                execution=ExecutionDecision(
+                    mode="general_answer",
+                    budget_tier="light",
+                ),
             )
         },
         runtime=_runtime(context),
     )
 
-    assert context.request_complexity == "simple"
+    assert context.budget_tier == "light"
     assert 0 < context.soft_remaining_seconds() <= 2
     assert 0 < context.remaining_seconds() <= 4
     assert context.unit_timeouts["tool_skill"] > 0
@@ -221,7 +226,7 @@ async def test_soft_deadline_stops_new_wave_and_replan() -> None:
         max_concurrency=1,
     )
     context.configure_budget(
-        complexity="simple",
+        budget_tier="light",
         soft_seconds=1,
         hard_seconds=10,
         unit_timeouts={"agent": 3},
@@ -255,7 +260,7 @@ def test_tool_skill_budget_is_limited_by_run_hard_deadline() -> None:
         max_concurrency=1,
     )
     context.configure_budget(
-        complexity="compound",
+        budget_tier="research",
         soft_seconds=5,
         hard_seconds=20,
         unit_timeouts={"tool_skill": 10},

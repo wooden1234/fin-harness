@@ -10,6 +10,7 @@ TOOL_MODULES: tuple[str, ...] = (
     "tools.weather",
     "tools.iwencai",
     "tools.web_search",
+    "tools.knowledge",
 )
 
 _loaded = False

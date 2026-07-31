@@ -15,6 +15,7 @@ from agents.orchestrator.contracts import (
     ConstrainedAnswer,
     Evidence,
     EvidenceAssessment,
+    ExecutionDecision,
     RequestProfile,
     TaskPlan,
     TaskSpec,
@@ -167,10 +168,16 @@ async def test_quality_gate_reports_stale_unsupported_claim() -> None:
         evidence=[evidence],
     )
     state = {
-        "request_profile": RequestProfile(
-            original_query="最新营收",
-            freshness_required=True,
-        ),
+            "request_profile": RequestProfile(
+                original_query="最新营收",
+                freshness_required=True,
+                execution=ExecutionDecision(
+                    mode="structured_finance",
+                    budget_tier="standard",
+                    allowed_capabilities=["financial_query"],
+                    data_sources=["finance_rag"],
+                ),
+            ),
         "task_plan": TaskPlan(
             plan_id="p1",
             query="最新营收",
@@ -214,7 +221,7 @@ async def test_claim_extraction_skips_llm_after_soft_deadline(
         started_monotonic=time.monotonic() - 2,
     )
     context.configure_budget(
-        complexity="simple",
+        budget_tier="light",
         soft_seconds=1,
         hard_seconds=10,
         unit_timeouts={},

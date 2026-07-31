@@ -12,6 +12,7 @@ class DeepResearchSpec:
     agent_id: str = "deep_research_agent"
     default_task_id: str = "deep-research"
     skills: tuple[str, ...] = (
+        "dependency-analysis",
         "stock-screening",
         "market-quotes",
         "industry-data",
@@ -19,6 +20,8 @@ class DeepResearchSpec:
         "announcement-search",
         "research-report-search",
         "institution-rating",
+        "faq-knowledge",
+        "pdf-knowledge",
     )
     max_tool_calls: int = 15
     recursion_limit: int = 30

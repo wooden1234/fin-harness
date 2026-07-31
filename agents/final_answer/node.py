@@ -35,10 +35,6 @@ COMPLIANCE_REVIEW_ERROR_ANSWER = (
     "抱歉，当前回答未能通过合规审查，请稍后重试或联系人工服务。"
 )
 COMPLIANCE_ESCALATED_ANSWER = "该问题需要人工进一步审核，请联系人工服务。"
-ROUTE_CLARIFICATION_ANSWER = (
-    "我暂时无法明确判断您的查询目标。"
-    "请补充更具体的对象和问题，例如公司或产品名称、年份、指标或查询口径。"
-)
 GUARDRAIL_RESPONSES = {
     "prompt_injection_detected": (
         "无法执行修改系统规则、披露内部指令或绕过安全限制的请求。"
@@ -218,9 +214,6 @@ async def final_answer_node(
     if guardrail_response is not None:
         answer = guardrail_response
         force_empty_citations = True
-    elif state.get("supervisor_action") in {"rewrite", "clarify"}:
-        answer = ROUTE_CLARIFICATION_ANSWER
-        force_empty_citations = True
     else:
         route = state.get("route", "general")
         answer = ""
@@ -283,6 +276,10 @@ async def final_answer_node(
         # 本轮派生字段收口清空，避免跨轮残留。
         "rewritten_query": "",
         "rewrite_status": "",
+        "rewrite_reason_codes": [],
+        "rewrite_failure_kind": "",
+        "rewrite_resolution": {},
+        "rewrite_clarification_message": "",
         "turn_preferences": {},
         "compliance_action": compliance_decision.action,
         "compliance_reason_code": compliance_decision.reason_code,

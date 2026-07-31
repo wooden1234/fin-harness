@@ -13,6 +13,7 @@ from retrieval.core.filters import merge_filters
 from retrieval.retrievers.pdf_kb_router import get_pdf_kb_router
 from retrieval.retrievers.query_filter_extractor import get_query_filter_extractor
 from retrieval.retrievers.retrieval_quality import RetrievalQualityCalibrator
+from retrieval.services import admit_pdf_hits
 
 from ..state import PdfAgentState
 from ..trace import append_trace
@@ -130,6 +131,7 @@ async def retrieve_node(state: PdfAgentState, *, config=None) -> PdfAgentState:
         rerank_min_score=settings.RERANK_MIN_SCORE,
     )
     hits = await retriever.asearch(query, top_k=top_k, metadata_filters=metadata_filters)
+    hits = admit_pdf_hits(hits, use_mode="direct_qa")
     quality_calibrator.annotate(hits)
     trace = getattr(retriever, "last_trace", None)
     logger.info(

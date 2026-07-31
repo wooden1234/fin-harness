@@ -141,14 +141,24 @@ class ConversationState(TypedDict):
     # 会话级压缩记忆：此前多轮对话摘要，同一 conversation/thread 内长期保留。
     # 由 context_compressor 增量更新；不要在 final_answer 清空。
     conversation_summary: NotRequired[str]
+    conversation_summary_v2: NotRequired[dict[str, object]]
     conversation_summary_until: NotRequired[str]
+    context_admission_rejected: NotRequired[bool]
 
-    # 本轮追问改写结果（Supervisor 按需触发后写入；不进入 messages）。
+    # 本轮问题补全结果（query_rewrite 写入；不进入 messages）。
     # 生命周期：本轮有效 → final_answer 收口清空；下轮 query_rewrite 再检查兜底。
     rewritten_query: NotRequired[str]
-    # 改写状态：success=完成补全，passthrough=无需补全，
-    # uncertain=上下文不足不可安全补全，fallback=模型异常回退原文。
+    # 改写状态：rewrite=完成补全，passthrough=问题自身完整，
+    # uncertain=上下文不足、多候选歧义或模型异常，不允许猜测补全。
     rewrite_status: NotRequired[str]
+    # 仅保存本轮确定性原因码，用于向用户解释为何停止，不保存上下文正文。
+    rewrite_reason_codes: NotRequired[list[str]]
+    rewrite_failure_kind: NotRequired[str]
+    rewrite_resolution: NotRequired[dict[str, object]]
+    rewrite_clarification_message: NotRequired[str]
+
+    # 澄清后旧运行已经结束；这里只保留合成下一轮完整问题所需的最小字段。
+    pending_query_clarification: NotRequired[dict[str, object]]
 
     # 含糊修改/删除的管理候选，跨轮保留直到用户确认或取消。
     pending_memory_action: NotRequired[dict[str, object]]

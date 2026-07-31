@@ -1,9 +1,13 @@
 """Root Orchestrator V2 图结构和任务波次测试。"""
 
+import pytest
+from langchain_core.messages import HumanMessage
+
 from agents.orchestrator.analyzer import heuristic_profile
 from agents.orchestrator.graph import (
     build_plan,
     build_orchestrator_graph,
+    clarify,
     detect_evidence_conflicts,
     detect_result_gaps,
     dispatch_wave,
@@ -12,6 +16,7 @@ from agents.orchestrator.graph import (
     _effective_results,
     quality_gate,
     replan,
+    route_after_analyze_request,
     route_after_query_rewrite,
     synthesize,
 )
@@ -55,6 +60,8 @@ def test_v2_graph_compiles_with_independent_nodes():
     }
     assert ("context_compressor", "query_rewrite") in edges
     assert ("query_rewrite", "analyze_request") in edges
+    assert ("analyze_request", "build_plan") in edges
+    assert ("analyze_request", "clarify") in edges
 
 
 def test_build_plan_assigns_task_identity_fields():
@@ -180,10 +187,119 @@ def test_replan_revalidates_suggested_task_capabilities():
 
 
 def test_v2_query_rewrite_routes_uncertain_followup_to_clarify():
-    assert route_after_query_rewrite({"rewrite_status": "success"}) == "analyze_request"
+    assert route_after_query_rewrite({"rewrite_status": "rewrite"}) == "analyze_request"
     assert route_after_query_rewrite({"rewrite_status": "passthrough"}) == "analyze_request"
     assert route_after_query_rewrite({"rewrite_status": "uncertain"}) == "clarify"
-    assert route_after_query_rewrite({"rewrite_status": "fallback"}) == "clarify"
+    assert route_after_query_rewrite({"rewrite_status": ""}) == "clarify"
+
+
+def test_v2_analyzer_stops_when_profile_remains_ambiguous():
+    ambiguous = heuristic_profile("帮我看看")
+    complete = heuristic_profile("贵州茅台 2025 年营收是多少")
+
+    assert route_after_analyze_request({"request_profile": ambiguous}) == "clarify"
+    assert route_after_analyze_request({"request_profile": complete}) == "build_plan"
+    assert route_after_analyze_request({}) == "clarify"
+
+
+def test_v3_analyzer_uses_semantics_for_ambiguity_not_agent_selection():
+    complete_profile = heuristic_profile("贵州茅台 2025 年营收是多少")
+
+    assert (
+        route_after_analyze_request({"request_profile": complete_profile})
+        == "build_plan"
+    )
+
+
+def test_clarify_asks_naturally_for_missing_context():
+    import asyncio
+
+    output = asyncio.run(
+        clarify({"rewrite_reason_codes": ["context_reference", "context_missing"]})
+    )
+
+    assert "具体指谁" in output["summary"]
+    assert "直接回复名称或代码" in output["summary"]
+    assert "本轮已停止处理" not in output["summary"]
+    assert output["steps"] == ["orchestrator:clarify_stop"]
+
+
+def test_clarify_uses_rewrite_llm_generated_message():
+    import asyncio
+
+    generated = (
+        "我需要先确认“它”指的是哪个标的，因为去年的表现要结合具体对象分析。"
+        "例如：**贵州茅台去年怎么样？** 你想查的是哪只股票、基金或指数？"
+    )
+
+    output = asyncio.run(
+        clarify(
+            {
+                "messages": [HumanMessage(content="它去年怎么样？")],
+                "rewrite_reason_codes": ["context_reference", "context_missing"],
+                "rewrite_clarification_message": generated,
+            }
+        )
+    )
+
+    assert output["summary"] == generated
+
+
+def test_clarify_explains_irrelevant_history():
+    import asyncio
+
+    output = asyncio.run(
+        clarify({"rewrite_reason_codes": ["context_reference", "context_irrelevant"]})
+    )
+
+    assert "没找到能和当前问题对应上的金融对象" in output["summary"]
+    assert "贵州茅台" in output["summary"]
+
+
+def test_clarify_names_safe_multiple_candidates():
+    import asyncio
+
+    output = asyncio.run(
+        clarify(
+            {
+                "rewrite_reason_codes": ["multiple_entity_candidates"],
+                "pending_query_clarification": {
+                    "candidate_entities": ["贵州茅台", "五粮液"]
+                },
+            }
+        )
+    )
+
+    assert "贵州茅台、五粮液" in output["summary"]
+    assert "直接回复名称或代码" in output["summary"]
+
+
+def test_clarify_explains_analyzer_missing_fields():
+    import asyncio
+
+    output = asyncio.run(
+        clarify({"request_profile": heuristic_profile("帮我看看")})
+    )
+
+    assert "你想看哪个对象" in output["summary"]
+    assert "白酒龙头" in output["summary"]
+    assert output["pending_query_clarification"]["original_query"] == "帮我看看"
+
+
+def test_clarify_uses_analyzer_llm_generated_message():
+    import asyncio
+
+    generated = (
+        "我还需要一个明确的分析对象。比如：**白酒龙头去年表现怎么样？** "
+        "您想看哪只股票、基金、指数或行业？"
+    )
+    profile = heuristic_profile("帮我看看").model_copy(
+        update={"clarification_message": generated}
+    )
+
+    output = asyncio.run(clarify({"request_profile": profile}))
+
+    assert output["summary"] == generated
 
 
 def test_error_action_is_recorded_on_task_failure(monkeypatch):
@@ -317,6 +433,7 @@ def test_compound_stock_query_creates_independent_research_workflow():
         "market",
         "research",
         "finance_rag",
+        "local_documents",
     ]
 
 
@@ -336,7 +453,10 @@ def test_market_compute_receives_previous_candidate_set():
         status="completed",
         structured_data=candidates.model_dump(),
     )
-    profile = heuristic_profile("从刚才候选股票中按市盈率排序取前5只")
+    profile = heuristic_profile(
+        "从刚才候选股票中按市盈率排序取前5只",
+        candidate_set_id="previous-1",
+    )
     update = asyncio.run(
         build_plan(
             {

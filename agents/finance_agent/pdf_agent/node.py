@@ -6,6 +6,8 @@ from functools import lru_cache
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
+
+from agents.context import project_conversation_context
 from langgraph.graph import END, START, StateGraph
 
 from agents.finance_agent.pdf_agent.evaluation import evaluate_evidence_node
@@ -180,7 +182,7 @@ async def pdf_agent(state: FinAgentState, config: RunnableConfig = None) -> dict
         "query": query,
         "sub_task_id": sub_task_id,
         "messages": list(state.get("messages") or []),
-        "conversation_summary": str(state.get("conversation_summary") or ""),
+        "conversation_summary": project_conversation_context(state, purpose="planning"),
         "rewrite_count": 0,
     }
 

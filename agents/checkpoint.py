@@ -91,11 +91,11 @@ def make_thread_config(
         user_id=user_id,
         tenant_id=tenant_id,
     )
-    thread_id = f"{thread_id}:graph:v2"
+    thread_id = f"{thread_id}:graph:v3"
     return {
         "configurable": {
             "thread_id": thread_id,
-            "graph_version": "v2",
+            "graph_version": "v3",
         }
     }
 
@@ -175,7 +175,7 @@ async def delete_thread_checkpoint(
         tenant_id=tenant_id,
     )
     checkpointer = get_checkpointer()
-    v2_thread_id = f"{thread_id}:graph:v2"
-    await checkpointer.adelete_thread(v2_thread_id)
-    logger.info("deleted checkpoint thread_id={}", v2_thread_id)
-    return v2_thread_id
+    v3_thread_id = f"{thread_id}:graph:v3"
+    await checkpointer.adelete_thread(v3_thread_id)
+    logger.info("deleted checkpoint thread_id={}", v3_thread_id)
+    return v3_thread_id

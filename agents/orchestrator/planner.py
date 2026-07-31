@@ -19,7 +19,7 @@ def _finance_planning_scope(profile: RequestProfile):
     return build_finance_scope(
         parent_task_id="finance",
         parent_logical_task_id="finance",
-        data_sources=profile.data_sources,
+        data_sources=profile.execution.data_sources,
         freshness_required=profile.freshness_required,
         entities=profile.entities,
         constraints=profile.constraints,
@@ -48,11 +48,12 @@ def build_plan_from_profile(profile: RequestProfile) -> TaskPlan:
     plan_id = f"plan-{uuid.uuid4().hex[:12]}"
     query = profile.normalized_query or profile.original_query
     semantic_history = _needs_semantic_history(profile)
-    if profile.missing_fields:
+    execution = profile.execution
+    if profile.missing_fields or execution.mode == "clarify":
         return TaskPlan(plan_id=plan_id, query=query, tasks=[])
 
-    if profile.preferred_agent == "market_acquisition_workflow":
-        market_tool_id = str(profile.constraints.get("market_tool_id") or "").strip()
+    if execution.mode == "market_acquire":
+        market_tool_id = str(execution.tool_id or "").strip()
         acquire = TaskSpec(
             task_id="market_acquire",
             objective=query,
@@ -64,10 +65,8 @@ def build_plan_from_profile(profile: RequestProfile) -> TaskPlan:
         assert_plan_capabilities(plan)
         return plan
 
-    if profile.preferred_agent == "research_retrieval_workflow":
-        research_tool_id = str(
-            profile.constraints.get("research_tool_id") or ""
-        ).strip()
+    if execution.mode == "research_retrieve":
+        research_tool_id = str(execution.tool_id or "").strip()
         research = TaskSpec(
             task_id="research",
             objective=query,
@@ -83,7 +82,7 @@ def build_plan_from_profile(profile: RequestProfile) -> TaskPlan:
         assert_plan_capabilities(plan)
         return plan
 
-    if profile.preferred_agent == "stock_screening_agent":
+    if execution.mode == "stock_screen":
         screening = TaskSpec(
             task_id="stock_screening",
             objective=query,
@@ -94,7 +93,7 @@ def build_plan_from_profile(profile: RequestProfile) -> TaskPlan:
         assert_plan_capabilities(plan)
         return plan
 
-    if profile.preferred_agent == "market.compute":
+    if execution.mode == "market_compute":
         query_plan = profile.constraints.get("market_query_plan")
         compute = TaskSpec(
             task_id="market_compute",
@@ -111,7 +110,7 @@ def build_plan_from_profile(profile: RequestProfile) -> TaskPlan:
         assert_plan_capabilities(plan)
         return plan
 
-    if profile.preferred_agent in {"deep_research_agent", "research_workflow"}:
+    if execution.mode == "deep_research":
         research = TaskSpec(
             task_id="research",
             objective=query,
@@ -119,7 +118,7 @@ def build_plan_from_profile(profile: RequestProfile) -> TaskPlan:
             required_capabilities=["deep.research"],
             semantic_history=semantic_history,
             input_data={
-                "data_sources": list(profile.data_sources),
+                "data_sources": list(execution.data_sources),
                 "entities": list(profile.entities),
             },
         )
@@ -131,7 +130,7 @@ def build_plan_from_profile(profile: RequestProfile) -> TaskPlan:
         assert_plan_capabilities(plan)
         return plan
 
-    if profile.preferred_agent == "general_agent":
+    if execution.mode == "general_answer":
         plan = TaskPlan(
             plan_id=plan_id,
             query=query,

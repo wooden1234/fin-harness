@@ -6,6 +6,7 @@ from app.api.agent import router as agent_router
 from app.api.rag import router as rag_router
 from app.api.memories import router as memories_router
 from app.api.admin_memory import router as admin_memory_router
+from app.api.agent_events import router as agent_events_router
 
 api_router = APIRouter()
 
@@ -15,3 +16,4 @@ api_router.include_router(agent_router)
 api_router.include_router(rag_router)
 api_router.include_router(memories_router)
 api_router.include_router(admin_memory_router)
+api_router.include_router(agent_events_router)

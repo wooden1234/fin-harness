@@ -40,6 +40,8 @@ def _ensure_collection(client: Any, category: str, *, rebuild: bool) -> str:
     schema.add_field("chunk_id", DataType.VARCHAR, is_primary=True, max_length=160)
     schema.add_field("embedding", DataType.FLOAT_VECTOR, dim=settings.MILVUS_DIM)
     schema.add_field("doc_id", DataType.VARCHAR, max_length=96)
+    schema.add_field("domain", DataType.VARCHAR, max_length=64)
+    schema.add_field("doc_type", DataType.VARCHAR, max_length=64)
     schema.add_field("ticker", DataType.VARCHAR, max_length=32)
     schema.add_field("issuer", DataType.VARCHAR, max_length=256)
     schema.add_field("fiscal_year", DataType.INT64)
@@ -90,6 +92,8 @@ def _chunk_record(chunk: Any, embedding: list[float]) -> dict[str, Any]:
         "chunk_id": chunk_id,
         "embedding": embedding,
         "doc_id": doc_id,
+        "domain": str(metadata.get("domain") or ""),
+        "doc_type": str(metadata.get("doc_type") or ""),
         "ticker": str(metadata.get("ticker") or ""),
         "issuer": str(metadata.get("issuer") or ""),
         "fiscal_year": fiscal_year or 0,

@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import json
+
 from langchain_core.messages import (
     AIMessage,
     AnyMessage,
@@ -21,8 +23,19 @@ from langchain_core.messages import (
     SystemMessage,
 )
 from langchain_core.runnables import RunnableConfig
+from langgraph.runtime import Runtime
 
 from agents.context_compressor.prompts import SUMMARY_PROMPT, SUMMARY_SHRINK_PROMPT
+from agents.context_compressor.models import ConversationSummaryPatch, ConversationSummaryV2
+from agents.context_compressor.prompts import (
+    STRUCTURED_SUMMARY_PATCH_PROMPT,
+    STRUCTURED_SUMMARY_REPAIR_PROMPT,
+)
+from agents.context_compressor.structured import (
+    apply_summary_patch,
+    parse_summary_v2,
+    render_summary_v2,
+)
 from agents.context_compressor.tokens import (
     COMPRESS_TRIGGER_TOKENS,
     CONTEXT_TOKEN_BUDGET,
@@ -35,8 +48,14 @@ from agents.context_compressor.tokens import (
     message_text,
     truncate_to_token_limit,
 )
+from agents.context_space import ContextBudgetPolicy, ContextCounters, ContextSpaceType
+from agents.context_space.budget import measure_context
+from agents.context_space.events import record_context_event
+from agents.context_space.snip import snip_largest_removable_block
 from agents.llm import get_router_llm
+from agents.runtime_context import AgentRuntimeContext
 from agents.states import FinAgentState
+from app.core.config import settings
 from app.core.logger import get_logger
 
 logger = get_logger(service="context_compressor")
@@ -56,11 +75,39 @@ def _estimate_context_tokens(summary: str, messages: list[AnyMessage]) -> int:
     return estimate_tokens(summary) + sum(estimate_message_tokens(m) for m in messages)
 
 
+def _structured_mode() -> str:
+    mode = str(settings.CONTEXT_STRUCTURED_SUMMARY_MODE or "off").strip().lower()
+    if mode not in {"off", "shadow", "on"}:
+        logger.warning("unknown structured summary mode={}, fallback off", mode)
+        return "off"
+    return mode
+
+
 def _last_human_index(messages: list[AnyMessage]) -> int:
     for index in range(len(messages) - 1, -1, -1):
         if isinstance(messages[index], HumanMessage):
             return index
     return -1
+
+
+def _historical_atomic_blocks(
+    messages: list[AnyMessage],
+    *,
+    end: int,
+) -> list[list[int]]:
+    """把旧历史按完整用户轮次分块，系统消息始终排除在压缩范围外。"""
+    blocks: list[list[int]] = []
+    current: list[int] = []
+    for index, message in enumerate(messages[:end]):
+        if isinstance(message, SystemMessage):
+            continue
+        if isinstance(message, HumanMessage) and current:
+            blocks.append(current)
+            current = []
+        current.append(index)
+    if current:
+        blocks.append(current)
+    return blocks
 
 
 def select_keep_indices(
@@ -73,18 +120,19 @@ def select_keep_indices(
         return []
 
     last_human = _last_human_index(messages)
-    if last_human < 0:
-        # 无用户消息时仍从尾部按预算保留
-        last_human = len(messages)
-
-    keep: set[int] = set(range(last_human, len(messages)))
+    protected_tail = last_human if last_human >= 0 else len(messages)
+    keep: set[int] = {
+        index
+        for index, message in enumerate(messages)
+        if isinstance(message, SystemMessage) or index >= protected_tail
+    }
     used = sum(estimate_message_tokens(messages[i]) for i in keep)
 
-    for index in range(last_human - 1, -1, -1):
-        cost = estimate_message_tokens(messages[index])
+    for block in reversed(_historical_atomic_blocks(messages, end=protected_tail)):
+        cost = sum(estimate_message_tokens(messages[index]) for index in block)
         if keep and used + cost > message_token_budget:
             break
-        keep.add(index)
+        keep.update(block)
         used += cost
 
     return sorted(keep)
@@ -111,23 +159,25 @@ def _truncate_oversized_messages(messages: list[AnyMessage]) -> list[AnyMessage]
         if not mid:
             continue
         clipped = truncate_to_token_limit(text, MAX_SINGLE_MESSAGE_TOKENS)
-        msg_type = type(message)
         try:
-            updates.append(msg_type(content=clipped, id=mid))
+            updates.append(message.model_copy(update={"content": clipped}))
         except Exception:
-            logger.warning("skip truncate for message type={}", msg_type.__name__)
+            logger.warning("skip truncate for message type={}", type(message).__name__)
     return updates
 
 
 async def _enforce_summary_limit(
     summary: str,
     config: RunnableConfig | None = None,
+    counters: ContextCounters | None = None,
 ) -> str:
     """摘要超过上限时先尝试 LLM 再压缩，失败则硬截断。"""
     if estimate_tokens(summary) <= SUMMARY_TOKEN_LIMIT:
         return summary
 
     try:
+        if counters is not None:
+            counters.summary_attempt_count += 1
         result = await get_router_llm().ainvoke(
             [
                 (
@@ -159,6 +209,7 @@ async def _summarize_history(
     existing_summary: str,
     messages: list[AnyMessage],
     config: RunnableConfig | None = None,
+    counters: ContextCounters | None = None,
 ) -> str | None:
     """在已有摘要上增量合并本次待压缩消息。
 
@@ -169,6 +220,8 @@ async def _summarize_history(
         for message in messages
     )
     try:
+        if counters is not None:
+            counters.summary_attempt_count += 1
         result = await get_router_llm().ainvoke(
             [
                 (
@@ -190,15 +243,60 @@ async def _summarize_history(
         if not summary:
             logger.warning("summary empty, treat as failure")
             return None
-        return await _enforce_summary_limit(summary, config)
+        return await _enforce_summary_limit(summary, config, counters)
     except Exception:
         logger.exception("summary failed")
         return None
 
 
+async def _summarize_history_v2(
+    existing: ConversationSummaryV2 | None,
+    legacy_summary: str,
+    messages: list[AnyMessage],
+    config: RunnableConfig | None = None,
+    counters: ContextCounters | None = None,
+) -> ConversationSummaryV2 | None:
+    """最多两次结构化调用：首次 Patch，加一次结构/引用修复。"""
+    conversation = "\n".join(
+        f"{_role_label(message)}: {capped_message_text(message)}"
+        for message in messages
+    )
+    original_prompt = STRUCTURED_SUMMARY_PATCH_PROMPT.format(
+        structured_summary=json.dumps(
+            existing.model_dump(mode="json") if existing else {},
+            ensure_ascii=False,
+        ),
+        legacy_summary=legacy_summary or "无",
+        conversation=conversation,
+    )
+    prompt = original_prompt
+    model = get_router_llm().with_structured_output(ConversationSummaryPatch)
+    last_error = ""
+    for attempt in range(2):
+        if counters is not None:
+            counters.summary_attempt_count += 1
+        try:
+            patch = await model.ainvoke([("human", prompt)], config=config)
+            if not isinstance(patch, ConversationSummaryPatch):
+                patch = ConversationSummaryPatch.model_validate(patch)
+            return apply_summary_patch(existing, patch)
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}:{str(exc)[:300]}"
+            if attempt == 0:
+                logger.warning("structured summary patch failed, repairing: {}", last_error)
+                prompt = STRUCTURED_SUMMARY_REPAIR_PROMPT.format(
+                    error=last_error,
+                    original_prompt=original_prompt,
+                )
+            else:
+                logger.exception("structured summary repair failed")
+    return None
+
+
 async def compress_context(
     state: FinAgentState,
     config: RunnableConfig = None,
+    runtime: Runtime[AgentRuntimeContext] | None = None,
 ) -> dict:
     """按 token 预算压缩上下文。
 
@@ -208,21 +306,58 @@ async def compress_context(
     """
     history = list(state.get("messages") or [])
     existing_summary = str(state.get("conversation_summary") or "")
+    existing_v2 = parse_summary_v2(state.get("conversation_summary_v2"))
+    mode = _structured_mode()
+    projected_summary = (
+        render_summary_v2(existing_v2) if existing_v2 is not None and mode != "off"
+        else existing_summary
+    )
 
-    total_tokens = _estimate_context_tokens(existing_summary, history)
-    if total_tokens < COMPRESS_TRIGGER_TOKENS:
+    policy = ContextBudgetPolicy(
+        explicit_max_tokens=int(settings.CONTEXT_CONVERSATION_MAX_TOKENS),
+        trigger_ratio=float(settings.CONTEXT_TRIGGER_RATIO),
+        target_ratio=float(settings.CONTEXT_TARGET_RATIO),
+        admission_ratio=float(settings.CONTEXT_ADMISSION_RATIO),
+        approximate_safety_multiplier=float(
+            settings.CONTEXT_APPROXIMATE_SAFETY_MULTIPLIER
+        ),
+        max_compaction_rounds=1,
+    )
+    measurement = measure_context(
+        history,
+        policy=policy,
+        model=None,
+        extra_texts=[projected_summary],
+    )
+    total_tokens = measurement.estimated_tokens
+    if not measurement.trigger_exceeded:
         logger.info(
             "compress skipped, tokens={} < trigger={} (budget={})",
             total_tokens,
-            COMPRESS_TRIGGER_TOKENS,
-            CONTEXT_TOKEN_BUDGET,
+            policy.trigger_tokens(measurement.effective_limit),
+            measurement.effective_limit,
         )
         # 仍截断已存在的超长单条，避免工具结果撑爆后续调用
         oversized = _truncate_oversized_messages(history)
         return {"messages": oversized} if oversized else {}
 
-    # 压缩后为目标窗口：摘要槽位 + 近期消息 ≈ POST_COMPRESS_TOKENS
-    message_budget = max(1_000, POST_COMPRESS_TOKENS - SUMMARY_TOKEN_LIMIT)
+    await record_context_event(
+        runtime,
+        space_type=ContextSpaceType.CONVERSATION,
+        event_type="context.threshold_exceeded",
+        measurement=measurement,
+    )
+    await record_context_event(
+        runtime,
+        space_type=ContextSpaceType.CONVERSATION,
+        event_type="context.compaction_started",
+        measurement=measurement,
+        counters=ContextCounters(compaction_round_count=1),
+    )
+    message_budget = max(
+        1_000,
+        policy.target_tokens(measurement.effective_limit) - SUMMARY_TOKEN_LIMIT,
+    )
     keep_indices = select_keep_indices(history, message_token_budget=message_budget)
     to_summarize, to_keep = _split_by_keep(history, keep_indices)
 
@@ -231,27 +366,95 @@ async def compress_context(
         oversized = _truncate_oversized_messages(history)
         return {"messages": oversized} if oversized else {}
 
-    summary = await _summarize_history(existing_summary, to_summarize, config)
-    if summary is None:
+    counters = ContextCounters(compaction_round_count=1)
+    legacy_summary: str | None = None
+    structured_summary: ConversationSummaryV2 | None = None
+    if mode in {"off", "shadow"}:
+        legacy_summary = await _summarize_history(
+            existing_summary,
+            to_summarize,
+            config,
+            counters,
+        )
+    if mode in {"shadow", "on"}:
+        structured_summary = await _summarize_history_v2(
+            existing_v2,
+            existing_summary,
+            to_summarize,
+            config,
+            counters if mode == "on" else None,
+        )
+
+    compression_succeeded = (
+        legacy_summary is not None if mode in {"off", "shadow"}
+        else structured_summary is not None
+    )
+    if not compression_succeeded:
         logger.warning(
             "compress aborted: summary failed, keep all {} messages (tokens={})",
             len(history),
             total_tokens,
         )
-        return {}
+        oversized = _truncate_oversized_messages(history)
+        await record_context_event(
+            runtime,
+            space_type=ContextSpaceType.CONVERSATION,
+            event_type="context.degraded",
+            measurement=measurement,
+            counters=counters,
+            details={"error_code": "summary_failed"},
+        )
+        return {"messages": oversized} if oversized else {}
 
-    removable_messages = [
-        message for message in to_summarize if getattr(message, "id", None)
-    ]
-    if not removable_messages:
-        logger.warning("compress aborted: no removable message ids")
+    if any(not getattr(message, "id", None) for message in to_summarize):
+        logger.warning("compress aborted: removable range contains message without id")
         return {}
+    removable_messages = list(to_summarize)
 
-    if len(removable_messages) < len(to_summarize):
-        logger.warning(
-            "compress: {} / {} messages missing id, skipped remove",
-            len(to_summarize) - len(removable_messages),
-            len(to_summarize),
+    summary_projection = legacy_summary or (
+        render_summary_v2(structured_summary) if structured_summary else ""
+    )
+    post_measurement = measure_context(
+        [AIMessage(content=summary_projection), *to_keep],
+        policy=policy,
+        model=None,
+    )
+    snipped_updates: list[AnyMessage] = []
+    if post_measurement.admission_exceeded:
+        snipped_keep, snip = snip_largest_removable_block(to_keep)
+        if snip.changed:
+            counters.snip_count += 1
+            snipped_updates = [
+                updated
+                for original, updated in zip(to_keep, snipped_keep, strict=True)
+                if original.content != updated.content
+            ]
+            to_keep = snipped_keep
+            post_measurement = measure_context(
+                [AIMessage(content=summary_projection), *to_keep],
+                policy=policy,
+                model=None,
+            )
+            await record_context_event(
+                runtime,
+                space_type=ContextSpaceType.CONVERSATION,
+                event_type="context.snip_applied",
+                measurement=post_measurement,
+                counters=counters,
+                details={
+                    "content_hash": snip.content_hash,
+                    "block_type": snip.block_type,
+                },
+            )
+    admission_rejected = post_measurement.admission_exceeded
+    if admission_rejected:
+        await record_context_event(
+            runtime,
+            space_type=ContextSpaceType.CONVERSATION,
+            event_type="context.admission_rejected",
+            measurement=post_measurement,
+            counters=counters,
+            details={"admitted": False},
         )
 
     until_id = removable_messages[-1].id
@@ -260,7 +463,10 @@ async def compress_context(
         "compress: drop={} keep={} summary_tokens≈{} kept_msg_tokens≈{} until={}",
         len(to_summarize),
         len(to_keep),
-        estimate_tokens(summary),
+        estimate_tokens(
+            legacy_summary
+            or (render_summary_v2(structured_summary) if structured_summary else "")
+        ),
         kept_tokens,
         until_id,
     )
@@ -268,13 +474,42 @@ async def compress_context(
     updates: list[AnyMessage] = [
         RemoveMessage(id=message.id) for message in removable_messages
     ]
+    updates.extend(snipped_updates)
     updates.extend(_truncate_oversized_messages(to_keep))
 
-    return {
-        "conversation_summary": summary,
+    result = {
         "conversation_summary_until": until_id,
+        "context_admission_rejected": admission_rejected,
         "messages": updates,
     }
+    if admission_rejected:
+        result["summary"] = (
+            "当前输入在压缩和安全裁剪后仍超过上下文窗口，已停止继续扩展任务。"
+        )
+    if legacy_summary is not None:
+        result["conversation_summary"] = legacy_summary
+    if structured_summary is not None:
+        result["conversation_summary_v2"] = structured_summary.model_dump(mode="json")
+    await record_context_event(
+        runtime,
+        space_type=ContextSpaceType.CONVERSATION,
+        event_type="context.compaction_completed",
+        measurement=measurement,
+        counters=counters,
+        details={
+            "message_count_before": len(history),
+            "message_count_after": len(to_keep),
+        },
+    )
+    if counters.summary_attempt_count > 1 and mode == "on":
+        await record_context_event(
+            runtime,
+            space_type=ContextSpaceType.CONVERSATION,
+            event_type="context.summary_repair",
+            measurement=measurement,
+            counters=counters,
+        )
+    return result
 
 
 __all__ = [

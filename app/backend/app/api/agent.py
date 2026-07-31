@@ -10,7 +10,6 @@ from agents.checkpoint import make_thread_config
 from agents.guardrails.input.secrets import check_secrets
 from agents.orchestrator.graph import get_orchestrator_graph
 from agents.runtime_context import AgentRuntimeContext
-from agents.context_compressor.tokens import estimate_message_tokens
 from app.api.agent_progress import (
     VISIBLE_TASK_NODES,
     build_public_step_event,
@@ -382,7 +381,6 @@ async def agent_query(
                     # 异步偏好提取是增强能力，登记失败不能改变本轮回答结果。
                     logger.exception("failed to enqueue memory extraction: {}", run_id)
 
-            state_messages = list(values.get("messages") or [])
             task_plan = values.get("task_plan")
             if isinstance(task_plan, dict):
                 tasks = list(task_plan.get("tasks") or [])
@@ -391,20 +389,31 @@ async def agent_query(
             else:
                 tasks = []
             execution_status = str(values.get("execution_status") or "")
+            try:
+                context_window = await OutboxService.episodic_context_window(
+                    tenant_id=current_user.tenant_id,
+                    user_id=current_user.id,
+                    conversation_id=conversation_pk,
+                    query=query,
+                    final_response=final_response,
+                )
+            except Exception:
+                # 预判读取失败不影响回答；后台 worker 入队后仍会重新权威核对。
+                logger.exception("failed to load episodic context window: {}", run_id)
+                context_window = await OutboxService.episodic_context_window(
+                    tenant_id=current_user.tenant_id,
+                    user_id=current_user.id,
+                    conversation_id=None,
+                    query=query,
+                    final_response=final_response,
+                )
             episodic_decision = decide_post_turn_trigger(
                 query=query,
                 final_response=final_response,
                 execution_status=execution_status,
                 task_count=len(tasks),
-                turn_count=sum(
-                    1
-                    for message in state_messages
-                    if isinstance(message, HumanMessage)
-                ),
-                uncompressed_tokens=sum(
-                    estimate_message_tokens(message)
-                    for message in state_messages
-                ),
+                turn_count=context_window.turn_count,
+                uncompressed_tokens=context_window.uncompressed_tokens,
             )
             needs_progress_check = (
                 conversation_pk is not None

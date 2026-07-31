@@ -30,6 +30,9 @@ _DEFAULT_USER_READ_ONLY_TOOLS = (
     "iwencai.announcement.search",
     "iwencai.report.search",
     "iwencai.fund.screen",
+    "knowledge.faq.search",
+    "knowledge.pdf.catalog",
+    "knowledge.pdf.search",
 )
 
 
@@ -50,7 +53,7 @@ class AgentRuntimeContext:
     deadline_monotonic: float | None = None
     soft_deadline_monotonic: float | None = None
     hard_deadline_monotonic: float | None = None
-    request_complexity: str = "compound"
+    budget_tier: str = "research"
     unit_timeouts: dict[str, float] = field(default_factory=dict)
     max_concurrency: int = 4
     task_semaphore: asyncio.Semaphore = field(
@@ -89,15 +92,15 @@ class AgentRuntimeContext:
     def configure_budget(
         self,
         *,
-        complexity: str,
+        budget_tier: str,
         soft_seconds: float,
         hard_seconds: float,
         unit_timeouts: dict[str, float],
     ) -> None:
-        """分析完成后按请求难度冻结本轮动态预算。"""
+        """分析完成后按确定性预算档位冻结本轮动态预算。"""
         soft = max(0.0, float(soft_seconds))
         hard = max(soft, float(hard_seconds))
-        object.__setattr__(self, "request_complexity", complexity)
+        object.__setattr__(self, "budget_tier", budget_tier)
         object.__setattr__(
             self,
             "soft_deadline_monotonic",

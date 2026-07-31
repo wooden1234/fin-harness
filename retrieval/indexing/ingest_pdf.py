@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(_ROOT_DIR_STR) / ".env")
 
 import argparse
+import hashlib
 import json
 import logging
 import re
@@ -78,6 +79,11 @@ class IngestJob:
     issuer: str | None = None
     language: str | None = None
     doc_group: str | None = None
+    quality_status: str = "quarantined"
+    use_modes: list[str] = field(default_factory=list)
+    evidence_role: str = "contextual_view"
+    publication_date: str | None = None
+    cleaning_version: str = ""
 
 
 @dataclass
@@ -167,6 +173,24 @@ def discover_ingest_jobs(
                     issuer=doc.get("issuer"),
                     language=doc.get("language"),
                     doc_group=doc.get("doc_group") or Path(doc["file"]).stem,
+                    quality_status=str(
+                        doc.get("quality_status")
+                        or cat_cfg.get("quality_status")
+                        or "quarantined"
+                    ),
+                    use_modes=list(
+                        doc.get("use_modes") or cat_cfg.get("use_modes") or []
+                    ),
+                    evidence_role=str(
+                        doc.get("evidence_role")
+                        or cat_cfg.get("evidence_role")
+                        or "contextual_view"
+                    ),
+                    publication_date=(
+                        doc.get("publication_date")
+                        or doc.get("effective_date")
+                    ),
+                    cleaning_version=str(manifest.get("version") or ""),
                 )
             )
     return jobs
@@ -401,6 +425,9 @@ def _base_chunk_metadata(
         "chunk_index": chunk_index,
         "block_type": block_type,
         "doc_type": job.category,
+        "quality_status": job.quality_status,
+        "use_modes": list(job.use_modes),
+        "evidence_role": job.evidence_role,
     }
     if part.page_range:
         meta["page_range"] = part.page_range
@@ -410,6 +437,10 @@ def _base_chunk_metadata(
         meta["fiscal_year"] = job.fiscal_year
     if job.effective_date:
         meta["effective_date"] = job.effective_date
+    if job.publication_date:
+        meta["publication_date"] = job.publication_date
+    if job.cleaning_version:
+        meta["cleaning_version"] = job.cleaning_version
     if job.issuer:
         meta["issuer"] = job.issuer
     if job.language:
@@ -622,6 +653,10 @@ def chunk_blocks(
         narrative_buffer.append(block.text)
 
     flush_buffer()
+    for chunk in chunks:
+        chunk.metadata["content_hash"] = (
+            "sha256:" + hashlib.sha256(chunk.text.encode("utf-8")).hexdigest()
+        )
     return chunks
 
 

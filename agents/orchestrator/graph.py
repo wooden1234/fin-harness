@@ -45,7 +45,10 @@ from agents.orchestrator.task_identity import (
 )
 from agents.orchestrator.planner import build_plan_from_profile
 from agents.orchestrator.state import OrchestratorState
-from agents.query_rewrite import query_rewrite_node
+from agents.query_rewrite import (
+    build_pending_clarification,
+    query_rewrite_node,
+)
 from agents.runtime_context import AgentRuntimeContext
 from agents.states import FinAgentInput
 from app.core.config import settings
@@ -54,13 +57,13 @@ from app.core.logger import get_logger
 logger = get_logger(service="orchestrator_v2")
 
 
-def _request_budget(complexity: str) -> tuple[float, float]:
-    """按请求难度返回本轮软、硬时限。"""
+def _request_budget(budget_tier: str) -> tuple[float, float]:
+    """按确定性预算档位返回本轮软、硬时限。"""
     prefix = {
-        "simple": "SIMPLE",
-        "single_capability": "SINGLE",
-        "compound": "COMPOUND",
-    }.get(complexity, "COMPOUND")
+        "light": "SIMPLE",
+        "standard": "SINGLE",
+        "research": "COMPOUND",
+    }.get(budget_tier, "COMPOUND")
     return (
         float(getattr(settings, f"AGENT_V2_{prefix}_SOFT_DEADLINE_SEC")),
         float(getattr(settings, f"AGENT_V2_{prefix}_HARD_DEADLINE_SEC")),
@@ -85,11 +88,21 @@ def _task_scope(runtime: Runtime[AgentRuntimeContext] | None) -> str:
 
 
 def route_after_query_rewrite(state: OrchestratorState) -> str:
-    """改写成功后进入 Analyzer；无法可靠补全时直接追问。"""
+    """改写成功后进入 Analyzer；无法可靠补全时直接结束并说明。"""
     rewrite_status = str(state.get("rewrite_status") or "")
-    if rewrite_status in {"success", "passthrough"}:
+    if rewrite_status in {"rewrite", "passthrough"}:
         return "analyze_request"
     return "clarify"
+
+
+def route_after_analyze_request(state: OrchestratorState) -> str:
+    """Analyzer 仍无法形成明确画像时，不创建任务并直接结束本轮。"""
+    profile = state.get("request_profile")
+    if profile is None:
+        return "clarify"
+    if profile.missing_fields or "clarify" in profile.intents:
+        return "clarify"
+    return "build_plan"
 
 
 async def build_plan(
@@ -100,9 +113,9 @@ async def build_plan(
     del config
     profile = state.get("request_profile") or heuristic_profile(latest_query(state))
     if runtime is not None:
-        soft_seconds, hard_seconds = _request_budget(profile.complexity)
+        soft_seconds, hard_seconds = _request_budget(profile.execution.budget_tier)
         runtime.context.configure_budget(
-            complexity=profile.complexity,
+            budget_tier=profile.execution.budget_tier,
             soft_seconds=soft_seconds,
             hard_seconds=hard_seconds,
             unit_timeouts=_unit_timeouts(),
@@ -114,7 +127,7 @@ async def build_plan(
     planning_status = str(plan.metadata.get("planning_status") or "")
     prior_results = (
         list(state.get("agent_results") or [])
-        if profile.operation_type == "compute"
+        if profile.execution.mode == "market_compute"
         else []
     )
     return {
@@ -962,8 +975,116 @@ async def clarify(
     state: OrchestratorState,
     config: RunnableConfig = None,
 ) -> dict[str, Any]:
-    del state, config
-    return {"summary": "请补充需要查询的金融对象或具体目标。", "route": "plan"}
+    reasons = set(state.get("rewrite_reason_codes") or [])
+    profile = state.get("request_profile")
+    pending = state.get("pending_query_clarification")
+    resolution = state.get("rewrite_resolution") or {}
+    raw_candidates: list[object] = []
+    if isinstance(pending, dict):
+        raw_candidates.extend(list(pending.get("candidate_entities") or []))
+    if isinstance(resolution, dict):
+        raw_candidates.extend(list(resolution.get("candidate_entities") or []))
+    safe_candidates = list(
+        dict.fromkeys(
+            value
+            for item in raw_candidates
+            if (value := str(item).strip())
+            and len(value) <= 32
+            and all(char.isalnum() or char in ".·_-" for char in value)
+        )
+    )[:3]
+    candidate_hint = f"（{'、'.join(safe_candidates)}）" if safe_candidates else ""
+
+    if "context_missing" in reasons:
+        summary = (
+            "我还没找到这句里的“它”或省略内容具体指谁。"
+            "你想看哪只股票、基金、指数或哪个行业？直接回复名称或代码就行；"
+            "确认对象后，我会接着处理刚才的问题。"
+        )
+    elif "multiple_entity_candidates" in reasons:
+        summary = (
+            f"上文里有不止一个可能的对象{candidate_hint}，"
+            "我不想替你猜错。你指的是哪一个？直接回复名称或代码就可以。"
+        )
+    elif "model_uncertain" in reasons:
+        summary = (
+            "我结合了前面的对话，但还是没法唯一确定你指的对象或指标。"
+            "补充一下名称、代码或想看的指标，我就能继续。"
+        )
+    elif "model_error" in reasons:
+        summary = (
+            "这次上下文补全没有成功，不一定是你的问题。"
+            "你可以把对象直接带上再问一次，例如“贵州茅台去年表现怎么样”，也可以稍后重试。"
+        )
+    elif "context_irrelevant" in reasons:
+        summary = (
+            "我看到了前面的消息，但没找到能和当前问题对应上的金融对象。"
+            "告诉我名称或代码就行，例如“贵州茅台”或“600519”，我会接着分析。"
+        )
+    elif "rewrite_validation_failed" in reasons:
+        summary = (
+            "我没法确认补出来的对象确实来自上文，所以先不替你做决定。"
+            "你想查的是谁？直接回复名称或代码即可。"
+        )
+    elif "clarification_expired" in reasons:
+        summary = (
+            "前面那个问题隔得有点久，我不想把这条回复接错。"
+            "麻烦把对象和问题一起说一下，例如“贵州茅台去年表现怎么样”。"
+        )
+    elif profile is not None and (profile.missing_fields or "clarify" in profile.intents):
+        missing = set(profile.missing_fields)
+        if missing & {"query", "query_target", "security", "entity", "ticker"}:
+            summary = (
+                "我还不知道你想看哪个对象。告诉我股票、基金、指数或行业名称就行，"
+                "例如“贵州茅台”“600519”或“白酒龙头”。"
+            )
+        elif "metric" in missing:
+            summary = (
+                "你更想看哪个方面？比如营收、净利润、股价、估值或风险。"
+                "如果你想做综合分析，也可以直接回复“整体表现”。"
+            )
+        elif "time_range" in missing:
+            summary = "你想看哪个时间范围？比如上一年度、最近一年或今年以来。"
+        else:
+            summary = (
+                "我还差一点关键信息才能准确处理。"
+                "你可以补充对象、时间范围，或者直接说想重点了解什么。"
+            )
+    else:
+        summary = (
+            "这里有不止一种理解，我不想替你猜。"
+            "补充一下具体对象或你最关心的内容，我就能继续。"
+        )
+
+    del config
+    generated_summary = str(state.get("rewrite_clarification_message") or "").strip()
+    if not generated_summary and profile is not None:
+        generated_summary = profile.clarification_message.strip()
+    if (
+        generated_summary
+        and len(generated_summary) <= 1800
+        and not generated_summary.startswith("__")
+    ):
+        summary = generated_summary
+    update: dict[str, Any] = {
+        "summary": summary,
+        "route": "plan",
+        "steps": ["orchestrator:clarify_stop"],
+    }
+    if not pending and profile is not None and (
+        profile.missing_fields or "clarify" in profile.intents
+    ):
+        original_query = (
+            latest_query(state)
+            or profile.normalized_query
+            or profile.original_query
+        )
+        update["pending_query_clarification"] = build_pending_clarification(
+            original_query,
+            missing_fields=list(profile.missing_fields) or ["query_target"],
+            asked_question=summary,
+        )
+    return update
 
 
 def build_orchestrator_graph() -> StateGraph:
@@ -1005,7 +1126,18 @@ def build_orchestrator_graph() -> StateGraph:
         memory_action_edge,
         {"continue": "context_compressor", "final_answer": "final_answer"},
     )
-    builder.add_edge("context_compressor", "query_rewrite")
+    builder.add_conditional_edges(
+        "context_compressor",
+        lambda state: (
+            "final_answer"
+            if bool(state.get("context_admission_rejected"))
+            else "query_rewrite"
+        ),
+        {
+            "query_rewrite": "query_rewrite",
+            "final_answer": "final_answer",
+        },
+    )
     builder.add_conditional_edges(
         "query_rewrite",
         route_after_query_rewrite,
@@ -1014,7 +1146,14 @@ def build_orchestrator_graph() -> StateGraph:
             "clarify": "clarify",
         },
     )
-    builder.add_edge("analyze_request", "build_plan")
+    builder.add_conditional_edges(
+        "analyze_request",
+        route_after_analyze_request,
+        {
+            "build_plan": "build_plan",
+            "clarify": "clarify",
+        },
+    )
     builder.add_edge("build_plan", "memory_plan")
     builder.add_edge("memory_plan", "load_task_memories")
     builder.add_edge("load_task_memories", "prepare_wave")
@@ -1057,6 +1196,7 @@ __all__ = [
     "dispatch_wave",
     "get_orchestrator_graph",
     "reset_orchestrator_graph_cache",
+    "route_after_analyze_request",
     "route_after_query_rewrite",
 ]
 

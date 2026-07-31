@@ -90,7 +90,12 @@ def test_research_planner_distinguishes_missing_and_explicit_empty_scope() -> No
         {"data_sources": []},
     )
 
-    assert defaulted.data_sources == ["market", "research", "finance_rag"]
+    assert defaulted.data_sources == [
+        "market",
+        "research",
+        "finance_rag",
+        "local_documents",
+    ]
     assert defaulted.metadata["source_scope_origin"] == "missing_default"
     assert blocked.data_sources == []
     assert blocked.source_tasks == []
@@ -628,9 +633,50 @@ async def test_finalize_research_downgrades_partial_question_coverage() -> None:
     assert result.status == "partial"
     assert result.error_code == "research_question_evidence_partial"
     assert (
-        "question:public_disclosures: evidence_count_below_minimum:0<1"
+        "question:public_disclosures: evidence_source_groups_below_minimum:0<1"
         in result.gaps
     )
+
+
+async def test_critical_review_counts_independent_source_groups() -> None:
+    from agents.research_workflow.workflow import validate_question_evidence
+
+    plan = build_research_plan(
+        "研究宁德时代风险",
+        {"data_sources": ["local_documents"]},
+    )
+    chunks = [
+        Evidence(
+            evidence_id=f"chunk-{index}",
+            task_id="deep-research",
+            source_type="knowledge.pdf.search",
+            provider="local_knowledge",
+            metadata={
+                "research_question_id": "local_document_facts",
+                "source_group": "PDF-AR-CATL-2025",
+            },
+        )
+        for index in range(2)
+    ]
+    validation = await validate_question_evidence(
+        {
+            "research_plan": plan,
+            "deep_result": AgentResult(
+                task_id="deep-research",
+                agent_id="deep_research_agent",
+                status="completed",
+                evidence=chunks,
+            ),
+        }
+    )
+    assessments = {
+        item.question_id: item for item in validation["question_evidence_assessments"]
+    }
+
+    assert assessments["local_document_facts"].evidence_count == 1
+    assert assessments["critical_review"].evidence_count == 1
+    assert assessments["critical_review"].required_count == 2
+    assert assessments["critical_review"].passed is False
 
 
 async def test_finalize_research_returns_uncovered_when_all_questions_fail() -> None:

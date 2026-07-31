@@ -187,6 +187,16 @@ class Settings(BaseSettings):
     AGENT_V2_TOOL_SKILL_TIMEOUT_SEC: float = 10.0
     AGENT_V2_MAX_CONCURRENCY: int = 4
 
+    # 上下文空间：业务窗口不会随模型物理窗口自动增长。
+    CONTEXT_STRUCTURED_SUMMARY_MODE: str = "off"
+    CONTEXT_CONVERSATION_MAX_TOKENS: int = 16_000
+    CONTEXT_TOOL_LOOP_MAX_TOKENS: int = 12_000
+    CONTEXT_RESEARCH_MAX_TOKENS: int = 16_000
+    CONTEXT_TRIGGER_RATIO: float = 0.75
+    CONTEXT_TARGET_RATIO: float = 0.50
+    CONTEXT_ADMISSION_RATIO: float = 0.85
+    CONTEXT_APPROXIMATE_SAFETY_MULTIPLIER: float = 1.20
+
     # MinerU PDF 解析
     MINERU_API_KEY: str = ""
     MINERU_TOKEN: str = ""

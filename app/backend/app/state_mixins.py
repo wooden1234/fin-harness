@@ -17,12 +17,10 @@ from typing_extensions import TypedDict
 from app.shared import AgentRoute
 
 
-# ─── Supervisor（直属组件，无大 agent 包裹）───
+# ─── 兼容路由状态（名称保留，生产主图由 Analyzer 写入）───
 class SupervisorState(TypedDict):
-    """Supervisor 写入的路由信息"""
+    """保留旧类型名，当前仅承载 Analyzer 产生的最终路由。"""
     route: NotRequired[AgentRoute]
-    supervisor_action: NotRequired[str]
-    logic: NotRequired[str]
 
 
 # ─── Guardrails（直属组件，无大 agent 包裹）───

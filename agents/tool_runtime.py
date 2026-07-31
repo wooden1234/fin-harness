@@ -6,17 +6,26 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
+from langchain_core.exceptions import ContextOverflowError
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.runtime import Runtime
 from langgraph.prebuilt import ToolNode
 
 from agents.context import conversation_messages
+from agents.context_compressor.tokens import estimate_tokens, truncate_to_token_limit
+from agents.context_space import (
+    ContextBudgetPolicy,
+    ContextSpaceType,
+    ToolLoopContextGovernor,
+)
+from agents.context_space.events import record_context_event
 from agents.runtime_context import (
     AgentRuntimeContext,
     RunHardDeadlineExceeded,
@@ -44,9 +53,17 @@ def _message_text(content: Any) -> str:
 
 def _tool_result_content(data: Any) -> str:
     try:
-        return json.dumps(data, ensure_ascii=False, default=str)
+        content = json.dumps(data, ensure_ascii=False, default=str)
     except TypeError:
-        return str(data)
+        content = str(data)
+    if estimate_tokens(content) <= 2_000:
+        return content
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    clipped = truncate_to_token_limit(content, 1_900)
+    return (
+        f"{clipped}\n[工具结果已做有界投影] "
+        f"original_tokens={estimate_tokens(content)} content_hash=sha256:{digest}"
+    )
 
 
 def _run_context_from_runtime(
@@ -179,6 +196,21 @@ async def run_with_tools(
         SystemMessage(content=system_prompt),
         *conversation_messages(state),
     ]
+    governor = ToolLoopContextGovernor(
+        llm=llm,
+        tools=tools,
+        policy=ContextBudgetPolicy(
+            explicit_max_tokens=int(settings.CONTEXT_TOOL_LOOP_MAX_TOKENS),
+            trigger_ratio=float(settings.CONTEXT_TRIGGER_RATIO),
+            target_ratio=float(settings.CONTEXT_TARGET_RATIO),
+            admission_ratio=float(settings.CONTEXT_ADMISSION_RATIO),
+            approximate_safety_multiplier=float(
+                settings.CONTEXT_APPROXIMATE_SAFETY_MULTIPLIER
+            ),
+            max_compaction_rounds=1,
+        ),
+        config=config,
+    )
     logger.info(
         "{} history_messages={} tools={}",
         agent_name,
@@ -186,15 +218,103 @@ async def run_with_tools(
         [tool.name for tool in tools],
     )
 
+    async def _emit_context_event(event_type: str, **details: Any) -> None:
+        await record_context_event(
+            runtime,
+            space_type=ContextSpaceType.TOOL_LOOP,
+            event_type=event_type,
+            measurement=governor.last_measurement,
+            counters=governor.counters,
+            details=details,
+            agent_id=agent_name,
+        )
+
+    async def _prepare_working() -> bool:
+        nonlocal working
+        before = governor.measure(list(working))
+        previous = governor.counters.model_copy(deep=True)
+        if before.trigger_exceeded:
+            await _emit_context_event("context.threshold_exceeded")
+        prepared, admitted = await governor.prepare(list(working))
+        working = list(prepared)
+        if governor.counters.compaction_round_count > previous.compaction_round_count:
+            await _emit_context_event("context.compaction_completed")
+        if governor.counters.summary_attempt_count - previous.summary_attempt_count > 1:
+            await _emit_context_event("context.summary_repair")
+        if governor.counters.snip_count > previous.snip_count:
+            await _emit_context_event("context.snip_applied")
+        if not admitted:
+            logger.warning("{} context admission rejected", agent_name)
+            await _emit_context_event("context.admission_rejected", admitted=False)
+        return admitted
+
+    async def _recover_overflow() -> bool:
+        nonlocal working
+        await _emit_context_event("context.provider_overflow")
+        recovered, retry = governor.provider_overflow_recovery(list(working))
+        if not retry:
+            await _emit_context_event("context.degraded", error_code="context_overflow")
+            return False
+        working = list(recovered)
+        await _emit_context_event("context.provider_retry")
+        return True
+
+    async def _record_model_result(result: Any) -> None:
+        usage = getattr(result, "usage_metadata", None) or {}
+        actual = usage.get("input_tokens") if isinstance(usage, Mapping) else None
+        measurement = governor.last_measurement
+        if measurement is not None and isinstance(actual, int) and actual >= 0:
+            measurement = measurement.model_copy(
+                update={"actual_input_tokens": actual}
+            )
+        await record_context_event(
+            runtime,
+            space_type=ContextSpaceType.TOOL_LOOP,
+            event_type="context.model_invocation",
+            measurement=measurement,
+            counters=governor.counters,
+            agent_id=agent_name,
+            details={
+                "estimate_error_ratio": (
+                    abs(actual - measurement.estimated_tokens) / max(1, actual)
+                    if measurement is not None and isinstance(actual, int)
+                    else None
+                )
+            },
+        )
+
     async def _stream_final_answer() -> str:
+        nonlocal working
+        if not await _prepare_working():
+            return busy_answer
         parts: list[str] = []
-        async for chunk in llm.astream(working, config=config):
-            if chunk.content:
-                parts.append(_message_text(chunk.content))
+        last_chunk: Any = None
+        try:
+            async for chunk in llm.astream(working, config=config):
+                last_chunk = chunk
+                if chunk.content:
+                    parts.append(_message_text(chunk.content))
+        except ContextOverflowError:
+            if not await _recover_overflow():
+                return busy_answer
+            final = await llm.ainvoke(working, config=config)
+            await _record_model_result(final)
+            return _message_text(getattr(final, "content", "")).strip() or busy_answer
+        if last_chunk is not None:
+            await _record_model_result(last_chunk)
         return "".join(parts).strip() or busy_answer
 
     async def _invoke_final_answer() -> str:
-        final = await llm.ainvoke(working, config=config)
+        nonlocal working
+        if not await _prepare_working():
+            return busy_answer
+        try:
+            final = await llm.ainvoke(working, config=config)
+        except ContextOverflowError:
+            if not await _recover_overflow():
+                return busy_answer
+            final = await llm.ainvoke(working, config=config)
+        await _record_model_result(final)
         return _message_text(getattr(final, "content", "")).strip() or busy_answer
 
     def _response(answer: str) -> dict[str, Any]:
@@ -215,7 +335,15 @@ async def run_with_tools(
 
         # 有工具：先 ainvoke 决策/执行，最终回答再统一流式
         for round_idx in range(max(1, int(max_tool_rounds or 1))):
-            ai_message = await llm_with_tools.ainvoke(working, config=config)
+            if not await _prepare_working():
+                return _response(busy_answer)
+            try:
+                ai_message = await llm_with_tools.ainvoke(working, config=config)
+            except ContextOverflowError:
+                if not await _recover_overflow():
+                    return _response(busy_answer)
+                ai_message = await llm_with_tools.ainvoke(working, config=config)
+            await _record_model_result(ai_message)
             if not isinstance(ai_message, AIMessage):
                 ai_message = AIMessage(
                     content=_message_text(getattr(ai_message, "content", ""))

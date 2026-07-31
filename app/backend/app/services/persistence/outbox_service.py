@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -30,8 +31,67 @@ from agents.checkpoint import delete_thread_checkpoint
 logger = get_logger(service="outbox")
 
 
+@dataclass(frozen=True, slots=True)
+class EpisodicContextWindow:
+    """自上次情景记忆边界之后的权威原始消息统计。"""
+
+    messages: tuple[dict[str, Any], ...]
+    source_text: str
+    turn_count: int
+    uncompressed_tokens: int
+    latest_memory: Any | None = None
+
+
 class OutboxService:
     """管理数据库 outbox，并提供可重复执行的补偿处理。"""
+
+    @staticmethod
+    async def episodic_context_window(
+        *,
+        tenant_id: str,
+        user_id: int,
+        conversation_id: int | None,
+        query: str,
+        final_response: str,
+    ) -> EpisodicContextWindow:
+        """从原始消息表计算容量，完全绕过已压缩的 checkpoint。"""
+        latest = None
+        messages: list[dict[str, Any]] = []
+        if conversation_id is not None:
+            latest = await MemoryService.latest_episodic_for_conversation(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
+            )
+            messages = await ConversationService.get_conversation_messages(
+                conversation_id,
+                user_id,
+                tenant_id,
+            )
+            if latest is not None and latest.source_message_id is not None:
+                messages = [
+                    message
+                    for message in messages
+                    if int(message["id"]) > int(latest.source_message_id)
+                ]
+
+        if messages:
+            source_text = render_source_messages(messages)
+            if final_response and messages[-1].get("sender") != "assistant":
+                source_text += f"\n助手: {final_response}"
+        else:
+            source_text = f"用户: {query}\n助手: {final_response}"
+        return EpisodicContextWindow(
+            messages=tuple(messages),
+            source_text=source_text,
+            turn_count=(
+                sum(1 for message in messages if message.get("sender") == "user")
+                if messages
+                else int(bool(query.strip()))
+            ),
+            uncompressed_tokens=estimate_episodic_tokens(source_text),
+            latest_memory=latest,
+        )
 
     @staticmethod
     async def enqueue_assistant_persist(
@@ -297,37 +357,18 @@ class OutboxService:
         tenant_id = str(payload.get("tenant_id") or "default")
         user_id = int(payload["user_id"])
         conversation_id = payload.get("conversation_id")
-        latest = None
-        messages: list[dict[str, Any]] = []
         if conversation_id is not None:
             conversation_id = int(conversation_id)
-            latest = await MemoryService.latest_episodic_for_conversation(
-                tenant_id=tenant_id,
-                user_id=user_id,
-                conversation_id=conversation_id,
-            )
-            messages = await ConversationService.get_conversation_messages(
-                conversation_id,
-                user_id,
-                tenant_id,
-            )
-            if latest is not None and latest.source_message_id is not None:
-                messages = [
-                    message
-                    for message in messages
-                    if int(message["id"]) > int(latest.source_message_id)
-                ]
-
-        if messages:
-            source_text = render_source_messages(messages)
-        else:
-            source_text = (
-                f"用户: {str(payload.get('query') or '')}\n"
-                f"助手: {str(payload.get('final_response') or '')}"
-            )
-        turn_count = sum(
-            1 for message in messages if message.get("sender") == "user"
+        context_window = await OutboxService.episodic_context_window(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            query=str(payload.get("query") or ""),
+            final_response=str(payload.get("final_response") or ""),
         )
+        latest = context_window.latest_memory
+        messages = list(context_window.messages)
+        source_text = context_window.source_text
         minutes_since_summary: float | None = None
         if latest is not None and latest.created_at is not None:
             created_at = latest.created_at
@@ -351,8 +392,8 @@ class OutboxService:
             final_response=str(payload.get("final_response") or ""),
             execution_status=str(payload.get("execution_status") or ""),
             task_count=int(payload.get("task_count") or 0),
-            turn_count=turn_count,
-            uncompressed_tokens=estimate_episodic_tokens(source_text),
+            turn_count=context_window.turn_count,
+            uncompressed_tokens=context_window.uncompressed_tokens,
             minutes_since_summary=minutes_since_summary,
         )
         if not decision.should_enqueue:

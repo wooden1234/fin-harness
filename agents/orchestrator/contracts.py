@@ -7,22 +7,19 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-RequestComplexity = Literal["simple", "single_capability", "compound"]
-DataSourceType = Literal[
-    "market",
-    "research",
-    "finance_rag",
-    "upstream_data",
-    "none",
-]
-OperationType = Literal[
-    "acquire",
-    "retrieve",
-    "compute",
-    "analyze",
-    "answer",
+BudgetTier = Literal["light", "standard", "research"]
+ExecutionMode = Literal[
+    "clarify",
+    "general_answer",
+    "faq_lookup",
+    "structured_finance",
+    "document_qa",
+    "market_acquire",
+    "research_retrieve",
+    "stock_screen",
+    "market_compute",
     "deep_research",
 ]
 TaskStatus = Literal[
@@ -152,21 +149,34 @@ class DeepResearchReport(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ExecutionDecision(BaseModel):
+    """由确定性 Resolver 生成的执行授权，模型不能直接构造。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: ExecutionMode
+    budget_tier: BudgetTier
+    allowed_capabilities: list[str] = Field(default_factory=list)
+    data_sources: list[str] = Field(default_factory=list)
+    knowledge_scope: list[str] = Field(default_factory=list)
+    tool_id: str | None = None
+
+
 class RequestProfile(BaseModel):
-    """入口分析后的请求画像。"""
+    """语义画像与确定性执行决策。"""
+
+    model_config = ConfigDict(extra="forbid")
 
     original_query: str
     normalized_query: str = ""
     domain: str = "finance"
     intents: list[str] = Field(default_factory=list)
-    complexity: RequestComplexity = "simple"
-    data_sources: list[DataSourceType] = Field(default_factory=list)
-    operation_type: OperationType = "answer"
     freshness_required: bool = False
     entities: list[str] = Field(default_factory=list)
     constraints: dict[str, Any] = Field(default_factory=dict)
     missing_fields: list[str] = Field(default_factory=list)
-    preferred_agent: str | None = None
+    clarification_message: str = Field(default="", max_length=1800)
+    execution: ExecutionDecision
 
 
 class EvidencePolicy(BaseModel):
@@ -398,7 +408,7 @@ __all__ = [
     "ClaimType",
     "ConflictType",
     "ConstrainedAnswer",
-    "DataSourceType",
+    "BudgetTier",
     "DeepResearchReport",
     "DomainFallbackPolicy",
     "DomainPlanningScope",
@@ -406,6 +416,8 @@ __all__ = [
     "DocumentHit",
     "DocumentHitSet",
     "ErrorAction",
+    "ExecutionDecision",
+    "ExecutionMode",
     "Evidence",
     "EvidenceAssessment",
     "EvidenceConflict",
@@ -416,9 +428,7 @@ __all__ = [
     "MarketQueryPlan",
     "MarketSort",
     "MarketSortDirection",
-    "OperationType",
     "QualityReport",
-    "RequestComplexity",
     "RequestProfile",
     "SourceGrade",
     "StatementType",

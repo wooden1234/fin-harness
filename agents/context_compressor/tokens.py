@@ -53,15 +53,18 @@ def truncate_to_token_limit(text: str, limit: int) -> str:
     if estimate_tokens(text) <= limit:
         return text
 
+    suffix = "…"
     lo, hi = 0, len(text)
     while lo < hi:
         mid = (lo + hi + 1) // 2
-        if estimate_tokens(text[:mid]) <= limit:
+        if estimate_tokens(text[:mid].rstrip() + suffix) <= limit:
             lo = mid
         else:
             hi = mid - 1
     clipped = text[:lo].rstrip()
-    return f"{clipped}…" if clipped else text[:1]
+    if clipped:
+        return f"{clipped}{suffix}"
+    return suffix if estimate_tokens(suffix) <= limit else ""
 
 
 def capped_message_text(message: AnyMessage) -> str:

@@ -11,7 +11,7 @@ from agents.orchestrator.analyzer.prompts import (
     ANALYZER_REPAIR_SYSTEM_PROMPT,
     build_analyzer_system_prompt,
 )
-from agents.orchestrator.analyzer.schema import AnalyzerOutput
+from agents.orchestrator.analyzer.schema import AnalyzerInputEnvelope, AnalyzerOutput
 from app.core.logger import get_logger
 
 logger = get_logger(service="orchestrator_analyzer")
@@ -58,19 +58,19 @@ async def ainvoke_analyzer(
 
 
 async def analyze_once(
-    query: str,
+    envelope: AnalyzerInputEnvelope,
     config: RunnableConfig | None = None,
 ) -> AnalyzerOutput:
     """单次画像分析，不做内部重试。"""
     return await ainvoke_analyzer(
         system_prompt=build_analyzer_system_prompt(),
-        human_prompt=f"用户问题：\n{query}",
+        human_prompt=envelope.model_dump_json(exclude_none=True),
         config=config,
     )
 
 
 async def repair_profile(
-    query: str,
+    envelope: AnalyzerInputEnvelope,
     raw: AnalyzerOutput,
     issues: list[str],
     config: RunnableConfig | None = None,
@@ -78,7 +78,7 @@ async def repair_profile(
     """单次修复调用，不做内部重试。"""
     payload = raw.model_dump_json()
     human_prompt = (
-        f"用户问题：\n{query}\n\n"
+        f"输入信封：\n{envelope.model_dump_json(exclude_none=True)}\n\n"
         f"校验问题：{', '.join(issues)}\n\n"
         f"待修正输出：{payload}"
     )

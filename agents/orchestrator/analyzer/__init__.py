@@ -1,8 +1,8 @@
 """Orchestrator Analyzer 包：请求画像分析，不负责图节点指派。"""
 
 from agents.orchestrator.analyzer.heuristic import heuristic_profile, latest_query
-from agents.orchestrator.analyzer.node import analyze_request
-from agents.orchestrator.analyzer.schema import AnalyzerOutput
+from agents.orchestrator.analyzer.node import analyze_request, build_analyzer_envelope
+from agents.orchestrator.analyzer.schema import AnalyzerInputEnvelope, AnalyzerOutput
 from agents.orchestrator.analyzer.validate import (
     assert_plan_capabilities,
     assert_task_capabilities,
@@ -11,7 +11,9 @@ from agents.orchestrator.analyzer.validate import (
 
 __all__ = [
     "AnalyzerOutput",
+    "AnalyzerInputEnvelope",
     "analyze_request",
+    "build_analyzer_envelope",
     "assert_plan_capabilities",
     "assert_task_capabilities",
     "heuristic_profile",

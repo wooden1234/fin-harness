@@ -35,6 +35,8 @@ def index_mapping(text_analyzer: str, search_analyzer: str) -> dict[str, Any]:
                 "category": {"type": "keyword"},
                 "collection": {"type": "keyword"},
                 "doc_id": {"type": "keyword"},
+                "domain": {"type": "keyword"},
+                "doc_type": {"type": "keyword"},
                 "source": {
                     **text_field,
                     "fields": {"keyword": {"type": "keyword"}},
@@ -124,6 +126,8 @@ def build_document(
         "category": category,
         "collection": collection,
         "doc_id": metadata.get("doc_id"),
+        "domain": metadata.get("domain"),
+        "doc_type": metadata.get("doc_type"),
         "source": metadata.get("source"),
         "file": metadata.get("file") or metadata.get("file_name"),
         "title": metadata.get("title"),

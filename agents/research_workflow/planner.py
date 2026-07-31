@@ -26,7 +26,7 @@ from agents.research_workflow.prompts import RESEARCH_PLANNER_SYSTEM_PROMPT
 from agents.research_workflow.spec import RESEARCH_WORKFLOW_SPEC
 from app.core.logger import get_logger
 
-_ALLOWED_DATA_SOURCES = frozenset(RESEARCH_WORKFLOW_SPEC.default_data_sources)
+_ALLOWED_DATA_SOURCES = frozenset(RESEARCH_WORKFLOW_SPEC.allowed_data_sources)
 _MAX_RESEARCH_QUESTIONS = 8
 logger = get_logger(service="research_workflow_planner")
 
@@ -34,13 +34,18 @@ _SOURCE_TASK_IDS = {
     "market": ("research:stock_screening",),
     "research": ("research:announcement", "research:report"),
     "finance_rag": ("research:finance",),
+    "local_documents": ("deep-research",),
+    "stable_rules": ("deep-research",),
 }
 _QUESTION_TASK_IDS = {
     "market_context": ("research:stock_screening",),
     "public_disclosures": ("research:announcement",),
     "institution_views": ("research:report",),
     "financial_facts": ("research:finance",),
+    "local_document_facts": ("deep-research",),
+    "stable_rule_context": ("deep-research",),
 }
+_DEEP_AGENT_SOURCES = frozenset({"local_documents", "stable_rules"})
 
 
 def _string_list(value: Any) -> list[str]:
@@ -212,6 +217,24 @@ def _research_questions(
                 evidence_requirements=["财务指标、报告期和数据口径"],
             )
         )
+    if "local_documents" in sources:
+        questions.append(
+            ResearchQuestionDraft(
+                question_id="local_document_facts",
+                objective="本地已准入年报、宏观报告或研究材料提供了哪些可核验事实和观点？",
+                data_sources=["local_documents"],
+                evidence_requirements=["文档 ID、页码、章节、发布日期和原文片段"],
+            )
+        )
+    if "stable_rules" in sources:
+        questions.append(
+            ResearchQuestionDraft(
+                question_id="stable_rule_context",
+                objective="哪些稳定规则、概念或制度模板构成研究结论的背景约束？",
+                data_sources=["stable_rules"],
+                evidence_requirements=["FAQ 文档 ID、生效日期和适用域"],
+            )
+        )
     questions.append(
         ResearchQuestionDraft(
             question_id="critical_review",
@@ -228,7 +251,8 @@ def _question_policy(
     data_sources: Sequence[str],
     task_ids: Sequence[str],
 ) -> EvidencePolicy:
-    min_count = min(2, len(task_ids)) if question_id == "critical_review" else 1
+    # 综合判断至少需要两个独立来源组；来源范围不足时应显式降级为 partial。
+    min_count = 2 if question_id == "critical_review" else 1
     return EvidencePolicy(
         required=True,
         min_count=max(1, min_count),
@@ -247,6 +271,8 @@ def _map_questions(
     """把研究问题确定性映射到可执行任务和证据策略。"""
     allowed_sources = set(data_sources)
     executable_ids = {task.task_id for task in source_tasks}
+    if allowed_sources & _DEEP_AGENT_SOURCES:
+        executable_ids.add("deep-research")
     questions: list[ResearchQuestion] = []
     for item in drafts:
         requested_sources = _string_list(item.data_sources)
@@ -275,6 +301,8 @@ def _map_questions(
                 for task in source_tasks
                 if task.task_id in eligible_task_ids
             ]
+            if "deep-research" in eligible_task_ids:
+                task_ids.append("deep-research")
         elif item.question_id in _QUESTION_TASK_IDS:
             task_ids = [
                 task_id

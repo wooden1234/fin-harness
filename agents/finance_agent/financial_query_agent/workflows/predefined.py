@@ -506,16 +506,21 @@ async def predefined_workflow(
     state: FinAgentState,
     config: RunnableConfig = None,
 ) -> dict[str, Any]:
-    """运行 predefined 白名单查询图，并保持旧 workflow 的对外返回契约。"""
-    invoke_config: RunnableConfig = {**(config or {}), "callbacks": []}
-    with tracing_context(enabled=False):
-        graph_state = await _get_compiled_predefined_graph().ainvoke(
-            {"source_state": state, "question": ""},
-            config=invoke_config,
-        )
-    output = graph_state.get("output")
-    if isinstance(output, dict):
-        return output
+    """按子图节点顺序执行，并保持旧 workflow 的对外返回契约。"""
+    graph_state: dict[str, Any] = {"source_state": state, "question": ""}
+    for node in (
+        _init_node,
+        _select_tool_node,
+        _semantic_node,
+        _resolve_node,
+        _execute_node,
+        _format_node,
+    ):
+        updates = await node(graph_state, config)
+        graph_state.update(updates)
+        output = graph_state.get("output")
+        if isinstance(output, dict):
+            return output
 
     logger.error("predefined_workflow graph ended without output")
     return database_failure_output(state, step="predefined")

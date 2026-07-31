@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from langchain_core.runnables import RunnableConfig
 
+from agents.context import project_conversation_context
 from agents.states import FinAgentState
 from agents.finance_agent.planner.common import (
     begin_turn_workspace,
@@ -39,7 +40,7 @@ async def plan_tasks_node(
 
     rewritten_query = str(state.get("rewritten_query") or "").strip()
     rewrite_status = str(state.get("rewrite_status") or "").strip()
-    conversation_summary = str(state.get("conversation_summary") or "")
+    conversation_summary = project_conversation_context(state, purpose="planning")
     try:
         domain_scope = domain_scope_from_state(state)
     except (TypeError, ValueError):

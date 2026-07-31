@@ -9,7 +9,16 @@ from dotenv import load_dotenv
 ROOT_DIR = Path(__file__).resolve().parent.parent
 BACKEND_DIR = ROOT_DIR / "app" / "backend"
 DEPS_DIR = ROOT_DIR / ".deps"
-for path in (str(BACKEND_DIR), str(ROOT_DIR), str(DEPS_DIR)):
+python_abi = f"cpython-{sys.version_info.major}{sys.version_info.minor}"
+# `.deps` 可能由另一个 Python 小版本构建，错误注入会遮蔽 Conda 中可用的扩展包。
+deps_binaries = list(DEPS_DIR.rglob("*.so")) if DEPS_DIR.exists() else []
+compatible_deps = not deps_binaries or any(
+    python_abi in path.name for path in deps_binaries
+)
+paths = [str(BACKEND_DIR), str(ROOT_DIR)]
+if compatible_deps:
+    paths.append(str(DEPS_DIR))
+for path in paths:
     if path not in sys.path:
         sys.path.insert(0, path)
 
