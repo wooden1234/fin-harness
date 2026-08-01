@@ -23,6 +23,7 @@ from agents.orchestrator.contracts import (
     MarketQueryPlan,
 )
 from agents.runtime_context import AgentRuntimeContext
+from agents.structured_output import ainvoke_json_output
 from agents.stock_screening_agent.skill_binding import (
     SkillBinding,
     resolve_skill_binding,
@@ -101,10 +102,9 @@ async def _invoke_screening_plan(
     model = llm or get_router_llm()
     return cast(
         ScreeningPlanDraft,
-        await model.with_structured_output(
+        await ainvoke_json_output(
+            model,
             ScreeningPlanDraft,
-            method="json_mode",
-        ).ainvoke(
             [
                 (
                     "system",

@@ -9,6 +9,7 @@ from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field
 
 from agents.llm import get_router_llm
+from agents.structured_output import ainvoke_json_output
 from agents.finance_agent.financial_query_agent.services.schemas import FinancialSqlResultRow
 from agents.finance_agent.financial_query_agent.services.errors import classify_exception
 from agents.finance_agent.financial_query_agent.text_to_sql.validation.result import ResultValidation
@@ -74,10 +75,9 @@ async def validate_query_result_with_llm(
         llm = get_router_llm()
         decision = cast(
             LlmResultValidationDecision,
-            await llm.with_structured_output(
+            await ainvoke_json_output(
+                llm,
                 LlmResultValidationDecision,
-                method="json_mode",
-            ).ainvoke(
                 [
                     ("system", FINANCIAL_QUERY_TEXT_TO_SQL_LLM_RESULT_VALIDATION_PROMPT),
                     (

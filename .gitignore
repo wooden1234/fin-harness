@@ -99,3 +99,7 @@ tests/*
 !tests/memory/*.py
 !tests/orchestrator/
 !tests/orchestrator/*.py
+!tests/retrieval/
+tests/retrieval/*
+!tests/retrieval/test_embedding_cache.py
+!tests/test_iwencai_cache.py

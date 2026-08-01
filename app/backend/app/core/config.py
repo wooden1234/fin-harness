@@ -48,6 +48,29 @@ class Settings(BaseSettings):
     MEMORY_CACHE_TTL_JITTER_RATIO: float = 0.1
     MEMORY_CACHE_LOCK_TTL_SEC: int = 5
     MEMORY_CACHE_LOCK_WAIT_MS: int = 30
+    # 共享缓存 TTL jitter；各 domain 最终 TTL 至少 1 秒
+    CACHE_TTL_JITTER_RATIO: float = 0.1
+    # JWT 鉴权用户 Cache-Aside（默认关闭）
+    AUTH_USER_CACHE_ENABLED: bool = False
+    AUTH_USER_CACHE_TTL_SEC: int = 60
+    AUTH_USER_CACHE_NEGATIVE_TTL_SEC: int = 30
+    # Query Embedding Cache-Aside（默认关闭）
+    EMBEDDING_CACHE_ENABLED: bool = False
+    EMBEDDING_CACHE_TTL_SEC: int = 43200
+    EMBEDDING_CACHE_LOCK_TTL_SEC: int = 75
+    EMBEDDING_CACHE_LOCK_WAIT_MS: int = 100
+    # FAQ/PDF 精确检索证据包缓存；版本需在知识库重建后递增
+    RETRIEVAL_EVIDENCE_CACHE_ENABLED: bool = False
+    RETRIEVAL_EVIDENCE_CACHE_VERSION: str = "v1"
+    RETRIEVAL_EVIDENCE_FAQ_TTL_SEC: int = 1800
+    RETRIEVAL_EVIDENCE_PDF_TTL_SEC: int = 600
+    RETRIEVAL_EVIDENCE_CACHE_MAX_BYTES: int = 262144
+    # iwencai 只读结果 Cache-Aside（默认关闭）
+    IWENCAI_CACHE_ENABLED: bool = False
+    IWENCAI_CACHE_MARKET_TTL_SEC: int = 30
+    IWENCAI_CACHE_DOCUMENT_TTL_SEC: int = 600
+    IWENCAI_CACHE_SCREEN_TTL_SEC: int = 60
+    IWENCAI_CACHE_MAX_BYTES: int = 524288
     SECRET_KEY: str
     ALGORITHM: str
     ACCESS_TOKEN_EXPIRE_MINUTES: int
@@ -180,6 +203,7 @@ class Settings(BaseSettings):
     AGENT_V2_COMPOUND_SOFT_DEADLINE_SEC: float = 25.0
     AGENT_V2_COMPOUND_HARD_DEADLINE_SEC: float = 40.0
     AGENT_V2_FINALIZATION_GRACE_SEC: float = 3.0
+    AGENT_V2_INFLIGHT_GRACE_SEC: float = 3.0
     # V2 执行单元预算，实际超时还会受本轮动态硬时限约束。
     AGENT_V2_DETERMINISTIC_TIMEOUT_SEC: float = 3.0
     AGENT_V2_AGENT_TIMEOUT_SEC: float = 12.0

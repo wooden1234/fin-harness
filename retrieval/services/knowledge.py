@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 from functools import lru_cache
 from pathlib import Path
@@ -202,11 +201,10 @@ async def search_faq_knowledge(
         similarity_threshold=None,
         metadata_filters={"domain": domain},
     )
-    return await asyncio.to_thread(
-        retriever.search,
+    return await retriever.asearch(
         query,
-        k,
-        {"domain": domain},
+        top_k=k,
+        metadata_filters={"domain": domain},
     )
 
 

@@ -15,6 +15,7 @@ from agents.orchestrator.adapters import (
     evidence_from_citation,
 )
 from agents.orchestrator.contracts import AgentResult, EvidencePolicy, TaskSpec
+from agents.orchestrator.progress import AgentProgressJournal
 from agents.runtime_context import AgentRuntimeContext
 
 
@@ -178,6 +179,7 @@ async def invoke_agent(
     memory_context: dict[str, Any] | None = None,
     config: RunnableConfig | None = None,
     runtime: Runtime[AgentRuntimeContext] | None = None,
+    progress: AgentProgressJournal | None = None,
 ) -> AgentResult:
     """以统一契约调用现有专业 Agent。"""
     get_agent_spec(task.agent_id)
@@ -257,10 +259,19 @@ async def invoke_agent(
     if task.agent_id == "finance_agent":
         from agents.finance_agent import finance_agent
 
-        output = await finance_agent.ainvoke(
-            invocation_state,
-            config=config,
-        )
+        if progress is None:
+            output = await finance_agent.ainvoke(invocation_state, config=config)
+        else:
+            output: dict[str, Any] = {}
+            async for snapshot in finance_agent.astream(
+                invocation_state,
+                config=config,
+                stream_mode="values",
+            ):
+                if not isinstance(snapshot, dict):
+                    continue
+                output = snapshot
+                progress.observe_finance_state(snapshot)
         unified_results = list(output.get("agent_results") or [])
         if unified_results:
             converted = [

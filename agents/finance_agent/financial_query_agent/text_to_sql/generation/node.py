@@ -7,6 +7,7 @@ from typing import cast
 from langchain_core.runnables import RunnableConfig
 
 from agents.llm import get_router_llm
+from agents.structured_output import ainvoke_json_output
 from agents.finance_agent.financial_query_agent.text_to_sql.generation.prompts import (
     FINANCIAL_QUERY_TEXT_TO_SQL_PROMPT,
 )
@@ -47,10 +48,9 @@ async def generate_sql(
         )
         return cast(
             GeneratedFinancialSql,
-            await llm.with_structured_output(
+            await ainvoke_json_output(
+                llm,
                 GeneratedFinancialSql,
-                method="json_mode",
-            ).ainvoke(
                 [
                     ("system", system_prompt),
                     ("human", f"用户问题：{question}"),

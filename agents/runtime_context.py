@@ -125,8 +125,9 @@ class AgentRuntimeContext:
         kind: ExecutionUnitKind,
         *,
         default_seconds: float,
+        soft_grace_seconds: float = 0.0,
     ) -> tuple[float, str]:
-        """返回执行窗口及最先触发它的 unit、soft 或 hard 边界。"""
+        """返回执行窗口；grace 仅延长在途任务且不得越过 hard。"""
         configured = self.unit_timeouts.get(kind, default_seconds)
         candidates: list[tuple[str, float]] = [
             ("unit", max(0.0, float(configured))),
@@ -134,7 +135,9 @@ class AgentRuntimeContext:
         soft_remaining = self.soft_remaining_seconds()
         hard_remaining = self.remaining_seconds()
         if soft_remaining is not None:
-            candidates.append(("soft", soft_remaining))
+            candidates.append(
+                ("soft", soft_remaining + max(0.0, float(soft_grace_seconds)))
+            )
         if hard_remaining is not None:
             candidates.append(("hard", hard_remaining))
         limit, timeout = min(

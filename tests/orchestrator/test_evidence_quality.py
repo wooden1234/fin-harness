@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from typing import Any
 
 from agents.final_answer.node import _filter_current_turn_citations
 from agents.orchestrator.contracts import (
@@ -30,6 +31,22 @@ from agents.orchestrator.evidence_quality import (
 )
 from agents.orchestrator.graph import map_claim_evidence, quality_gate
 from agents.runtime_context import AgentRuntimeContext
+
+
+class _CapturingStructuredLlm:
+    def __init__(self, output: Any) -> None:
+        self.output = output
+        self.messages: list[tuple[str, str]] = []
+
+    def with_structured_output(self, schema: Any, *, method: str):
+        del schema
+        assert method == "json_mode"
+        return self
+
+    async def ainvoke(self, messages, config=None):
+        del config
+        self.messages = list(messages)
+        return self.output
 
 
 def _usable(evidence_id: str) -> EvidenceAssessment:
@@ -142,6 +159,39 @@ async def test_structured_claims_do_not_require_llm() -> None:
     ]
 
 
+async def test_claim_extraction_json_mode_prompt_contains_json_contract(
+    monkeypatch,
+) -> None:
+    model = _CapturingStructuredLlm(SimpleNamespace(claims=[]))
+    monkeypatch.setattr(
+        "agents.orchestrator.evidence_quality.settings.DEEPSEEK_API_KEY",
+        "configured-for-test",
+    )
+    monkeypatch.setattr(
+        "agents.orchestrator.evidence_quality.get_router_llm",
+        lambda: model,
+    )
+    result = AgentResult(
+        task_id="research",
+        agent_id="research_workflow",
+        status="completed",
+        answer="示例公司营收增长。",
+        evidence=[
+            Evidence(
+                evidence_id="e-1",
+                task_id="research",
+                source_type="financial_db",
+                content="营收同比增长10%",
+            )
+        ],
+    )
+
+    await build_claim_evidence_map([result])
+
+    assert model.messages
+    assert "JSON" in model.messages[0][1]
+
+
 async def test_quality_gate_reports_stale_unsupported_claim() -> None:
     evidence = Evidence(
         evidence_id="e-old",
@@ -223,6 +273,36 @@ async def test_claim_extraction_skips_llm_after_soft_deadline(
     context.configure_budget(
         budget_tier="light",
         soft_seconds=1,
+        hard_seconds=10,
+        unit_timeouts={},
+    )
+
+    await map_claim_evidence(
+        {"agent_results": []},
+        runtime=SimpleNamespace(context=context),
+    )
+
+    assert calls == [False]
+
+
+async def test_claim_extraction_skips_llm_when_remaining_budget_is_too_small(
+    monkeypatch,
+) -> None:
+    calls: list[bool] = []
+
+    async def fake_build(results, *, config=None, allow_llm=True):
+        del results, config
+        calls.append(allow_llm)
+        return [], []
+
+    monkeypatch.setattr(
+        "agents.orchestrator.graph.build_claim_evidence_map",
+        fake_build,
+    )
+    context = AgentRuntimeContext()
+    context.configure_budget(
+        budget_tier="standard",
+        soft_seconds=2.5,
         hard_seconds=10,
         unit_timeouts={},
     )
@@ -324,6 +404,41 @@ async def test_constrained_synthesis_only_uses_supported_claims() -> None:
 
     assert [item.text for item in answer.statements] == ["已核验事实"]
     assert answer.unresolved_claim_ids == ["unsupported"]
+
+
+async def test_constrained_synthesis_json_mode_prompt_contains_json_contract(
+    monkeypatch,
+) -> None:
+    expected = ConstrainedAnswer(
+        statements=[
+            AnswerStatement(
+                text="已核验事实",
+                claim_ids=["supported"],
+                evidence_ids=["e-1"],
+                confidence=1,
+            )
+        ]
+    )
+    model = _CapturingStructuredLlm(expected)
+    monkeypatch.setattr(
+        "agents.orchestrator.evidence_quality.settings.DEEPSEEK_API_KEY",
+        "configured-for-test",
+    )
+    monkeypatch.setattr(
+        "agents.orchestrator.evidence_quality.get_router_llm",
+        lambda: model,
+    )
+
+    answer = await constrained_synthesis(
+        [Claim(claim_id="supported", text="已核验事实")],
+        [ClaimEvidenceLink(claim_id="supported", evidence_id="e-1")],
+        [_usable("e-1")],
+        [],
+    )
+
+    assert answer == expected
+    assert model.messages
+    assert "JSON" in model.messages[0][1]
 
 
 def test_constrained_answer_rejects_unlinked_citation() -> None:

@@ -43,6 +43,7 @@ def resolve_task_evidence(
     allowed_capabilities: set[str] | None = None,
     allowed_intents: set[str] | None = None,
     fallback_policy: str = "within_scope",
+    allow_web_fallback: bool = True,
 ) -> SubTask:
     """按意图填充首选证据工具与降级链；无意图时按 type 兜底。"""
     intent = str(getattr(task, "intent", "") or "")
@@ -51,6 +52,8 @@ def resolve_task_evidence(
         chain = default_chain_for_type(str(task.type or ""))
     if not chain:
         chain = ["faq", "web_search"]
+    if not allow_web_fallback and chain[:1] != ["web_search"]:
+        chain = [item for item in chain if item != "web_search"]
     if allowed_capabilities is not None:
         if allowed_intents is not None and intent not in allowed_intents:
             chain = []
@@ -107,12 +110,16 @@ async def resolve_evidence_node(
         if domain_scope is not None
         else "within_scope"
     )
+    allow_web_fallback = (
+        domain_scope is None or domain_scope.freshness_required
+    )
     sub_tasks = [
         resolve_task_evidence(
             task,
             allowed_capabilities=allowed_capabilities,
             allowed_intents=allowed_intents,
             fallback_policy=fallback_policy,
+            allow_web_fallback=allow_web_fallback,
         )
         for task in (state.get("sub_tasks") or [])
     ]

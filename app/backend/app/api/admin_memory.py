@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.core.security import require_compliance_user
-from app.models.identity.user import User
+from app.schemas.user import AuthUser
 from app.schemas.memory import MemoryResponse
 from app.services.memory.memory_compliance import (
     MemoryComplianceService,
@@ -23,7 +23,7 @@ async def admin_list_memories(
     tenant_id: str | None = None,
     user_id: int | None = None,
     limit: int = Query(default=100, ge=1, le=500),
-    current_user: User = Depends(require_compliance_user),
+    current_user: AuthUser = Depends(require_compliance_user),
 ):
     if current_user.role != "platform_admin":
         tenant_id = current_user.tenant_id
@@ -38,7 +38,7 @@ async def admin_list_memories(
 @router.get("/{memory_id}/scan")
 async def admin_scan_memory(
     memory_id: str,
-    current_user: User = Depends(require_compliance_user),
+    current_user: AuthUser = Depends(require_compliance_user),
 ):
     tenant_id = current_user.tenant_id if current_user.role != "platform_admin" else None
     records = await MemoryComplianceService.list_records(tenant_id=tenant_id, limit=500)
@@ -52,7 +52,7 @@ async def admin_scan_memory(
 async def admin_revoke_memory(
     memory_id: str,
     payload: AdminRevokeRequest,
-    current_user: User = Depends(require_compliance_user),
+    current_user: AuthUser = Depends(require_compliance_user),
 ):
     tenant_id = current_user.tenant_id
     if current_user.role == "platform_admin":

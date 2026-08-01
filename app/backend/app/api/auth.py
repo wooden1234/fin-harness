@@ -2,11 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.security import create_access_token, get_current_user
-from app.schemas.user import UserCreate, UserResponse, Token, UserLogin
+from app.schemas.user import AuthUser, UserCreate, UserResponse, Token, UserLogin
 from app.services.identity.user_service import UserService
 from datetime import timedelta
 from app.core.config import settings
-from app.models.identity.user import User
 
 router = APIRouter()
 
@@ -42,6 +41,6 @@ async def login(user_data: UserLogin, db: AsyncSession = Depends(get_db)):
     return {"access_token": access_token, "token_type": "bearer"}
 
 @router.get("/users/me", response_model=UserResponse)
-async def get_current_user_info(current_user: User = Depends(get_current_user)):
+async def get_current_user_info(current_user: AuthUser = Depends(get_current_user)):
     """获取当前登录用户的信息"""
     return current_user

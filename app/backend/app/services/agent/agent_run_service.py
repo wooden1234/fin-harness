@@ -11,6 +11,74 @@ from app.core.database import AsyncSessionLocal
 from app.models.agent.agent_run import AgentRun, AgentRunStatus
 
 
+def summarize_run_snapshots(
+    snapshots: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """从低基数字段生成可用于灰度闸门的运行指标。"""
+    valid = [item for item in snapshots if isinstance(item, dict)]
+    durations = [
+        float(value)
+        for item in valid
+        if isinstance((value := item.get("duration_ms")), (int, float))
+        and not isinstance(value, bool)
+    ]
+    routes = _count_values(valid, "route")
+    statuses = _count_values(valid, "execution_status")
+    by_budget: dict[str, dict[str, float | int]] = {}
+    for tier in sorted(
+        {str(item.get("budget_tier")) for item in valid if item.get("budget_tier")}
+    ):
+        tier_durations = [
+            float(item["duration_ms"])
+            for item in valid
+            if item.get("budget_tier") == tier
+            and isinstance(item.get("duration_ms"), (int, float))
+            and not isinstance(item.get("duration_ms"), bool)
+        ]
+        by_budget[tier] = _duration_summary(tier_durations)
+
+    cited = sum(bool(item.get("citations")) for item in valid)
+    answered = sum(bool(str(item.get("content") or "").strip()) for item in valid)
+    sample_size = len(valid)
+    return {
+        "sample_size": sample_size,
+        "duration_ms": _duration_summary(durations),
+        "by_budget": by_budget,
+        "routes": routes,
+        "execution_statuses": statuses,
+        "citation_coverage_ratio": round(cited / sample_size, 4)
+        if sample_size
+        else 0.0,
+        "answer_availability_ratio": round(answered / sample_size, 4)
+        if sample_size
+        else 0.0,
+    }
+
+
+def _duration_summary(values: list[float]) -> dict[str, float | int]:
+    ordered = sorted(values)
+    return {
+        "count": len(ordered),
+        "p50": _percentile(ordered, 0.50),
+        "p95": _percentile(ordered, 0.95),
+    }
+
+
+def _percentile(ordered: list[float], quantile: float) -> float:
+    if not ordered:
+        return 0.0
+    index = max(0, min(len(ordered) - 1, int(len(ordered) * quantile + 0.999999) - 1))
+    return round(ordered[index], 2)
+
+
+def _count_values(items: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        value = str(item.get(key) or "unknown")
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
 class AgentRunService:
     """集中管理 AgentRun 的状态流转。"""
 
@@ -99,7 +167,7 @@ class AgentRunService:
             return len(runs)
 
     @staticmethod
-    async def metrics() -> dict[str, int]:
+    async def metrics() -> dict[str, Any]:
         from app.models.persistence.outbox_event import OutboxEvent
 
         async with AsyncSessionLocal() as db:
@@ -109,8 +177,17 @@ class AgentRunService:
             outbox_rows = (await db.execute(
                 select(OutboxEvent.status, func.count(OutboxEvent.id)).group_by(OutboxEvent.status)
             )).all()
+            snapshot_rows = (
+                await db.execute(
+                    select(AgentRun.summary_snapshot)
+                    .where(AgentRun.summary_snapshot.is_not(None))
+                    .order_by(AgentRun.created_at.desc())
+                    .limit(1000)
+                )
+            ).scalars().all()
             result = {f"agent_runs_{status}": int(count) for status, count in run_rows}
             result.update({f"outbox_{status}": int(count) for status, count in outbox_rows})
+            result["runs"] = summarize_run_snapshots(list(snapshot_rows))
             return result
 
     @classmethod

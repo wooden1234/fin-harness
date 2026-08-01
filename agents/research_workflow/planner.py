@@ -16,6 +16,7 @@ from agents.orchestrator.contracts import (
     TaskSpec,
 )
 from agents.orchestrator.task_identity import validate_task_plan
+from agents.structured_output import ainvoke_json_output
 from agents.research_workflow.contracts import (
     ResearchPlan,
     ResearchPlanDraft,
@@ -520,10 +521,9 @@ async def plan_research_adaptive(
     )
     try:
         model = llm or get_router_llm()
-        raw = await model.with_structured_output(
+        raw = await ainvoke_json_output(
+            model,
             ResearchPlanDraft,
-            method="json_mode",
-        ).ainvoke(
             [
                 ("system", RESEARCH_PLANNER_SYSTEM_PROMPT),
                 ("human", human_prompt),

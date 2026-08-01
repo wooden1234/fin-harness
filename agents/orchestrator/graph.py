@@ -44,6 +44,7 @@ from agents.orchestrator.task_identity import (
     validate_task_plan,
 )
 from agents.orchestrator.planner import build_plan_from_profile
+from agents.orchestrator.progress import AgentProgressJournal
 from agents.orchestrator.state import OrchestratorState
 from agents.query_rewrite import (
     build_pending_clarification,
@@ -55,6 +56,7 @@ from app.core.config import settings
 from app.core.logger import get_logger
 
 logger = get_logger(service="orchestrator_v2")
+_OPTIONAL_LLM_MIN_REMAINING_SEC = 3.0
 
 
 def _request_budget(budget_tier: str) -> tuple[float, float]:
@@ -315,9 +317,11 @@ async def execute_task(
         timeout_seconds, timeout_limit = context.execution_timeout_for(
             agent_kind,
             default_seconds=configured_timeout,
+            soft_grace_seconds=float(settings.AGENT_V2_INFLIGHT_GRACE_SEC),
         )
     else:
         timeout_seconds, timeout_limit = configured_timeout, "unit"
+    progress = AgentProgressJournal(task_id=task.task_id, agent_id=task.agent_id)
     try:
         if timeout_seconds <= 0:
             raise TimeoutError(f"run_{timeout_limit}_deadline_exceeded")
@@ -334,6 +338,7 @@ async def execute_task(
                         ),
                         config=config,
                         runtime=runtime,
+                        progress=progress,
                     )
             else:
                 result = await invoke_agent(
@@ -346,6 +351,7 @@ async def execute_task(
                     ),
                     config=config,
                     runtime=runtime,
+                    progress=progress,
                 )
         result = _normalize_result_error(_attach_task_metadata(result, task))
     except TimeoutError as exc:
@@ -353,25 +359,35 @@ async def execute_task(
             "hard": "run_hard_deadline_exceeded",
             "soft": "run_soft_deadline_exceeded",
         }.get(timeout_limit, "task_timeout")
+        salvaged = progress.salvage(task) if timeout_limit == "soft" else None
         logger.warning(
             "orchestrator task timeout task_id={} timeout={} code={}",
             task.task_id,
             timeout_seconds,
             error_code,
         )
-        decision = classify_error(error_code, exc)
-        result = AgentResult(
-            task_id=task.task_id,
-            agent_id=task.agent_id,
-            status="failed",
-            error_code=error_code,
-            error_action=decision.action,
-            gaps=[f"任务未在 {timeout_seconds:.1f} 秒内完成"],
-            metadata={
-                **dict(task.metadata),
-                "retryable": decision.retryable,
-            },
-        )
+        if salvaged is not None:
+            logger.info(
+                "orchestrator task salvaged task_id={} stage={} evidence={}",
+                task.task_id,
+                salvaged.metadata.get("salvage_stage"),
+                len(salvaged.evidence),
+            )
+            result = _attach_task_metadata(salvaged, task)
+        else:
+            decision = classify_error(error_code, exc)
+            result = AgentResult(
+                task_id=task.task_id,
+                agent_id=task.agent_id,
+                status="failed",
+                error_code=error_code,
+                error_action=decision.action,
+                gaps=[f"任务未在 {timeout_seconds:.1f} 秒内完成"],
+                metadata={
+                    **dict(task.metadata),
+                    "retryable": decision.retryable,
+                },
+            )
     except Exception as exc:  # noqa: BLE001
         logger.exception("orchestrator task failed task_id={}", task.task_id)
         decision = classify_error(exc=exc)
@@ -561,15 +577,33 @@ async def map_claim_evidence(
     results = _effective_results(state)
     evidence = _effective_evidence(state)
     context = runtime.context if runtime is not None else None
-    soft_remaining = (
-        context.soft_remaining_seconds()
+    remaining_candidates = (
+        [
+            item
+            for item in (
+                context.soft_remaining_seconds(),
+                context.remaining_seconds(),
+            )
+            if item is not None
+        ]
         if context is not None
-        else None
+        else []
     )
-    allow_llm = soft_remaining is None or soft_remaining > 0
+    llm_remaining = min(remaining_candidates) if remaining_candidates else None
+    allow_llm = (
+        llm_remaining is None
+        or llm_remaining >= _OPTIONAL_LLM_MIN_REMAINING_SEC
+    )
+    if not allow_llm:
+        logger.info(
+            "map_claim_evidence optional llm skipped remaining_sec={:.3f} "
+            "min_required_sec={:.1f}",
+            llm_remaining or 0.0,
+            _OPTIONAL_LLM_MIN_REMAINING_SEC,
+        )
     try:
-        if allow_llm and soft_remaining is not None:
-            async with asyncio.timeout(soft_remaining):
+        if allow_llm and llm_remaining is not None:
+            async with asyncio.timeout(llm_remaining):
                 claims, links = await build_claim_evidence_map(
                     results,
                     config=config,
@@ -582,6 +616,9 @@ async def map_claim_evidence(
                 allow_llm=allow_llm,
             )
     except TimeoutError:
+        logger.info(
+            "map_claim_evidence optional llm timed out; using deterministic fallback"
+        )
         claims, links = await build_claim_evidence_map(
             results,
             config=config,
@@ -958,11 +995,13 @@ async def synthesize(
         "citations": [
             {
                 "source": item.title or item.provider,
+                "title": item.title or item.provider,
                 "snippet": item.content,
                 "source_type": item.source_type,
                 "sub_task_id": item.task_id,
                 "evidence_id": item.evidence_id,
                 **({"url": item.url} if item.url else {}),
+                **({"published_at": item.published_at} if item.published_at else {}),
             }
             for evidence_id in used_evidence_ids
             if (item := evidence_by_id.get(evidence_id)) is not None

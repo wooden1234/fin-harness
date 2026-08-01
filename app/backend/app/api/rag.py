@@ -1,10 +1,9 @@
-import asyncio
 from functools import lru_cache
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
 from app.core.security import get_current_user
-from app.models.identity.user import User
+from app.schemas.user import AuthUser
 from retrieval import get_retriever
 from retrieval.core.filters import compact_filters
 from app.schemas.rag import RagHitItem, RagSearchResponse
@@ -45,7 +44,7 @@ async def search_rag(
     year: int | None = Query(None, description="年份过滤，如 2024"),
     source: str | None = Query(None, description="来源文件名/标题/doc_id 过滤"),
     hybrid: bool = Query(True, description="是否启用向量 + BM25 混合检索"),
-    current_user: User = Depends(get_current_user),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     key = "__all__" if not categories else ",".join(sorted(set(categories)))
     metadata_filters = compact_filters(
@@ -57,8 +56,7 @@ async def search_rag(
         }
     )
     retriever = _get_retriever(key, hybrid)
-    hits = await asyncio.to_thread(
-        retriever.search,
+    hits = await retriever.asearch(
         query,
         top_k=3,
         metadata_filters=metadata_filters,

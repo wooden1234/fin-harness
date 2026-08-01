@@ -65,6 +65,9 @@ def test_route_after_join_waits_until_all_sub_tasks_ready():
     }
     assert route_after_join(waiting) == END
     assert route_after_join(ready) == "summarize"
+    assert route_after_join(
+        {**ready, "task_input": {"output_mode": "evidence_only"}}
+    ) == END
 
 
 @pytest.mark.asyncio

@@ -111,6 +111,9 @@ export function useAgentChat() {
             route: event.route,
             agentSteps: [...useChatStore.getState().agentSteps],
           })
+          if (event.citations && event.citations.length > 0) {
+            useChatStore.getState().openSources(assistantMessageId, 0)
+          }
         }
         resetAgentSteps()
         setGenerating(false)

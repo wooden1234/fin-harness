@@ -43,6 +43,15 @@ def test_resolve_task_evidence_fills_type_and_chain():
     assert resolved.evidence_chain == ["faq", "web_search"]
 
 
+def test_stable_query_does_not_pay_for_web_fallback():
+    task = SubTask(id="t1", question="信用卡年费怎么收", intent="product_policy")
+
+    resolved = resolve_task_evidence(task, allow_web_fallback=False)
+
+    assert resolved.type == "faq"
+    assert resolved.evidence_chain == ["faq"]
+
+
 @pytest.mark.asyncio
 async def test_domain_scope_intersects_structured_metric_evidence_chain():
     scope = DomainPlanningScope(

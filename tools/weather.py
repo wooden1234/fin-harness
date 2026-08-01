@@ -9,15 +9,20 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
+from time import perf_counter
 from typing import Any
 
 import httpx
 from langchain_core.tools import tool
 
 from app.core.config import settings
+from app.core.logger import get_logger
 from tools.base import ToolSpec
 from tools.registry import register_tool
+
+logger = get_logger(service="weather_tool")
 
 
 def _api_key() -> str:
@@ -236,7 +241,38 @@ async def get_weather(city: str, days: int = 1) -> dict[str, Any]:
         city: 城市名称，例如「上海」「Beijing」「深圳」
         days: 预报天数；1 表示仅当前天气，上限见 OPENWEATHER_MAX_DAYS
     """
-    return await fetch_weather(city, days=days)
+    started_at = perf_counter()
+    log_city = " ".join((city or "").split())[:80]
+    logger.info("get_weather started city={} days={}", log_city, days)
+    try:
+        result = await fetch_weather(city, days=days)
+    except asyncio.CancelledError:
+        logger.warning(
+            "get_weather cancelled city={} days={} elapsed_ms={:.1f}",
+            log_city,
+            days,
+            (perf_counter() - started_at) * 1000,
+        )
+        raise
+    except Exception as exc:
+        logger.warning(
+            "get_weather failed city={} days={} elapsed_ms={:.1f} error_type={}",
+            log_city,
+            days,
+            (perf_counter() - started_at) * 1000,
+            type(exc).__name__,
+        )
+        raise
+
+    logger.info(
+        "get_weather finished city={} days={} elapsed_ms={:.1f} ok={} error={}",
+        log_city,
+        days,
+        (perf_counter() - started_at) * 1000,
+        bool(result.get("ok")),
+        str(result.get("error") or ""),
+    )
+    return result
 
 
 register_tool(

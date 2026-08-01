@@ -3,13 +3,23 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import asyncio
+import hashlib
 import json
 import math
 from typing import Any
 
+from app.core.cache import (
+    cache_delete,
+    cache_get,
+    cache_set,
+    make_record,
+    normalize_cache_text,
+    record_cache_event,
+)
 from app.core.config import settings
 from app.core.logger import get_logger
-from retrieval.clients.embeddings import get_embed_model
+from app.core.redis_keys import redis_keys
+from retrieval.clients.embeddings import aget_query_embedding_cached, get_embed_model
 from retrieval.clients.milvus_client import collection_name, create_milvus_client, milvus_enabled
 from retrieval.clients.rerank_client import (
     arerank_documents,
@@ -117,10 +127,10 @@ class VectorRetriever(Retriever):
         *,
         enforce_on_empty: bool = True,
     ) -> list[RetrievalHit]:
+        """同步兼容入口；不承诺 Redis embedding 缓存。"""
         k = top_k or self.top_k
         filters = merge_filters(self.metadata_filters, metadata_filters)
         categories = _filtered_categories(self.categories, filters)
-        per_store_k = max(k, k * self.candidate_multiplier)
         try:
             milvus_ready = self._ensure_milvus()
         except Exception as exc:
@@ -140,10 +150,44 @@ class VectorRetriever(Retriever):
                 )
                 self.last_trace = trace
             return hits
-
         query_embedding = self._embed_model.get_query_embedding(query)
+        return self._search_by_embedding(
+            query_embedding,
+            query=query,
+            top_k=k,
+            metadata_filters=metadata_filters,
+            enforce_on_empty=enforce_on_empty,
+        )
 
-        hits: list[RetrievalHit] = []
+    def _search_by_embedding(
+        self,
+        query_embedding: list[float],
+        *,
+        query: str,
+        top_k: int | None = None,
+        metadata_filters: MetadataFilters | None = None,
+        enforce_on_empty: bool = True,
+    ) -> list[RetrievalHit]:
+        """仅执行同步 Milvus 搜索；不再调用 embedding。"""
+        k = top_k or self.top_k
+        filters = merge_filters(self.metadata_filters, metadata_filters)
+        categories = _filtered_categories(self.categories, filters)
+        per_store_k = max(k, k * self.candidate_multiplier)
+        if self._client is None:
+            hits: list[RetrievalHit] = []
+            if enforce_on_empty:
+                hits, trace = apply_on_empty_policy(
+                    hits,
+                    query=query,
+                    filters=_category_only_filters(filters),
+                    categories=categories,
+                    vector_hits=0,
+                    lexical_hits=0,
+                )
+                self.last_trace = trace
+            return hits
+
+        hits = []
         for category in categories:
             name = collection_name(category)
             if not self._client.has_collection(name):
@@ -249,8 +293,188 @@ class VectorRetriever(Retriever):
         query: str,
         top_k: int | None = None,
         metadata_filters: MetadataFilters | None = None,
+        *,
+        enforce_on_empty: bool = True,
     ) -> list[RetrievalHit]:
-        """异步检索入口；数据库检索放入线程，外部重排使用异步 HTTP。"""
+        """异步向量检索：主循环取 embedding，线程内执行 Milvus。"""
+        k = top_k or self.top_k
+        filters = merge_filters(self.metadata_filters, metadata_filters)
+        categories = _filtered_categories(self.categories, filters)
+
+        def _ready() -> bool:
+            try:
+                return self._ensure_milvus()
+            except Exception as exc:
+                logger.warning("milvus vector search skipped error={}", exc)
+                return False
+
+        milvus_ready = await asyncio.to_thread(_ready)
+        if not milvus_ready or self._client is None:
+            logger.warning("milvus vector search skipped reason=MILVUS_UNAVAILABLE")
+            hits: list[RetrievalHit] = []
+            if enforce_on_empty:
+                hits, trace = apply_on_empty_policy(
+                    hits,
+                    query=query,
+                    filters=_category_only_filters(filters),
+                    categories=categories,
+                    vector_hits=0,
+                    lexical_hits=0,
+                )
+                self.last_trace = trace
+            return hits
+
+        query_embedding = await aget_query_embedding_cached(query)
+        return await asyncio.to_thread(
+            self._search_by_embedding,
+            query_embedding,
+            query=query,
+            top_k=k,
+            metadata_filters=metadata_filters,
+            enforce_on_empty=enforce_on_empty,
+        )
+
+
+
+class HybridRetriever(Retriever):
+    """Milvus 向量召回 + ES BM25 召回，本地 BM25 兜底。"""
+
+    def __init__(
+        self,
+        categories: list[str] | None = None,
+        top_k: int = 5,
+        similarity_threshold: float | None = None,
+        metadata_filters: MetadataFilters | None = None,
+        vector_weight: float = 0.65,
+        candidate_top_k: int | None = None,
+        fusion_mode: str = "rrf",
+        rrf_k: int = 60,
+        rerank_min_score: float | None = None,
+    ):
+        self.categories = categories or list(get_collection_registry().keys())
+        self.top_k = top_k
+        self.metadata_filters = metadata_filters or {}
+        self.vector_weight = min(max(vector_weight, 0.0), 1.0)
+        self.candidate_top_k = candidate_top_k or max(top_k * 4, 20)
+        fusion = str(fusion_mode or "rrf").strip().lower()
+        if fusion not in {"rrf", "weighted"}:
+            raise ValueError(f"unknown fusion_mode={fusion_mode!r}, expected 'rrf' or 'weighted'")
+        self.fusion_mode = fusion
+        self.rrf_k = max(int(rrf_k), 1)
+        self.rerank_enabled = rerank_enabled()
+        self.rerank_provider = rerank_provider() if self.rerank_enabled else None
+        self.rerank_model = settings.RERANK_MODEL if self.rerank_enabled else None
+        self.rerank_candidate_top_k = max(
+            int(settings.RERANK_CANDIDATE_TOP_K or 0),
+            self.top_k,
+        )
+        configured_min_score = (
+            settings.RERANK_MIN_SCORE
+            if rerank_min_score is None
+            else rerank_min_score
+        )
+        self.rerank_min_score = max(float(configured_min_score or 0.0), 0.0)
+        self.last_rerank_status = "not_run"
+        self.last_rerank_error = ""
+        self.last_rerank_hits: list[RetrievalHit] = []
+        self.vector_retriever = VectorRetriever(
+            categories=self.categories,
+            top_k=self.candidate_top_k,
+            similarity_threshold=similarity_threshold,
+            metadata_filters=self.metadata_filters,
+            candidate_multiplier=4,
+            # hybrid 先保留完整向量候选，避免在 rerank 前淘汰低排名但有效的 chunk。
+            diversify=False,
+        )
+        self.es_bm25_retriever = None
+        if settings.ELASTICSEARCH_ENABLED:
+            from retrieval.retrievers.es_bm25 import ElasticsearchBM25Retriever
+
+            self.es_bm25_retriever = ElasticsearchBM25Retriever(
+                categories=self.categories,
+                metadata_filters=self.metadata_filters,
+            )
+        self.last_trace: RetrievalTrace | None = None
+
+    async def asearch(
+        self,
+        query: str,
+        top_k: int | None = None,
+        metadata_filters: MetadataFilters | None = None,
+    ) -> list[RetrievalHit]:
+        """异步混合检索；仅缓存同查询、范围和检索配置的非空证据包。"""
+        k = top_k or self.top_k
+        filters = merge_filters(self.metadata_filters, metadata_filters)
+        cache_domain = (
+            "retrieval_evidence_faq"
+            if set(self.categories) == {"faq"}
+            else "retrieval_evidence_pdf"
+        )
+        cache_key = _retrieval_cache_key(
+            query=query,
+            categories=self.categories,
+            filters=filters,
+            top_k=k,
+            fusion_mode=self.fusion_mode,
+            vector_weight=self.vector_weight,
+            rrf_k=self.rrf_k,
+            candidate_top_k=self.candidate_top_k,
+            similarity_threshold=self.vector_retriever.similarity_threshold,
+            rerank_provider=self.rerank_provider,
+            rerank_model=self.rerank_model,
+            rerank_min_score=self.rerank_min_score,
+        )
+        cached = await cache_get(
+            cache_key,
+            domain=cache_domain,
+            data_type="retrieval_hits",
+            enabled=settings.RETRIEVAL_EVIDENCE_CACHE_ENABLED,
+        )
+        if cached is not None and cached.kind == "record":
+            cached_hits = _deserialize_retrieval_hits(cached.payload, top_k=k)
+            if cached_hits is not None:
+                self.last_trace = RetrievalTrace(
+                    query=query,
+                    filters=filters,
+                    categories=list(self.categories),
+                    final_hits=len(cached_hits),
+                    extra={"cache_status": "hit", "score_source": "cache"},
+                )
+                return cached_hits
+            record_cache_event(cache_domain, "deser_fail")
+            await cache_delete(cache_key, domain=cache_domain)
+
+        hits = await self._asearch_uncached(
+            query,
+            top_k=k,
+            metadata_filters=metadata_filters,
+        )
+        if hits:
+            ttl_seconds = (
+                settings.RETRIEVAL_EVIDENCE_FAQ_TTL_SEC
+                if cache_domain == "retrieval_evidence_faq"
+                else settings.RETRIEVAL_EVIDENCE_PDF_TTL_SEC
+            )
+            await cache_set(
+                cache_key,
+                make_record(
+                    data_type="retrieval_hits",
+                    payload=_serialize_retrieval_hits(hits),
+                ),
+                domain=cache_domain,
+                ttl_seconds=ttl_seconds,
+                enabled=settings.RETRIEVAL_EVIDENCE_CACHE_ENABLED,
+                max_bytes=settings.RETRIEVAL_EVIDENCE_CACHE_MAX_BYTES,
+            )
+        return hits
+
+    async def _asearch_uncached(
+        self,
+        query: str,
+        top_k: int | None = None,
+        metadata_filters: MetadataFilters | None = None,
+    ) -> list[RetrievalHit]:
+        """执行未缓存的向量、词法融合与可选 rerank。"""
         k = top_k or self.top_k
         self.last_rerank_status = "not_run"
         self.last_rerank_error = ""
@@ -260,8 +484,7 @@ class VectorRetriever(Retriever):
         active_categories = _filtered_categories(self.categories, filters)
         trace_filters = _category_only_filters(filters)
         vector_hits, lexical_hits = await asyncio.gather(
-            asyncio.to_thread(
-                self.vector_retriever.search,
+            self.vector_retriever.asearch(
                 query,
                 top_k=candidate_k,
                 metadata_filters=filters,
@@ -370,71 +593,6 @@ class VectorRetriever(Retriever):
         self.last_rerank_status = "success"
         return ordered[:top_k]
 
-
-class HybridRetriever(Retriever):
-    """Milvus 向量召回 + ES BM25 召回，本地 BM25 兜底。"""
-
-    # 异步 PDF 检索复用同文件中的通用实现；HybridRetriever 提供其所需的
-    # _lexical_search、融合参数和异步重排状态。
-    asearch = VectorRetriever.asearch
-    _arerank_hits = VectorRetriever._arerank_hits
-
-    def __init__(
-        self,
-        categories: list[str] | None = None,
-        top_k: int = 5,
-        similarity_threshold: float | None = None,
-        metadata_filters: MetadataFilters | None = None,
-        vector_weight: float = 0.65,
-        candidate_top_k: int | None = None,
-        fusion_mode: str = "rrf",
-        rrf_k: int = 60,
-        rerank_min_score: float | None = None,
-    ):
-        self.categories = categories or list(get_collection_registry().keys())
-        self.top_k = top_k
-        self.metadata_filters = metadata_filters or {}
-        self.vector_weight = min(max(vector_weight, 0.0), 1.0)
-        self.candidate_top_k = candidate_top_k or max(top_k * 4, 20)
-        fusion = str(fusion_mode or "rrf").strip().lower()
-        if fusion not in {"rrf", "weighted"}:
-            raise ValueError(f"unknown fusion_mode={fusion_mode!r}, expected 'rrf' or 'weighted'")
-        self.fusion_mode = fusion
-        self.rrf_k = max(int(rrf_k), 1)
-        self.rerank_enabled = rerank_enabled()
-        self.rerank_provider = rerank_provider() if self.rerank_enabled else None
-        self.rerank_model = settings.RERANK_MODEL if self.rerank_enabled else None
-        self.rerank_candidate_top_k = max(
-            int(settings.RERANK_CANDIDATE_TOP_K or 0),
-            self.top_k,
-        )
-        configured_min_score = (
-            settings.RERANK_MIN_SCORE
-            if rerank_min_score is None
-            else rerank_min_score
-        )
-        self.rerank_min_score = max(float(configured_min_score or 0.0), 0.0)
-        self.last_rerank_status = "not_run"
-        self.last_rerank_error = ""
-        self.last_rerank_hits: list[RetrievalHit] = []
-        self.vector_retriever = VectorRetriever(
-            categories=self.categories,
-            top_k=self.candidate_top_k,
-            similarity_threshold=similarity_threshold,
-            metadata_filters=self.metadata_filters,
-            candidate_multiplier=4,
-            # hybrid 先保留完整向量候选，避免在 rerank 前淘汰低排名但有效的 chunk。
-            diversify=False,
-        )
-        self.es_bm25_retriever = None
-        if settings.ELASTICSEARCH_ENABLED:
-            from retrieval.retrievers.es_bm25 import ElasticsearchBM25Retriever
-
-            self.es_bm25_retriever = ElasticsearchBM25Retriever(
-                categories=self.categories,
-                metadata_filters=self.metadata_filters,
-            )
-        self.last_trace: RetrievalTrace | None = None
 
     def search(
         self,
@@ -663,6 +821,105 @@ class HybridRetriever(Retriever):
 
         self.last_rerank_status = "success"
         return ordered[:top_k]
+
+
+def _retrieval_cache_key(
+    *,
+    query: str,
+    categories: list[str],
+    filters: MetadataFilters,
+    top_k: int,
+    fusion_mode: str,
+    vector_weight: float,
+    rrf_k: int,
+    candidate_top_k: int,
+    similarity_threshold: float | None,
+    rerank_provider: str | None,
+    rerank_model: str | None,
+    rerank_min_score: float,
+):
+    """构造包含知识库版本和检索配置的精确缓存键。"""
+    signature = json.dumps(
+        {
+            "version": settings.RETRIEVAL_EVIDENCE_CACHE_VERSION,
+            "query": normalize_cache_text(query).casefold(),
+            "categories": sorted(categories),
+            "filters": filters,
+            "top_k": top_k,
+            "fusion_mode": fusion_mode,
+            "vector_weight": vector_weight,
+            "rrf_k": rrf_k,
+            "candidate_top_k": candidate_top_k,
+            "similarity_threshold": similarity_threshold,
+            "rerank_enabled": bool(settings.RERANK_ENABLED),
+            "rerank_provider": rerank_provider,
+            "rerank_model": rerank_model,
+            "rerank_min_score": rerank_min_score,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()
+    return redis_keys.build("retrieval-evidence", digest)
+
+
+def _serialize_retrieval_hits(hits: list[RetrievalHit]) -> list[dict[str, Any]]:
+    """将命中投影为 JSON 安全字段，避免缓存 Retriever 私有对象。"""
+    return [
+        {
+            "text": item.text,
+            "score": item.score,
+            "metadata": json.loads(
+                json.dumps(item.metadata, ensure_ascii=False, default=str)
+            ),
+            "node_id": item.node_id,
+            "category": item.category,
+            "collection": item.collection,
+            "score_type": item.score_type,
+        }
+        for item in hits
+    ]
+
+
+def _deserialize_retrieval_hits(
+    payload: Any,
+    *,
+    top_k: int,
+) -> list[RetrievalHit] | None:
+    """严格验证缓存证据包；损坏内容按 miss 回源。"""
+    if not isinstance(payload, list) or not payload:
+        return None
+    hits: list[RetrievalHit] = []
+    for raw in payload[: max(1, int(top_k))]:
+        if not isinstance(raw, dict):
+            return None
+        text = raw.get("text")
+        score = raw.get("score")
+        metadata = raw.get("metadata")
+        if (
+            not isinstance(text, str)
+            or not isinstance(score, (int, float))
+            or isinstance(score, bool)
+            or not math.isfinite(float(score))
+            or not isinstance(metadata, dict)
+        ):
+            return None
+        hits.append(
+            RetrievalHit(
+                text=text,
+                score=float(score),
+                metadata=dict(metadata),
+                node_id=str(raw["node_id"]) if raw.get("node_id") else None,
+                category=str(raw["category"]) if raw.get("category") else None,
+                collection=str(raw["collection"])
+                if raw.get("collection")
+                else None,
+                score_type=str(raw.get("score_type") or "unknown"),
+            )
+        )
+    return hits
 
 # 兼容旧名
 FAQRetriever = Retriever

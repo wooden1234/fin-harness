@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal, Sequence
 
 from pydantic import BaseModel, Field
 
+from agents.structured_output import ainvoke_json_output
 from app.core.config import settings
 from app.core.logger import get_logger
 from app.services.memory.memory_policy import find_sensitive_memory_rules
@@ -328,10 +329,9 @@ async def extract_episodic_memory(
         async with asyncio.timeout(
             max(0.1, float(settings.MEMORY_LLM_EXTRACTION_TIMEOUT_SEC))
         ):
-            raw = await model.with_structured_output(
+            raw = await ainvoke_json_output(
+                model,
                 EpisodicExtractionOutput,
-                method="json_mode",
-            ).ainvoke(
                 [
                     ("system", _system_prompt(trigger_reason, forced)),
                     ("human", f"待判断材料：\n{source_text}"),

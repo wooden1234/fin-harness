@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from agents.orchestrator.contracts import MarketQueryPlan
 
@@ -54,6 +54,20 @@ class AnalyzerConstraints(BaseModel):
     market_query_plan: MarketQueryPlan | None = None
     document: DocumentLocator | None = None
     semantic_history: bool = False
+
+    @field_validator("entity_scope_type", mode="before")
+    @classmethod
+    def normalize_entity_scope_type(cls, value: Any) -> Any:
+        """将模型常见的行业同义值收敛到稳定的范围协议。"""
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip().lower()
+        aliases = {
+            "industry": "dynamic_group",
+            "sector": "dynamic_group",
+            "theme": "dynamic_group",
+        }
+        return aliases.get(normalized, normalized)
 
 
 class ActiveTopicProjection(BaseModel):

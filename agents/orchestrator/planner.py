@@ -175,7 +175,9 @@ def build_plan_from_profile(profile: RequestProfile) -> TaskPlan:
                 input_data={
                     "domain_planning_scope": finance_scope.model_dump(
                         mode="json"
-                    )
+                    ),
+                    # Root 统一负责成稿，Finance 仅返回结构化证据，避免重复 LLM 总结。
+                    "output_mode": "evidence_only",
                 },
             )
         ],

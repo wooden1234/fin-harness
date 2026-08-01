@@ -13,6 +13,7 @@ from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field
 
 from agents.llm import get_router_llm
+from agents.structured_output import ainvoke_json_output
 from agents.orchestrator.contracts import (
     AgentResult,
     AnswerStatement,
@@ -31,6 +32,35 @@ logger = get_logger(service="orchestrator_evidence_quality")
 
 _GRADE_SCORE = {"A": 1.0, "B": 0.85, "C": 0.7, "D": 0.5, "E": 0.2}
 _NUMBER_PATTERN = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?")
+_CLAIM_EXTRACTION_JSON_CONTRACT = """仅输出合法 JSON 对象，不得输出 Markdown、代码块或额外说明。
+JSON 输出格式：
+{
+  "claims": [
+    {
+      "task_id": "输入中的 task_id",
+      "text": "可独立核验的陈述",
+      "claim_type": "fact",
+      "evidence_ids": ["输入中直接支撑该陈述的 evidence_id"]
+    }
+  ]
+}
+"""
+_CONSTRAINED_SYNTHESIS_JSON_CONTRACT = """仅输出合法 JSON 对象，不得输出 Markdown、代码块或额外说明。
+JSON 输出格式：
+{
+  "statements": [
+    {
+      "text": "受证据支持的中文陈述",
+      "claim_ids": ["对应的 claim_id"],
+      "evidence_ids": ["对应的 evidence_id"],
+      "statement_type": "fact",
+      "confidence": 0.8
+    }
+  ],
+  "unresolved_claim_ids": [],
+  "caveats": []
+}
+"""
 
 
 class _ExtractedClaim(BaseModel):
@@ -348,12 +378,15 @@ async def _extract_unstructured_claims(
         f"{json.dumps(payload, ensure_ascii=False, default=str)}"
     )
     try:
-        output = await get_router_llm().with_structured_output(
+        output = await ainvoke_json_output(
+            get_router_llm(),
             _ClaimExtractionOutput,
-            method="json_mode",
-        ).ainvoke(
             [
-                ("system", "你是金融证据工程师，只进行 Claim 抽取和证据映射。"),
+                (
+                    "system",
+                    "你是金融证据工程师，只进行 Claim 抽取和证据映射。"
+                    f"\n{_CLAIM_EXTRACTION_JSON_CONTRACT}",
+                ),
                 ("human", prompt),
             ],
             config=config,
@@ -716,14 +749,14 @@ async def constrained_synthesis(
                 + ", ".join(repair_issues)
             )
         try:
-            answer = await get_router_llm().with_structured_output(
+            answer = await ainvoke_json_output(
+                get_router_llm(),
                 ConstrainedAnswer,
-                method="json_mode",
-            ).ainvoke(
                 [
                     (
                         "system",
-                        "你是受约束金融答案综合器，不得越过提供的 Claim—Evidence 边界。",
+                        "你是受约束金融答案综合器，不得越过提供的 Claim—Evidence 边界。"
+                        f"\n{_CONSTRAINED_SYNTHESIS_JSON_CONTRACT}",
                     ),
                     ("human", prompt),
                 ],

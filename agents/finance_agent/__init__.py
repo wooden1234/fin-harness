@@ -10,6 +10,7 @@
 """
 
 import importlib
+import sys
 
 
 def __getattr__(name):
@@ -18,6 +19,12 @@ def __getattr__(name):
             "agents.finance_agent.graph"
         )
         return mod.build_finance_agent_subgraph().compile()
+    if name == "financial_query_agent":
+        # 历史 app.agents shim 可能覆盖父包属性，始终返回 canonical 子包。
+        canonical_name = "agents.finance_agent.financial_query_agent"
+        return sys.modules.get(canonical_name) or importlib.import_module(
+            canonical_name
+        )
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

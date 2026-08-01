@@ -7,6 +7,7 @@ from typing import cast
 from langchain_core.runnables import RunnableConfig
 
 from agents.llm import get_router_llm
+from agents.structured_output import ainvoke_json_output
 from agents.orchestrator.analyzer.prompts import (
     ANALYZER_REPAIR_SYSTEM_PROMPT,
     build_analyzer_system_prompt,
@@ -45,9 +46,9 @@ async def ainvoke_analyzer(
     llm = get_router_llm()
     return cast(
         AnalyzerOutput,
-        await llm.with_structured_output(
-            AnalyzerOutput, method="json_mode"
-        ).ainvoke(
+        await ainvoke_json_output(
+            llm,
+            AnalyzerOutput,
             [
                 ("system", system_prompt),
                 ("human", human_prompt),

@@ -7,6 +7,7 @@ import {
   Moon,
   Sun,
   MessageSquare,
+  PanelLeftClose,
 } from 'lucide-react'
 import {
   createConversation,
@@ -17,10 +18,14 @@ import {
 import { useAuthStore } from '@/stores/useAuthStore'
 import { useChatStore, type Message } from '@/stores/useChatStore'
 import type { Conversation } from '@/types/api'
-import { MemoryProfilePanel } from './MemoryProfilePanel'
+import caiceLogo from '@/assets/caice-zhida-logo.png'
 
 function formatTitle(conversation: Conversation): string {
   return conversation.title || `会话 ${conversation.conversation_id?.slice(0, 8) ?? conversation.id}`
+}
+
+function accountLabel(user: { email?: string; username?: string } | null | undefined): string {
+  return user?.username || user?.email || '用户'
 }
 
 export function Sidebar({
@@ -86,6 +91,7 @@ export function Sidebar({
   const handleSelectConversation = async (conversation: Conversation) => {
     const conversationKey = conversation.conversation_id ?? String(conversation.id)
     setActiveConversationId(conversationKey)
+    useChatStore.getState().closeSources()
     setLoadingMessages(true)
 
     try {
@@ -127,6 +133,12 @@ export function Sidebar({
   if (collapsed) {
     return (
       <aside className="w-14 border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 flex flex-col items-center py-4 gap-3">
+        <img
+          src={caiceLogo}
+          alt="财智"
+          className="w-9 h-9 rounded-xl object-cover shadow-sm"
+          title="财智"
+        />
         <button
           type="button"
           onClick={onToggle}
@@ -143,27 +155,49 @@ export function Sidebar({
         >
           <MessageSquarePlus size={18} />
         </button>
+        <div className="flex-1" />
+        <img
+          src={caiceLogo}
+          alt="财智"
+          className="w-8 h-8 rounded-full object-cover"
+          title={`财智 · ${accountLabel(user)}`}
+        />
+        <button
+          type="button"
+          onClick={logout}
+          className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500"
+          title="退出登录"
+        >
+          <LogOut size={16} />
+        </button>
       </aside>
     )
   }
 
   return (
     <aside className="w-72 border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 flex flex-col">
-      <div className="h-16 px-4 flex items-center justify-between border-b border-slate-200 dark:border-slate-800">
-        <div>
-          <div className="font-bold text-brand-navy dark:text-brand-gold">FinAgent</div>
-          <div className="text-[11px] text-slate-400 truncate max-w-[160px]">{user?.email}</div>
+      <div className="px-4 pt-4 pb-1 flex items-start justify-between gap-2">
+        <div className="flex items-center gap-3 min-w-0">
+          <img
+            src={caiceLogo}
+            alt="财智"
+            className="w-12 h-12 rounded-2xl object-cover shadow-sm shrink-0"
+          />
+          <span className="text-xl font-bold tracking-wide text-brand-navy dark:text-brand-gold truncate">
+            财智
+          </span>
         </div>
         <button
           type="button"
           onClick={onToggle}
-          className="text-xs text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+          className="p-2 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:text-slate-200 dark:hover:bg-slate-800 shrink-0"
+          title="收起侧边栏"
         >
-          收起
+          <PanelLeftClose size={18} />
         </button>
       </div>
 
-      <div className="p-3">
+      <div className="px-3 pt-3 pb-3">
         <button
           type="button"
           onClick={() => void handleNewConversation()}
@@ -173,8 +207,6 @@ export function Sidebar({
           新会话
         </button>
       </div>
-
-      <MemoryProfilePanel />
 
       <div className="flex-1 overflow-y-auto px-2 pb-2">
         {loadingList ? (
@@ -229,14 +261,29 @@ export function Sidebar({
       </div>
 
       <div className="p-3 border-t border-slate-200 dark:border-slate-800">
-        <button
-          type="button"
-          onClick={logout}
-          className="w-full flex items-center justify-center gap-2 rounded-xl border border-slate-200 dark:border-slate-700 py-2 text-sm text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-900"
-        >
-          <LogOut size={16} />
-          退出登录
-        </button>
+        <div className="flex items-center gap-2.5">
+          <img
+            src={caiceLogo}
+            alt="财智"
+            className="w-9 h-9 rounded-full object-cover shrink-0 ring-1 ring-brand-navy/10"
+          />
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-semibold text-brand-navy dark:text-brand-gold truncate">
+              财智
+            </div>
+            <div className="text-[11px] text-slate-400 truncate" title={user?.email}>
+              {accountLabel(user)}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={logout}
+            className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 shrink-0"
+            title="退出登录"
+          >
+            <LogOut size={16} />
+          </button>
+        </div>
       </div>
     </aside>
   )

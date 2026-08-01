@@ -89,6 +89,10 @@ async def test_execute_task_uses_soft_deadline_for_graceful_degrade(
         await asyncio.sleep(0.05)
 
     monkeypatch.setattr("agents.orchestrator.graph.invoke_agent", slow_invoke)
+    monkeypatch.setattr(
+        "agents.orchestrator.graph.settings.AGENT_V2_INFLIGHT_GRACE_SEC",
+        0.0,
+    )
     context = AgentRuntimeContext(max_concurrency=1)
     context.configure_budget(
         budget_tier="light",
@@ -113,6 +117,115 @@ async def test_execute_task_uses_soft_deadline_for_graceful_degrade(
     assert result.error_code == "run_soft_deadline_exceeded"
     assert route_update["execution_status"] == "soft_timeout"
     assert route_update["next_action"] == "synthesize"
+
+
+async def test_execute_task_salvages_finance_evidence_after_soft_timeout(
+    monkeypatch,
+) -> None:
+    async def slow_invoke(task, **kwargs):
+        progress = kwargs["progress"]
+        progress.observe_finance_state(
+            {
+                "task_results": [
+                    {
+                        "sub_task_id": task.task_id,
+                        "type": "faq",
+                        "question": task.objective,
+                        "context": "信用卡年费以发卡行公示规则为准。",
+                        "coverage": "covered",
+                        "citations": [
+                            {
+                                "source": "信用卡产品说明",
+                                "source_type": "faq",
+                                "snippet": "满足年度消费条件可减免次年年费。",
+                            }
+                        ],
+                    }
+                ],
+                "steps": ["join"],
+            }
+        )
+        await asyncio.sleep(0.05)
+
+    monkeypatch.setattr("agents.orchestrator.graph.invoke_agent", slow_invoke)
+    monkeypatch.setattr(
+        "agents.orchestrator.graph.settings.AGENT_V2_INFLIGHT_GRACE_SEC",
+        0.0,
+    )
+    context = AgentRuntimeContext(max_concurrency=1)
+    context.configure_budget(
+        budget_tier="light",
+        soft_seconds=0.01,
+        hard_seconds=1,
+        unit_timeouts={"agent": 0.5},
+    )
+
+    update = await execute_task(
+        {
+            "current_task": TaskSpec(
+                task_id="finance",
+                objective="信用卡年费规则",
+                agent_id="finance_agent",
+            )
+        },
+        runtime=_runtime(context),
+    )
+
+    result = update["agent_results"][0]
+    assert result.status == "partial"
+    assert result.error_code == "run_soft_deadline_salvaged"
+    assert result.metadata["salvaged"] is True
+    assert result.metadata["salvage_stage"] == "join"
+    assert len(result.evidence) == 1
+
+
+async def test_execute_task_does_not_salvage_uncovered_finance_result(
+    monkeypatch,
+) -> None:
+    async def slow_invoke(task, **kwargs):
+        kwargs["progress"].observe_finance_state(
+            {
+                "task_results": [
+                    {
+                        "sub_task_id": task.task_id,
+                        "type": "faq",
+                        "question": task.objective,
+                        "coverage": "uncovered",
+                        "citations": [],
+                    }
+                ],
+                "steps": ["join"],
+            }
+        )
+        await asyncio.sleep(0.05)
+
+    monkeypatch.setattr("agents.orchestrator.graph.invoke_agent", slow_invoke)
+    monkeypatch.setattr(
+        "agents.orchestrator.graph.settings.AGENT_V2_INFLIGHT_GRACE_SEC",
+        0.0,
+    )
+    context = AgentRuntimeContext(max_concurrency=1)
+    context.configure_budget(
+        budget_tier="light",
+        soft_seconds=0.01,
+        hard_seconds=1,
+        unit_timeouts={"agent": 0.5},
+    )
+
+    update = await execute_task(
+        {
+            "current_task": TaskSpec(
+                task_id="finance",
+                objective="未知问题",
+                agent_id="finance_agent",
+            )
+        },
+        runtime=_runtime(context),
+    )
+
+    result = update["agent_results"][0]
+    assert result.status == "failed"
+    assert result.error_code == "run_soft_deadline_exceeded"
 
 
 async def test_execute_task_limits_parallel_invocations(monkeypatch) -> None:

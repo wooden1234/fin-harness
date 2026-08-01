@@ -21,6 +21,9 @@ interface ChatState {
   agentSteps: AgentStep[]
   hitlPending: boolean
   hitlMessage: string | null
+  sourcesOpen: boolean
+  activeMessageId: string | null
+  activeCitationIndex: number | null
   setConversations: (conversations: Conversation[]) => void
   setActiveConversationId: (id: string | null) => void
   setMessages: (messages: Message[]) => void
@@ -36,6 +39,9 @@ interface ChatState {
     shortLabel?: string
   }) => void
   setHitlPending: (value: boolean, message?: string | null) => void
+  openSources: (messageId: string, citationIndex?: number) => void
+  closeSources: () => void
+  selectCitation: (messageId: string, citationIndex: number) => void
   resetChat: () => void
 }
 
@@ -47,6 +53,9 @@ export const useChatStore = create<ChatState>((set) => ({
   agentSteps: [],
   hitlPending: false,
   hitlMessage: null,
+  sourcesOpen: false,
+  activeMessageId: null,
+  activeCitationIndex: null,
 
   setConversations: (conversations) => set({ conversations }),
   setActiveConversationId: (id) => set({ activeConversationId: id }),
@@ -69,6 +78,23 @@ export const useChatStore = create<ChatState>((set) => ({
       return { agentSteps: [...state.agentSteps, step] }
     }),
   setHitlPending: (value, message = null) => set({ hitlPending: value, hitlMessage: message }),
+  openSources: (messageId, citationIndex = 0) =>
+    set({
+      sourcesOpen: true,
+      activeMessageId: messageId,
+      activeCitationIndex: citationIndex,
+    }),
+  closeSources: () =>
+    set({
+      sourcesOpen: false,
+      activeCitationIndex: null,
+    }),
+  selectCitation: (messageId, citationIndex) =>
+    set({
+      sourcesOpen: true,
+      activeMessageId: messageId,
+      activeCitationIndex: citationIndex,
+    }),
   resetChat: () =>
     set({
       messages: [],
@@ -77,5 +103,8 @@ export const useChatStore = create<ChatState>((set) => ({
       agentSteps: [],
       hitlPending: false,
       hitlMessage: null,
+      sourcesOpen: false,
+      activeMessageId: null,
+      activeCitationIndex: null,
     }),
 }))

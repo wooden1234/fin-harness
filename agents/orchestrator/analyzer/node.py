@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
@@ -19,6 +21,7 @@ from agents.orchestrator.analyzer.schema import (
     ArtifactDescriptor,
 )
 from agents.context_compressor.structured import parse_summary_v2
+from agents.general_agent.weather_direct import parse_weather_request
 from agents.orchestrator.contracts import AgentResult
 from agents.orchestrator.state import OrchestratorState
 from app.core.logger import get_logger
@@ -27,6 +30,120 @@ logger = get_logger(service="orchestrator_analyzer")
 
 # 单次请求 Analyzer LLM 上限：第 2 次只能是瞬时重试或 repair，二者互斥。
 _MAX_ANALYZER_LLM_CALLS = 2
+_SECRET_PATTERNS = (
+    re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b", re.IGNORECASE),
+    re.compile(r"\b(Bearer\s+)[A-Za-z0-9._~-]+", re.IGNORECASE),
+)
+
+
+def _safe_log_text(value: Any, *, max_length: int = 1200) -> str:
+    """清理供应商错误字段，避免凭据和控制字符进入日志。"""
+    text = " ".join(str(value or "").split())
+    for pattern in _SECRET_PATTERNS:
+        text = pattern.sub(
+            lambda match: f"{match.group(1)}[REDACTED]"
+            if match.lastindex
+            else "[REDACTED]",
+            text,
+        )
+    return text[:max_length] or "unknown"
+
+
+def _analyzer_error_details(exc: BaseException) -> dict[str, str]:
+    """仅提取供应商错误的白名单字段，不记录请求体和 Prompt。"""
+    details = {
+        "exception_type": type(exc).__name__,
+        "status_code": "unknown",
+        "provider_type": "unknown",
+        "provider_code": "unknown",
+        "param": "unknown",
+        "request_id": "unknown",
+        "message": "unknown",
+        "parser_reason": "unknown",
+        "output_length": "unknown",
+        "output_sha256": "unknown",
+    }
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        status_code = getattr(current, "status_code", None)
+        response = getattr(current, "response", None)
+        if status_code is None and response is not None:
+            status_code = getattr(response, "status_code", None)
+        if status_code is not None:
+            details["status_code"] = _safe_log_text(status_code, max_length=16)
+
+        if response is not None:
+            headers = getattr(response, "headers", None)
+            if headers is not None:
+                request_id = headers.get("x-request-id") or headers.get("request-id")
+                if request_id:
+                    details["request_id"] = _safe_log_text(request_id, max_length=128)
+
+        body = getattr(current, "body", None)
+        if isinstance(body, dict):
+            provider_error = body.get("error", body)
+            if isinstance(provider_error, dict):
+                field_map = {
+                    "type": "provider_type",
+                    "code": "provider_code",
+                    "param": "param",
+                    "message": "message",
+                }
+                for source, target in field_map.items():
+                    value = provider_error.get(source)
+                    if value not in (None, ""):
+                        details[target] = _safe_log_text(value)
+                break
+
+        if "outputparser" in type(current).__name__.lower():
+            raw_output = getattr(current, "llm_output", None)
+            if raw_output is not None:
+                raw_text = str(raw_output)
+                details["output_length"] = str(len(raw_text))
+                details["output_sha256"] = hashlib.sha256(
+                    raw_text.encode("utf-8", errors="replace")
+                ).hexdigest()[:16]
+            observation = str(getattr(current, "observation", "") or "").lower()
+            error_text = str(current).lower()
+            parser_text = f"{observation} {error_text}"
+            if "pydantic" in parser_text or "validation" in parser_text:
+                details["parser_reason"] = "schema_validation_failed"
+            elif "json" in parser_text:
+                details["parser_reason"] = "invalid_json_output"
+            elif not raw_output:
+                details["parser_reason"] = "empty_model_output"
+            else:
+                details["parser_reason"] = "structured_output_parse_failed"
+            # 不记录解析器原文，避免把用户问题或模型回答写入日志。
+            details["message"] = details["parser_reason"]
+
+        current = current.__cause__ or current.__context__
+    return details
+
+
+def _log_analyzer_error(stage: str, exc: BaseException) -> None:
+    details = _analyzer_error_details(exc)
+    logger.warning(
+        "analyzer {}: exception_type={} status_code={} provider_type={} "
+        "provider_code={} param={} request_id={} message={}",
+        stage,
+        details["exception_type"],
+        details["status_code"],
+        details["provider_type"],
+        details["provider_code"],
+        details["param"],
+        details["request_id"],
+        details["message"],
+    )
+    if details["parser_reason"] != "unknown":
+        logger.warning(
+            "analyzer parser diagnostics reason={} output_length={} output_sha256={}",
+            details["parser_reason"],
+            details["output_length"],
+            details["output_sha256"],
+        )
 
 
 def _active_topic_projection(state: OrchestratorState) -> ActiveTopicProjection | None:
@@ -138,6 +255,12 @@ async def analyze_request(
             "steps": ["orchestrator:analyze_request:empty"],
         }
 
+    if parse_weather_request(query) is not None:
+        return {
+            "request_profile": _heuristic_from_envelope(envelope),
+            "steps": ["orchestrator:analyze_request:deterministic_weather"],
+        }
+
     llm_calls = 0
 
     async def _analyze() -> Any:
@@ -156,10 +279,7 @@ async def analyze_request(
         except Exception as exc:
             if not is_transient_api_error(exc) or llm_calls >= _MAX_ANALYZER_LLM_CALLS:
                 raise
-            logger.warning(
-                "analyzer transient api error, retrying once: {}",
-                type(exc).__name__,
-            )
+            _log_analyzer_error("transient api error, retrying once", exc)
             raw = await _analyze()
 
         validation = validate_and_normalize(raw, original_query=query)
@@ -195,13 +315,15 @@ async def analyze_request(
             "steps": ["orchestrator:analyze_request:llm"],
         }
     except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "analyzer llm failed, fallback heuristic: {}",
-            type(exc).__name__,
+        _log_analyzer_error("llm failed, fallback heuristic", exc)
+        fallback_step = (
+            "orchestrator:analyze_request:parser_fallback"
+            if "outputparser" in type(exc).__name__.lower()
+            else "orchestrator:analyze_request:heuristic_error_fallback"
         )
         return {
             "request_profile": _heuristic_from_envelope(envelope),
-            "steps": ["orchestrator:analyze_request:heuristic_error_fallback"],
+            "steps": [fallback_step],
         }
 
 

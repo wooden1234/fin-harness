@@ -15,30 +15,47 @@ from app.core.config import PROJECT_ROOT, settings
 
 @dataclass(frozen=True, slots=True)
 class _InstalledSkillSpec:
-    """已审核问财 Skill 的入口和参数风格。"""
+    """已审核问财 Skill 的入口、参数风格与固定版本。"""
 
     entrypoint: str
     argument_style: str
+    version: str = "1.0.0"
 
 
 _SUPPORTED_SKILLS = {
     "hithink-astock-selector": _InstalledSkillSpec(
-        "scripts/cli.py", "query_flags"
+        "scripts/cli.py", "query_flags", "1.0.0"
     ),
-    "hithink-fund-selector": _InstalledSkillSpec("scripts/cli.py", "query_flags"),
-    "hithink-industry-query": _InstalledSkillSpec("scripts/cli.py", "query_flags"),
+    "hithink-fund-selector": _InstalledSkillSpec(
+        "scripts/cli.py", "query_flags", "1.0.0"
+    ),
+    "hithink-industry-query": _InstalledSkillSpec(
+        "scripts/cli.py", "query_flags", "1.0.0"
+    ),
     "hithink-insresearch-query": _InstalledSkillSpec(
-        "scripts/cli.py", "query_flags"
+        "scripts/cli.py", "query_flags", "1.0.0"
     ),
-    "hithink-market-query": _InstalledSkillSpec("scripts/cli.py", "query_flags"),
-    "hithink-zhishu-query": _InstalledSkillSpec("scripts/cli.py", "query_flags"),
+    "hithink-market-query": _InstalledSkillSpec(
+        "scripts/cli.py", "query_flags", "1.0.0"
+    ),
+    "hithink-zhishu-query": _InstalledSkillSpec(
+        "scripts/cli.py", "query_flags", "1.0.0"
+    ),
     "announcement-search": _InstalledSkillSpec(
-        "scripts/announcement_search.py", "search_positional"
+        "scripts/announcement_search.py", "search_positional", "1.0.0"
     ),
     "report-search": _InstalledSkillSpec(
-        "scripts/report_search.py", "search_positional"
+        "scripts/report_search.py", "search_positional", "1.0.0"
     ),
 }
+
+
+def installed_skill_version(skill_id: str) -> str:
+    """返回白名单 Skill 的固定审核版本；未知 skill 抛错。"""
+    skill = _SUPPORTED_SKILLS.get(skill_id)
+    if skill is None:
+        raise ValueError(f"skill_not_allowed:{skill_id}")
+    return skill.version
 
 
 def _skill_root() -> Path:
@@ -200,4 +217,4 @@ async def run_installed_skill(
     }
 
 
-__all__ = ["run_installed_skill"]
+__all__ = ["installed_skill_version", "run_installed_skill"]

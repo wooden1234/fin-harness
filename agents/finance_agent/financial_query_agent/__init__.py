@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import importlib
+import sys
+
 _BUILT = False
 _financial_query_agent = None
 
@@ -55,6 +58,13 @@ def __getattr__(name):
             _financial_query_agent = _build_subgraph()
             _BUILT = True
         return _financial_query_agent
+
+    if name in {"graph", "planner", "services", "text_to_sql", "workflows"}:
+        # 兼容历史 app.agents shim 与 canonical 包混用时的属性覆盖。
+        canonical_name = f"agents.finance_agent.financial_query_agent.{name}"
+        return sys.modules.get(canonical_name) or importlib.import_module(
+            canonical_name
+        )
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 

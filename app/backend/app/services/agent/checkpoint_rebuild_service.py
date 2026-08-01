@@ -26,7 +26,7 @@ class CheckpointRebuildService:
         if graph is None:
             from agents.orchestrator.graph import get_orchestrator_graph
 
-            graph = get_orchestrator_graph()
+            graph = get_orchestrator_graph(with_checkpointer=True)
         current = await graph.aget_state(thread_config)
         if current is not None and (current.values or {}).get("messages"):
             return False

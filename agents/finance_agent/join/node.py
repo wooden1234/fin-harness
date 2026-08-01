@@ -42,11 +42,14 @@ async def join_node(
 
 
 def route_after_join(state: FinAgentState) -> str:
-    """齐套 → summarize；未齐 → 结束本分支，等待其它并行路径。"""
+    """齐套后按调用模式收口；未齐则等待其它并行路径。"""
     if fan_in_ready(
         sub_tasks=state.get("sub_tasks") or [],
         task_results=state.get("task_results") or [],
     ):
+        task_input = state.get("task_input") or {}
+        if task_input.get("output_mode") == "evidence_only":
+            return END
         return "summarize"
     return END
 

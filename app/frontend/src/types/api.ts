@@ -33,6 +33,10 @@ export interface Citation {
   source: string
   snippet: string
   page?: number
+  url?: string
+  title?: string
+  published_at?: string
+  source_type?: string
 }
 
 export type AgentRoute = 'faq' | 'account' | 'general'

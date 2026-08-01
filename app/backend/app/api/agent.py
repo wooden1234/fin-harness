@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import AsyncIterable, AsyncIterator
 import json
+import time
 import uuid
 from typing import Any, Optional
 from fastapi import APIRouter, Depends, Form, HTTPException
@@ -17,9 +18,10 @@ from app.api.agent_progress import (
 )
 from app.core.config import settings
 from app.core.logger import get_logger
+from app.core.cache import cache_metrics_snapshot
 from app.core.redis_client import redis_metrics
 from app.core.security import get_current_user
-from app.models.identity.user import User
+from app.schemas.user import AuthUser
 from app.services.conversation.conversation_service import ConversationService
 from app.services.agent.agent_run_service import AgentRunService
 from app.services.persistence.outbox_service import OutboxService
@@ -95,16 +97,17 @@ def _extract_final_response(values: dict) -> str:
     return ""
 
 @router.get("/health")
-async def agent_health(current_user: User = Depends(get_current_user)):
+async def agent_health(current_user: AuthUser = Depends(get_current_user)):
     """W3 前占位：验证 Agent 路由走 JWT"""
     return {"status": "agent module ready", "user_id": current_user.id}
 
 
 @router.get("/metrics")
-async def agent_metrics(current_user: User = Depends(get_current_user)):
+async def agent_metrics(current_user: AuthUser = Depends(get_current_user)):
     """返回运行与 outbox 基础指标；生产环境应接入 Prometheus。"""
     metrics: dict[str, Any] = await AgentRunService.metrics()
     metrics["redis"] = redis_metrics()
+    metrics["cache"] = cache_metrics_snapshot()
     return metrics
 
 @router.post("/query")
@@ -112,7 +115,7 @@ async def agent_query(
     query: str = Form(...),
     conversation_id: Optional[str] = Form(None),
     client_message_id: Optional[str] = Form(None),
-    current_user: User = Depends(get_current_user)):
+    current_user: AuthUser = Depends(get_current_user)):
     secret_decision = check_secrets(query)
     if not secret_decision.should_continue:
         raise HTTPException(
@@ -178,7 +181,7 @@ async def agent_query(
             await ConversationLockService.release(conversation_pk, lock_token)
         raise
     try:
-        graph = get_orchestrator_graph()
+        graph = get_orchestrator_graph(with_checkpointer=True)
     except Exception:
         if conversation_pk is not None and lock_token is not None:
             await ConversationLockService.release(conversation_pk, lock_token)
@@ -288,31 +291,43 @@ async def agent_query(
                     generating_answer_active = False
                 assistant_full_response += incremental_content
                 yield _sse({"type": "token", "content": incremental_content})
-            
+
             state = await graph.aget_state(thread_config)
             values = (state.values if state else {}) or {}
             checkpoint_id = None
             if state is not None:
                 checkpoint_id = (state.config or {}).get("configurable", {}).get("checkpoint_id")
-            await AgentRunService.mark_graph_completed(
+            graph_completion = AgentRunService.mark_graph_completed(
                 run_id,
                 checkpoint_id=str(checkpoint_id) if checkpoint_id else None,
                 summary_snapshot={
                     "content": _extract_final_response(values),
                     "citations": values.get("citations") or [],
                     "route": values.get("route"),
+                    "execution_status": values.get("execution_status"),
+                    "budget_tier": runtime_context.budget_tier,
+                    "duration_ms": round(
+                        (time.monotonic() - runtime_context.started_monotonic)
+                        * 1000,
+                        2,
+                    ),
                     "compliance_action": values.get("compliance_action"),
                     "compliance_reason_code": values.get("compliance_reason_code"),
                 },
             )
             if conversation_pk is not None:
-                await CheckpointRegistryService.record(
-                    conversation_id=conversation_pk,
-                    user_id=current_user.id,
-                    tenant_id=current_user.tenant_id,
-                    thread_id=thread_config["configurable"]["thread_id"],
-                    checkpoint_id=str(checkpoint_id) if checkpoint_id else None,
+                await asyncio.gather(
+                    graph_completion,
+                    CheckpointRegistryService.record(
+                        conversation_id=conversation_pk,
+                        user_id=current_user.id,
+                        tenant_id=current_user.tenant_id,
+                        thread_id=thread_config["configurable"]["thread_id"],
+                        checkpoint_id=str(checkpoint_id) if checkpoint_id else None,
+                    ),
                 )
+            else:
+                await graph_completion
             citations = values.get("citations") or []
             final_response = _extract_final_response(values)
             if not assistant_full_response and final_response:
@@ -364,7 +379,9 @@ async def agent_query(
                 # 无业务会话时，checkpoint 已保存运行态，消息留档由调用方后续关联。
                 persistence_status = "checkpoint_only"
 
-            if memory_action.kind == "implicit":
+            async def enqueue_implicit_memory() -> None:
+                if memory_action.kind != "implicit":
+                    return
                 try:
                     await OutboxService.enqueue_memory_extraction(
                         run_id=run_id,
@@ -389,24 +406,33 @@ async def agent_query(
             else:
                 tasks = []
             execution_status = str(values.get("execution_status") or "")
-            try:
-                context_window = await OutboxService.episodic_context_window(
-                    tenant_id=current_user.tenant_id,
-                    user_id=current_user.id,
-                    conversation_id=conversation_pk,
-                    query=query,
-                    final_response=final_response,
-                )
-            except Exception:
-                # 预判读取失败不影响回答；后台 worker 入队后仍会重新权威核对。
-                logger.exception("failed to load episodic context window: {}", run_id)
-                context_window = await OutboxService.episodic_context_window(
-                    tenant_id=current_user.tenant_id,
-                    user_id=current_user.id,
-                    conversation_id=None,
-                    query=query,
-                    final_response=final_response,
-                )
+            async def load_episodic_context_window():
+                try:
+                    return await OutboxService.episodic_context_window(
+                        tenant_id=current_user.tenant_id,
+                        user_id=current_user.id,
+                        conversation_id=conversation_pk,
+                        query=query,
+                        final_response=final_response,
+                    )
+                except Exception:
+                    # 预判读取失败不影响回答；后台 worker 入队后仍会重新权威核对。
+                    logger.exception(
+                        "failed to load episodic context window: {}",
+                        run_id,
+                    )
+                    return await OutboxService.episodic_context_window(
+                        tenant_id=current_user.tenant_id,
+                        user_id=current_user.id,
+                        conversation_id=None,
+                        query=query,
+                        final_response=final_response,
+                    )
+
+            _, context_window = await asyncio.gather(
+                enqueue_implicit_memory(),
+                load_episodic_context_window(),
+            )
             episodic_decision = decide_post_turn_trigger(
                 query=query,
                 final_response=final_response,
@@ -504,4 +530,3 @@ async def agent_query(
     response.headers["X-Agent-Run-ID"] = run_id
     response.headers["Cache-Control"] = "no-cache"
     return response
-

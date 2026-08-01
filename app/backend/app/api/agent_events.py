@@ -3,14 +3,14 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.security import get_current_user
-from app.models.identity.user import User
+from app.schemas.user import AuthUser
 from app.schemas.agent_events import AgentRunEventPage, AgentRunEventRead
 from app.services.agent.context_event_service import ContextEventService
 
 router = APIRouter(prefix="/agent/runs", tags=["agent-events"])
 
 
-def _platform_admin(user: User) -> bool:
+def _platform_admin(user: AuthUser) -> bool:
     return str(user.role) == "platform_admin"
 
 
@@ -19,7 +19,7 @@ async def list_agent_run_events(
     run_id: str,
     after_id: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=500),
-    current_user: User = Depends(get_current_user),
+    current_user: AuthUser = Depends(get_current_user),
 ) -> AgentRunEventPage:
     try:
         rows = await ContextEventService.list_events(
@@ -44,7 +44,7 @@ async def list_agent_run_events(
 @router.get("/{run_id}/context-metrics")
 async def get_agent_run_context_metrics(
     run_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     try:
         return await ContextEventService.metrics(

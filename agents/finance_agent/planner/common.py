@@ -14,6 +14,7 @@ from agents.finance_agent.planner.prompts import (
 )
 from agents.init_turn.turn_workspace import reset_worker_workspace
 from agents.llm import get_router_llm
+from agents.structured_output import ainvoke_json_output
 from agents.states import PlannerOutput, SubTask
 from app.core.logger import get_logger
 
@@ -99,9 +100,9 @@ async def ainvoke_planner(
     llm = get_router_llm()
     return cast(
         PlannerOutput,
-        await llm.with_structured_output(
-            PlannerOutput, method="json_mode"
-        ).ainvoke(
+        await ainvoke_json_output(
+            llm,
+            PlannerOutput,
             [
                 ("system", system_prompt),
                 ("human", human_prompt),

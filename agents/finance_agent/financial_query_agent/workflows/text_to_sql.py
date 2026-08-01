@@ -62,7 +62,8 @@ _TERMINAL_NEXT_ACTION_BY_STATUS = {
 }
 
 
-def _route_next_step(state: TextToSqlState) -> TextToSqlNextStep | str:
+async def _route_next_step(state: TextToSqlState) -> TextToSqlNextStep | str:
+    """原生异步路由，避免异步图在条件边切入线程执行器。"""
     next_step = state.get("next_step", "end")
     if next_step == "end":
         return END
@@ -281,6 +282,7 @@ async def text_to_sql_workflow(
         coverage=coverage,
         fallback_reason="financial_query_text_to_sql_failed" if coverage == "uncovered" else "",
         citations=citations if coverage == "covered" else [],
+        emit_message_on_uncovered=True,
     )
     return {
         **_base_updates(question, result),

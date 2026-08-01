@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.core.security import get_current_user
-from app.models.identity.user import User
+from app.schemas.user import AuthUser
 from app.schemas.memory import (
     EpisodicMemoryCreate,
     MemoryCreate,
@@ -20,7 +20,7 @@ router = APIRouter(prefix="/memories", tags=["memories"])
 
 
 @router.get("/profile", response_model=ProfileResponse)
-async def get_memory_profile(current_user: User = Depends(get_current_user)):
+async def get_memory_profile(current_user: AuthUser = Depends(get_current_user)):
     records = await MemoryService.profile(
         tenant_id=current_user.tenant_id,
         user_id=current_user.id,
@@ -36,7 +36,7 @@ async def get_memory_profile(current_user: User = Depends(get_current_user)):
 async def sync_memories(
     since: str | None = None,
     limit: int = 100,
-    current_user: User = Depends(get_current_user),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     parsed_since = None
     if since:
@@ -61,14 +61,14 @@ async def sync_memories(
 
 
 @router.get("/metrics")
-async def memory_metrics(current_user: User = Depends(get_current_user)):
+async def memory_metrics(current_user: AuthUser = Depends(get_current_user)):
     """返回当前进程的记忆召回质量与成本指标。"""
     _ = current_user
     return snapshot()
 
 
 @router.get("", response_model=list[MemoryResponse])
-async def list_memories(current_user: User = Depends(get_current_user)):
+async def list_memories(current_user: AuthUser = Depends(get_current_user)):
     records = await MemoryService.list(
         tenant_id=current_user.tenant_id,
         user_id=current_user.id,
@@ -77,7 +77,7 @@ async def list_memories(current_user: User = Depends(get_current_user)):
 
 
 @router.get("/episodic", response_model=list[MemoryResponse])
-async def list_episodic_memories(current_user: User = Depends(get_current_user)):
+async def list_episodic_memories(current_user: AuthUser = Depends(get_current_user)):
     records = await MemoryService.list_episodic(
         tenant_id=current_user.tenant_id,
         user_id=current_user.id,
@@ -88,7 +88,7 @@ async def list_episodic_memories(current_user: User = Depends(get_current_user))
 @router.post("/episodic", response_model=MemoryResponse, status_code=status.HTTP_201_CREATED)
 async def create_episodic_memory(
     payload: EpisodicMemoryCreate,
-    current_user: User = Depends(get_current_user),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     record = await MemoryService.create_episodic(
         tenant_id=current_user.tenant_id,
@@ -108,7 +108,7 @@ async def create_episodic_memory(
 @router.post("", response_model=MemoryResponse, status_code=status.HTTP_201_CREATED)
 async def create_memory(
     payload: MemoryCreate,
-    current_user: User = Depends(get_current_user),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     try:
         record = await MemoryService.create(
@@ -130,7 +130,7 @@ async def create_memory(
 async def update_memory(
     memory_id: str,
     payload: MemoryUpdate,
-    current_user: User = Depends(get_current_user),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     try:
         record = await MemoryService.update(
@@ -154,7 +154,7 @@ async def update_memory(
 async def correct_memory(
     memory_id: str,
     payload: MemoryCorrection,
-    current_user: User = Depends(get_current_user),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     try:
         record = await MemoryService.update(
@@ -178,7 +178,7 @@ async def correct_memory(
 @router.delete("/{memory_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_memory(
     memory_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     deleted = await MemoryService.revoke(
         tenant_id=current_user.tenant_id,

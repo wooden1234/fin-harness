@@ -10,8 +10,15 @@ from langchain_core.messages import HumanMessage
 from pydantic import ValidationError
 
 from agents.orchestrator.analyzer.heuristic import heuristic_profile
-from agents.orchestrator.analyzer.node import analyze_request, build_analyzer_envelope
-from agents.orchestrator.analyzer.prompts import build_analyzer_system_prompt
+from agents.orchestrator.analyzer.node import (
+    _analyzer_error_details,
+    analyze_request,
+    build_analyzer_envelope,
+)
+from agents.orchestrator.analyzer.prompts import (
+    ANALYZER_REPAIR_SYSTEM_PROMPT,
+    build_analyzer_system_prompt,
+)
 from agents.orchestrator.analyzer.schema import AnalyzerOutput
 from agents.orchestrator.analyzer.validate import (
     assert_plan_capabilities,
@@ -21,6 +28,7 @@ from agents.orchestrator.analyzer.validate import (
 from agents.orchestrator.capability_resolver import resolve_finance_capabilities
 from agents.orchestrator.contracts import ExecutionDecision, RequestProfile, TaskSpec
 from agents.orchestrator.planner import build_plan_from_profile
+from agents.structured_output import ainvoke_json_output
 
 
 def test_open_financial_question_uses_deep_research() -> None:
@@ -66,6 +74,103 @@ def test_analyzer_prompt_only_asks_for_semantics() -> None:
     assert "白酒龙头去年表现怎么样" in prompt
     assert "clarification_message" in prompt
     assert "不选择 Agent、Tool、数据源、执行模式或预算" in prompt
+    assert "合法 JSON 对象" in prompt
+    assert '"normalized_query"' in prompt
+    assert "行业或板块必须使用 dynamic_group" in prompt
+    assert "合法 JSON 对象" in ANALYZER_REPAIR_SYSTEM_PROMPT
+    assert "行业、板块和主题使用 dynamic_group" in ANALYZER_REPAIR_SYSTEM_PROMPT
+    assert "rationale" in ANALYZER_REPAIR_SYSTEM_PROMPT
+
+
+def test_analyzer_error_details_extracts_provider_fields_and_redacts_secrets() -> None:
+    class ProviderBadRequest(Exception):
+        status_code = 400
+        body = {
+            "error": {
+                "type": "invalid_request_error",
+                "code": "json_mode_invalid",
+                "param": "messages",
+                "message": "Prompt must mention JSON; token sk-secret12345678",
+            }
+        }
+
+    details = _analyzer_error_details(ProviderBadRequest())
+
+    assert details["status_code"] == "400"
+    assert details["provider_type"] == "invalid_request_error"
+    assert details["provider_code"] == "json_mode_invalid"
+    assert details["param"] == "messages"
+    assert details["message"] == "Prompt must mention JSON; token [REDACTED]"
+
+
+def test_analyzer_error_details_safely_diagnoses_parser_output() -> None:
+    class OutputParserException(Exception):
+        observation = "Invalid JSON returned by provider"
+        llm_output = '{"intents": ["not_allowed"]}'
+
+    details = _analyzer_error_details(OutputParserException("invalid json"))
+
+    assert details["parser_reason"] == "invalid_json_output"
+    assert details["output_length"] == "28"
+    assert len(details["output_sha256"]) == 16
+    assert details["message"] == "invalid_json_output"
+    assert "not_allowed" not in details["message"]
+
+
+def test_analyzer_error_details_prioritizes_schema_validation() -> None:
+    class OutputParserException(Exception):
+        llm_output = '{"constraints": {"entity_scope_type": "industry"}}'
+
+    error = OutputParserException(
+        "Failed to parse JSON. Got: 1 validation error for AnalyzerOutput"
+    )
+    details = _analyzer_error_details(error)
+
+    assert details["parser_reason"] == "schema_validation_failed"
+    assert details["message"] == "schema_validation_failed"
+
+
+def test_analyzer_output_normalizes_industry_scope_to_dynamic_group() -> None:
+    result = AnalyzerOutput.model_validate(
+        {
+            "normalized_query": "存储芯片价格接近峰值，现在还能介入吗？",
+            "intents": ["open_research"],
+            "freshness_required": True,
+            "entities": ["存储芯片"],
+            "constraints": {
+                "entity_scope_type": "industry",
+                "analysis_dimensions": ["价格位置", "投资介入时机"],
+            },
+        }
+    )
+
+    assert result.constraints.entity_scope_type == "dynamic_group"
+
+
+def test_structured_output_recovers_valid_json_from_parser_exception() -> None:
+    class ParserError(Exception):
+        llm_output = '{"intents": ["general_chat"]}'
+
+    class FakeRunnable:
+        async def ainvoke(self, messages):
+            del messages
+            raise ParserError("parser wrapper failed")
+
+    class FakeModel:
+        def with_structured_output(self, schema, method=None):
+            assert schema is AnalyzerOutput
+            assert method == "json_mode"
+            return FakeRunnable()
+
+    result = asyncio.run(
+        ainvoke_json_output(
+            FakeModel(),
+            AnalyzerOutput,
+            [("system", "输出 JSON"), ("human", "你好")],
+        )
+    )
+
+    assert result.intents == ["general_chat"]
 
 
 def test_analyzer_output_rejects_execution_fields() -> None:

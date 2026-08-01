@@ -27,6 +27,13 @@ class UserResponse(UserBase):
     model_config = {"from_attributes": True}
 
 
+class AuthUser(UserResponse):
+    """JWT 鉴权主体 DTO；不含 password_hash，不可当作 ORM。"""
+
+    tenant_id: str
+    role: str
+
+
 class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"

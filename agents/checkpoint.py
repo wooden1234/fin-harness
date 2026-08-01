@@ -20,7 +20,31 @@ from app.core.logger import get_logger
 _CHECKPOINT_ALLOWED_MSGPACK_MODULES = (
     ("app.shared", "SubTask"),
     ("app.shared", "PlannerOutput"),
+    ("app.shared", "Router"),
     ("agents.finance_agent.financial_query_agent.predefined.intent", "FinancialQueryIntent"),
+    # Orchestrator V2 契约：写入 OrchestratorState 后需可从 checkpoint 还原。
+    ("agents.orchestrator.contracts", "AnswerStatement"),
+    ("agents.orchestrator.contracts", "AgentResult"),
+    ("agents.orchestrator.contracts", "CandidateSet"),
+    ("agents.orchestrator.contracts", "Claim"),
+    ("agents.orchestrator.contracts", "ClaimEvidenceLink"),
+    ("agents.orchestrator.contracts", "ConstrainedAnswer"),
+    ("agents.orchestrator.contracts", "DeepResearchReport"),
+    ("agents.orchestrator.contracts", "DocumentHit"),
+    ("agents.orchestrator.contracts", "DocumentHitSet"),
+    ("agents.orchestrator.contracts", "DomainPlanningScope"),
+    ("agents.orchestrator.contracts", "Evidence"),
+    ("agents.orchestrator.contracts", "EvidenceAssessment"),
+    ("agents.orchestrator.contracts", "EvidenceConflict"),
+    ("agents.orchestrator.contracts", "EvidencePolicy"),
+    ("agents.orchestrator.contracts", "ExecutionDecision"),
+    ("agents.orchestrator.contracts", "MarketFilter"),
+    ("agents.orchestrator.contracts", "MarketQueryPlan"),
+    ("agents.orchestrator.contracts", "MarketSort"),
+    ("agents.orchestrator.contracts", "QualityReport"),
+    ("agents.orchestrator.contracts", "RequestProfile"),
+    ("agents.orchestrator.contracts", "TaskPlan"),
+    ("agents.orchestrator.contracts", "TaskSpec"),
 )
 
 # 兼容旧环境变量；未显式登记的类型在 strict 模式下会被拒绝。

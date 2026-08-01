@@ -40,6 +40,7 @@ def financial_query_output(
     failure_category: FailureCategory | None = None,
     failure_code: str = "",
     failure_retryable: bool = False,
+    emit_message_on_uncovered: bool = False,
 ) -> dict:
     """结构化 SQL 查询输出，并透传 PDF 数据血缘。
 
@@ -64,8 +65,10 @@ def financial_query_output(
     if coverage == "uncovered":
         task_result["fallback_to_web"] = True
     updates = {
-        # 拒答/降级：不推 AIMessage，避免中间文案流到前端；由 web/summarize 收口。
-        "messages": [] if coverage == "uncovered" else [AIMessage(content=answer)],
+        # 默认不发送降级文案；终态 workflow 可显式保留兼容消息供独立调用方读取。
+        "messages": [AIMessage(content=answer)]
+        if coverage != "uncovered" or emit_message_on_uncovered
+        else [],
         "citations": resolved_citations,
         "task_results": [task_result],
         "steps": [step],
