@@ -1,6 +1,8 @@
 """今日热榜：打开页面时按需搜索财经热点，归入三区问题。
 
-类似微博热搜：不跑定时任务，请求时取「今天」的热榜；Redis 做短缓存。
+类似微博热搜：不跑定时任务，请求时取「今天」的热榜。
+采用 Stale-While-Revalidate：命中当日缓存直接返回；未命中时立即返回昨日缓存
+或本地兜底，同时在后台异步重新搜索并调用 LLM 刷新，避免请求被慢路径卡住。
 """
 
 from __future__ import annotations
@@ -12,12 +14,19 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
 
-from agents.finance_agent.web_search_agent.node import search_web
+from tools.web_search import fetch_web_search
 from agents.llm import get_router_llm
 from agents.structured_output import ainvoke_json_output
-from app.core.cache import cache_get, cache_set, make_record
+from app.core.cache import (
+    cache_fill_lock,
+    cache_get,
+    cache_release_fill_lock,
+    cache_set,
+    make_record,
+)
 from app.core.logger import get_logger
-from app.core.redis_keys import redis_keys
+from app.core.redis_client import get_redis_client
+from app.core.redis_keys import RedisKey, redis_keys
 from app.schemas.hot_board import HotBoardPanel, HotBoardResponse
 
 logger = get_logger(service="hot_board")
@@ -25,7 +34,11 @@ logger = get_logger(service="hot_board")
 _TZ = ZoneInfo("Asia/Shanghai")
 _CACHE_DOMAIN = "hot_board"
 _CACHE_DATA_TYPE = "hot_board_panels"
-_CACHE_TTL_SEC = 3600
+# 缓存 key 不带日期：始终保存「最近一次成功生成」的热榜，靠 as_of 字段判断是否为今日新鲜数据；
+# TTL 拉长到超过一天，保证跨天时仍有昨日数据可作为 stale 兜底，而不是直接掉回本地静态文案。
+_CACHE_TTL_SEC = 26 * 3600
+_REFRESH_LOCK_TTL_SEC = 30
+_background_refresh_tasks: set[asyncio.Task[None]] = set()
 _PANEL_SPECS: tuple[tuple[str, str], ...] = (
     ("hot_discuss", "热门讨论"),
     ("finance_lookup", "财务查数"),
@@ -123,7 +136,7 @@ def _panels_from_llm(
 async def _collect_hot_snippets() -> list[str]:
     snippets: list[str] = []
     results = await asyncio.gather(
-        *(search_web(query) for query in _SEARCH_QUERIES),
+        *(fetch_web_search(query, scope="open") for query in _SEARCH_QUERIES),
         return_exceptions=True,
     )
     for query, result in zip(_SEARCH_QUERIES, results, strict=True):
@@ -177,40 +190,96 @@ async def _generate_from_web(as_of: str) -> HotBoardResponse | None:
     return _panels_from_llm(draft, as_of=as_of, source="web")
 
 
-async def get_hot_board(*, force_refresh: bool = False) -> HotBoardResponse:
-    """返回今日热榜；优先 Redis 缓存，未命中则即时搜索生成。"""
-    as_of = _today()
-    cache_key = redis_keys.build(_CACHE_DOMAIN, as_of)
-    if not force_refresh:
-        cached = await cache_get(
-            cache_key,
-            domain=_CACHE_DOMAIN,
-            data_type=_CACHE_DATA_TYPE,
-            enabled=True,
-        )
-        if cached is not None and cached.kind == "record":
-            try:
-                return HotBoardResponse.model_validate(cached.payload)
-            except Exception:
-                logger.warning("hot board cache payload invalid as_of={}", as_of)
-
+async def _refresh_and_store(as_of: str, cache_key: RedisKey) -> HotBoardResponse:
+    """实际执行搜索 + LLM 生成，并把成功结果写回缓存；供同步刷新和后台任务共用。"""
     try:
         board = await _generate_from_web(as_of)
     except Exception:
-        logger.exception("hot board generation failed")
+        logger.exception("hot board generation failed as_of={}", as_of)
         board = None
 
     if board is None:
-        board = _fallback(as_of)
-    else:
-        await cache_set(
-            cache_key,
-            make_record(data_type=_CACHE_DATA_TYPE, payload=board.model_dump(mode="json")),
+        return _fallback(as_of)
+
+    await cache_set(
+        cache_key,
+        make_record(data_type=_CACHE_DATA_TYPE, payload=board.model_dump(mode="json")),
+        domain=_CACHE_DOMAIN,
+        ttl_seconds=_CACHE_TTL_SEC,
+        enabled=True,
+    )
+    return board
+
+
+async def _run_background_refresh(
+    as_of: str,
+    cache_key: RedisKey,
+    lock_key: RedisKey,
+    lock_token: str | None,
+) -> None:
+    try:
+        await _refresh_and_store(as_of, cache_key)
+    except Exception:
+        logger.exception("hot board background refresh failed as_of={}", as_of)
+    finally:
+        if lock_token is not None:
+            await cache_release_fill_lock(lock_key, lock_token, domain=_CACHE_DOMAIN)
+
+
+async def _trigger_background_refresh(as_of: str, cache_key: RedisKey) -> None:
+    """异步刷新今日热榜；有 Redis 时用短租约锁避免并发请求重复触发。"""
+    lock_key = redis_keys.build(_CACHE_DOMAIN, "refresh-lock", as_of)
+    lock_token: str | None = None
+    if get_redis_client() is not None:
+        lock_token = await cache_fill_lock(
+            lock_key,
             domain=_CACHE_DOMAIN,
-            ttl_seconds=_CACHE_TTL_SEC,
+            ttl_seconds=_REFRESH_LOCK_TTL_SEC,
             enabled=True,
         )
-    return board
+        if lock_token is None:
+            # 已有其它请求在后台刷新，本次直接跳过，等它写回缓存。
+            return
+    task = asyncio.create_task(
+        _run_background_refresh(as_of, cache_key, lock_key, lock_token)
+    )
+    _background_refresh_tasks.add(task)
+    task.add_done_callback(_background_refresh_tasks.discard)
+
+
+async def get_hot_board(*, force_refresh: bool = False) -> HotBoardResponse:
+    """返回今日热榜。
+
+    - `force_refresh=True`（用户显式点刷新）：同步重新生成，保证拿到最新结果。
+    - 默认路径（首页打开即触发）：命中当日缓存直接返回；未命中则立即返回昨日缓存
+      或本地兜底文案，同时把真正耗时的搜索 + LLM 生成丢到后台任务，不阻塞本次请求。
+    """
+    as_of = _today()
+    cache_key = redis_keys.build(_CACHE_DOMAIN, "latest")
+
+    if force_refresh:
+        return await _refresh_and_store(as_of, cache_key)
+
+    cached = await cache_get(
+        cache_key,
+        domain=_CACHE_DOMAIN,
+        data_type=_CACHE_DATA_TYPE,
+        enabled=True,
+    )
+    board: HotBoardResponse | None = None
+    if cached is not None and cached.kind == "record":
+        try:
+            board = HotBoardResponse.model_validate(cached.payload)
+        except Exception:
+            logger.warning("hot board cache payload invalid as_of={}", as_of)
+
+    if board is not None and board.as_of == as_of:
+        return board
+
+    await _trigger_background_refresh(as_of, cache_key)
+    if board is not None:
+        return board.model_copy(update={"source": "stale"})
+    return _fallback(as_of)
 
 
 __all__ = ["get_hot_board"]

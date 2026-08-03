@@ -30,10 +30,17 @@ export function useAgentChat() {
     updateMessage,
     setGenerating,
     resetAgentSteps,
+    setAgentTodos,
+    resetAgentTodos,
     upsertAgentStep,
     agentSteps,
     setHitlPending,
   } = useChatStore()
+
+  const resetAgentProgress = () => {
+    resetAgentSteps()
+    resetAgentTodos()
+  }
 
   const ensureConversationId = async (): Promise<string> => {
     const currentConversationId = useChatStore.getState().activeConversationId
@@ -67,6 +74,10 @@ export function useAgentChat() {
           category: event.category,
           shortLabel: event.short_label,
         })
+      }
+
+      if (event.type === 'todo_snapshot') {
+        setAgentTodos(event.todos)
       }
 
       if (event.type === 'token') {
@@ -110,12 +121,13 @@ export function useAgentChat() {
             citations: event.citations,
             route: event.route,
             agentSteps: [...useChatStore.getState().agentSteps],
+            agentTodos: [...useChatStore.getState().agentTodos],
           })
           if (event.citations && event.citations.length > 0) {
             useChatStore.getState().openSources(assistantMessageId, 0)
           }
         }
-        resetAgentSteps()
+        resetAgentProgress()
         setGenerating(false)
         setHitlPending(false)
       }
@@ -137,7 +149,7 @@ export function useAgentChat() {
           })
         }
         setGenerating(false)
-        resetAgentSteps()
+        resetAgentProgress()
       }
 
       if (event.type === 'error') {
@@ -155,7 +167,7 @@ export function useAgentChat() {
         }
         setGenerating(false)
         setHitlPending(false)
-        resetAgentSteps()
+        resetAgentProgress()
       }
     }
 
@@ -179,13 +191,13 @@ export function useAgentChat() {
         })
         setGenerating(false)
         setHitlPending(false)
-        resetAgentSteps()
+        resetAgentProgress()
       },
       onComplete: () => {
         const stillGenerating = useChatStore.getState().isGenerating
         if (stillGenerating) {
           setGenerating(false)
-          resetAgentSteps()
+          resetAgentProgress()
         }
       },
     })
@@ -210,7 +222,7 @@ export function useAgentChat() {
       })
 
       setGenerating(true)
-      resetAgentSteps()
+      resetAgentProgress()
       setHitlPending(false)
 
       const fields: Record<string, string> = {
@@ -228,7 +240,7 @@ export function useAgentChat() {
       })
       setGenerating(false)
       setHitlPending(false)
-      resetAgentSteps()
+      resetAgentProgress()
     }
   }
 
@@ -246,7 +258,7 @@ export function useAgentChat() {
     })
 
     setGenerating(true)
-    resetAgentSteps()
+    resetAgentProgress()
     setHitlPending(false)
 
     await runStream('/api/agent/resume', {
@@ -259,7 +271,7 @@ export function useAgentChat() {
     clientRef.current?.cancel()
     clientRef.current = null
     setGenerating(false)
-    resetAgentSteps()
+    resetAgentProgress()
   }
 
   return { sendQuery, resumeAgent, cancelStream, agentSteps }

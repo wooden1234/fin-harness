@@ -17,7 +17,7 @@ from agents.orchestrator.contracts import (
 )
 from agents.research_retrieval_workflow import run_research_retrieval_workflow
 from agents.stock_screening_agent.node import run_stock_screening_agent
-from tools.base import ToolResult
+from tools.core.base import ToolResult
 
 
 async def test_market_acquisition_requires_explicit_tool() -> None:

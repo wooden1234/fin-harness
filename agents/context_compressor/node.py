@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any, Mapping
 
 from langchain_core.messages import (
     AIMessage,
@@ -25,12 +26,15 @@ from langchain_core.messages import (
 from langchain_core.runnables import RunnableConfig
 from langgraph.runtime import Runtime
 
-from agents.context_compressor.prompts import SUMMARY_PROMPT, SUMMARY_SHRINK_PROMPT
-from agents.context_compressor.models import ConversationSummaryPatch, ConversationSummaryV2
 from agents.context_compressor.prompts import (
+    GENERAL_SUMMARY_PROMPT,
+    GENERAL_SUMMARY_SHRINK_PROMPT,
+    SUMMARY_PROMPT,
+    SUMMARY_SHRINK_PROMPT,
     STRUCTURED_SUMMARY_PATCH_PROMPT,
     STRUCTURED_SUMMARY_REPAIR_PROMPT,
 )
+from agents.context_compressor.models import ConversationSummaryPatch, ConversationSummaryV2
 from agents.context_compressor.structured import (
     apply_summary_patch,
     parse_summary_v2,
@@ -54,7 +58,7 @@ from agents.context_space.events import record_context_event
 from agents.context_space.snip import snip_largest_removable_block
 from agents.llm import get_router_llm
 from agents.runtime_context import AgentRuntimeContext
-from agents.states import FinAgentState
+
 from app.core.config import settings
 from app.core.logger import get_logger
 
@@ -166,10 +170,19 @@ def _truncate_oversized_messages(messages: list[AnyMessage]) -> list[AnyMessage]
     return updates
 
 
+def _summary_prompts_for_lane(execution_lane: str) -> tuple[str, str]:
+    """按执行档选择摘要/再压缩 prompt。"""
+    if str(execution_lane or "").strip() == "general":
+        return GENERAL_SUMMARY_PROMPT, GENERAL_SUMMARY_SHRINK_PROMPT
+    return SUMMARY_PROMPT, SUMMARY_SHRINK_PROMPT
+
+
 async def _enforce_summary_limit(
     summary: str,
     config: RunnableConfig | None = None,
     counters: ContextCounters | None = None,
+    *,
+    shrink_prompt: str = SUMMARY_SHRINK_PROMPT,
 ) -> str:
     """摘要超过上限时先尝试 LLM 再压缩，失败则硬截断。"""
     if estimate_tokens(summary) <= SUMMARY_TOKEN_LIMIT:
@@ -182,7 +195,7 @@ async def _enforce_summary_limit(
             [
                 (
                     "human",
-                    SUMMARY_SHRINK_PROMPT.format(
+                    shrink_prompt.format(
                         summary_limit=SUMMARY_TOKEN_LIMIT,
                         summary=summary,
                     ),
@@ -210,6 +223,9 @@ async def _summarize_history(
     messages: list[AnyMessage],
     config: RunnableConfig | None = None,
     counters: ContextCounters | None = None,
+    *,
+    summary_prompt: str = SUMMARY_PROMPT,
+    shrink_prompt: str = SUMMARY_SHRINK_PROMPT,
 ) -> str | None:
     """在已有摘要上增量合并本次待压缩消息。
 
@@ -226,7 +242,7 @@ async def _summarize_history(
             [
                 (
                     "human",
-                    SUMMARY_PROMPT.format(
+                    summary_prompt.format(
                         summary_limit=SUMMARY_TOKEN_LIMIT,
                         existing_summary=existing_summary or "无",
                         conversation=conversation,
@@ -243,7 +259,12 @@ async def _summarize_history(
         if not summary:
             logger.warning("summary empty, treat as failure")
             return None
-        return await _enforce_summary_limit(summary, config, counters)
+        return await _enforce_summary_limit(
+            summary,
+            config,
+            counters,
+            shrink_prompt=shrink_prompt,
+        )
     except Exception:
         logger.exception("summary failed")
         return None
@@ -294,15 +315,15 @@ async def _summarize_history_v2(
 
 
 async def compress_context(
-    state: FinAgentState,
+    state: Mapping[str, Any],
     config: RunnableConfig = None,
     runtime: Runtime[AgentRuntimeContext] | None = None,
 ) -> dict:
     """按 token 预算压缩上下文。
 
-    - 总上下文 < COMPRESS_TRIGGER_TOKENS：不生成 / 不改写 conversation_summary
-    - 超过触发线：增量更新 conversation_summary，按 POST_COMPRESS_TOKENS 倒序保留消息
-    - 当前用户问题始终保留；摘要失败则不删除任何消息
+    注意：入参类型必须能看到编排层字段（如 execution_lane）。
+    不可标注为 FinAgentState，否则 LangGraph 会收窄通道，
+    导致后续条件边读不到 execution_lane 而误入 DeepAgent。
     """
     history = list(state.get("messages") or [])
     existing_summary = str(state.get("conversation_summary") or "")
@@ -367,6 +388,9 @@ async def compress_context(
         return {"messages": oversized} if oversized else {}
 
     counters = ContextCounters(compaction_round_count=1)
+    summary_prompt, shrink_prompt = _summary_prompts_for_lane(
+        str(state.get("execution_lane") or "")
+    )
     legacy_summary: str | None = None
     structured_summary: ConversationSummaryV2 | None = None
     if mode in {"off", "shadow"}:
@@ -375,6 +399,8 @@ async def compress_context(
             to_summarize,
             config,
             counters,
+            summary_prompt=summary_prompt,
+            shrink_prompt=shrink_prompt,
         )
     if mode in {"shadow", "on"}:
         structured_summary = await _summarize_history_v2(

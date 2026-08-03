@@ -119,11 +119,13 @@ def test_query_rewrite_routes_by_result():
     assert route_after_query_rewrite({"rewrite_status": "uncertain"}) == "clarify"
 
 
-def test_main_graph_rewrites_before_analyzer():
+def test_main_graph_uses_single_deep_agent_path():
     graph = build_graph().compile().get_graph()
     edges = {(edge.source, edge.target) for edge in graph.edges}
 
-    assert ("context_compressor", "query_rewrite") in edges
-    assert ("query_rewrite", "analyze_request") in edges
+    assert ("context_compressor", "main_deep_agent") in edges
+    assert ("main_deep_agent", "evidence_quality_gate") in edges
+    assert "query_rewrite" not in graph.nodes
+    assert "analyze_request" not in graph.nodes
     assert "supervisor" not in graph.nodes
     assert "risk_triage" not in graph.nodes

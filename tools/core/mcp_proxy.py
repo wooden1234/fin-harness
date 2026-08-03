@@ -7,8 +7,8 @@ from typing import Any
 from langchain_core.tools import StructuredTool
 
 from mcp.gateway import McpGateway
-from tools.base import ToolRiskLevel, ToolSpec
-from tools.registry import RegisteredTool, register_tool
+from tools.core.base import ToolRiskLevel, ToolSpec
+from tools.core.registry import RegisteredTool, register_tool
 
 
 def register_mcp_tool(

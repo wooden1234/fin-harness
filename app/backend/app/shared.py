@@ -21,6 +21,7 @@ AgentRoute = Literal[
     "general",
     "plan",
     "stock_screening",
+    "main",
 ]
 SubTaskType = Literal["faq", "pdf", "financial_query", "web_search", "general"]
 

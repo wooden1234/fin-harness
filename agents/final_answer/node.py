@@ -209,6 +209,7 @@ async def final_answer_node(
     """统一格式化最终回答，附加引用来源"""
 
     force_empty_citations = False
+    passthrough_message_id: str | None = None
     guardrail_response = _guardrail_response(state)
 
     if guardrail_response is not None:
@@ -216,9 +217,10 @@ async def final_answer_node(
         force_empty_citations = True
     else:
         route = state.get("route", "general")
+        execution_lane = str(state.get("execution_lane") or "").strip()
         answer = ""
 
-        if route == "general":
+        if route == "general" or execution_lane == "general":
             for msg in reversed(list(state.get("messages") or [])):
                 if isinstance(msg, AIMessage):
                     answer = (
@@ -226,6 +228,8 @@ async def final_answer_node(
                         if isinstance(msg.content, str)
                         else str(msg.content)
                     )
+                    # 复用候选答案 ID，让 add_messages 替换而不是重复追加。
+                    passthrough_message_id = msg.id
                     break
         else:
             answer = state.get("summary", "")
@@ -242,7 +246,19 @@ async def final_answer_node(
     if not answer:
         answer = "抱歉，我暂时无法回答您的问题，请稍后重试。"
 
-    answer, compliance_decision = _review_final_answer(answer)
+    # 普通档只做提示词约束 + 透传输出，不做金融合规答案审查。
+    is_general_lane = (
+        str(state.get("execution_lane") or "").strip() == "general"
+        or state.get("route") == "general"
+    )
+    if is_general_lane and guardrail_response is None:
+        compliance_decision = ComplianceDecision(
+            action="pass",
+            reason_code="general_lane_passthrough",
+            reason="普通档跳过金融答案质量与合规审查",
+        )
+    else:
+        answer, compliance_decision = _review_final_answer(answer)
 
     citations = _filter_current_turn_citations(state, list(state.get("citations") or []))
 
@@ -268,7 +284,7 @@ async def final_answer_node(
     )
 
     return {
-        "messages": [AIMessage(content=answer)],
+        "messages": [AIMessage(content=answer, id=passthrough_message_id)],
         "citations": Overwrite(deduped),
         # summary：本轮候选答案，收口后清空。
         # conversation_summary：多轮会话记忆，此处不得清空。

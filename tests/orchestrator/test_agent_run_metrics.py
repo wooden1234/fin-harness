@@ -13,6 +13,8 @@ def test_summarize_run_snapshots_exposes_quantiles_and_low_cardinality() -> None
                 "execution_status": "completed",
                 "budget_tier": "light",
                 "duration_ms": 1000,
+                "conflict_detected": 1,
+                "conflict_resolved": 1,
             },
             {
                 "content": "回答二",
@@ -21,6 +23,7 @@ def test_summarize_run_snapshots_exposes_quantiles_and_low_cardinality() -> None
                 "execution_status": "partial",
                 "budget_tier": "light",
                 "duration_ms": 3000,
+                "completed_with_gaps": True,
             },
             {
                 "content": "",
@@ -39,3 +42,6 @@ def test_summarize_run_snapshots_exposes_quantiles_and_low_cardinality() -> None
     assert summary["routes"] == {"answer": 2, "clarify": 1}
     assert summary["citation_coverage_ratio"] == 0.3333
     assert summary["answer_availability_ratio"] == 0.6667
+    assert summary["conflict_detected"] == 1
+    assert summary["conflict_resolved"] == 1
+    assert summary["completed_with_gaps"] == 1

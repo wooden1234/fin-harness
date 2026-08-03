@@ -35,7 +35,7 @@ from app.core.config import settings
 from app.core.logger import get_logger
 from harness.context import RunContext, build_run_context
 from tools import execute_tool, list_bindable_tools, load_all_tools
-from tools.registry import get_tool_id_by_name, validate_tool_ids
+from tools.core.registry import get_tool_id_by_name, validate_tool_ids
 
 logger = get_logger(service="tool_runtime")
 

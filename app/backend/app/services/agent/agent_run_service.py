@@ -39,7 +39,19 @@ def summarize_run_snapshots(
 
     cited = sum(bool(item.get("citations")) for item in valid)
     answered = sum(bool(str(item.get("content") or "").strip()) for item in valid)
+    grounded = [
+        item
+        for item in valid
+        if item.get("execution_mode") in {"tool_assisted", "deep_research", "partial"}
+    ]
+    salvaged = sum(bool(item.get("salvaged")) for item in valid)
+    salvage_eligible = sum(bool(item.get("salvage_eligible")) for item in valid)
+    timed_out = sum(bool(item.get("timed_out")) for item in valid)
+    unauthorized_attempts = sum(
+        int(item.get("unauthorized_tool_attempts") or 0) for item in valid
+    )
     sample_size = len(valid)
+
     return {
         "sample_size": sample_size,
         "duration_ms": _duration_summary(durations),
@@ -52,6 +64,37 @@ def summarize_run_snapshots(
         "answer_availability_ratio": round(answered / sample_size, 4)
         if sample_size
         else 0.0,
+        "model_rounds": _duration_summary(
+            [float(item.get("model_rounds") or 0) for item in valid]
+        ),
+        "tool_calls": _duration_summary(
+            [float(item.get("tool_calls") or 0) for item in valid]
+        ),
+        "source_family_count": _duration_summary(
+            [float(len(item.get("source_families") or [])) for item in valid]
+        ),
+        "evidence_count": _duration_summary(
+            [float(item.get("evidence_count") or 0) for item in valid]
+        ),
+        "statement_coverage_ratio": round(
+            sum(float(item.get("statement_coverage") or 0) for item in grounded)
+            / len(grounded),
+            4,
+        ) if grounded else 1.0,
+        "salvage_count": salvaged,
+        "salvage_ratio": round(salvaged / salvage_eligible, 4)
+        if salvage_eligible
+        else 1.0,
+        "salvage_eligible_count": salvage_eligible,
+        "timeout_ratio": round(timed_out / sample_size, 4) if sample_size else 0.0,
+        "unauthorized_tool_attempts": unauthorized_attempts,
+        "cross_period_mismatch": sum(int(item.get("cross_period_mismatch") or 0) for item in valid),
+        "tool_budget_exhausted": sum(int(item.get("tool_budget_exhausted") or 0) for item in valid),
+        "insufficient_tool_result": sum(int(item.get("insufficient_tool_result") or 0) for item in valid),
+        "raw_json_leak": sum(bool(item.get("raw_json_leak")) for item in valid),
+        "conflict_detected": sum(int(item.get("conflict_detected") or 0) for item in valid),
+        "conflict_resolved": sum(int(item.get("conflict_resolved") or 0) for item in valid),
+        "completed_with_gaps": sum(bool(item.get("completed_with_gaps")) for item in valid),
     }
 
 

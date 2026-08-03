@@ -11,6 +11,8 @@ TOOL_MODULES: tuple[str, ...] = (
     "tools.iwencai",
     "tools.web_search",
     "tools.knowledge",
+    "tools.finance",
+    "tools.calculation",
 )
 
 _loaded = False
@@ -19,7 +21,7 @@ _loaded = False
 def load_all_tools(*, force: bool = False) -> list[str]:
     """加载目录中的工具模块；返回已加载模块名。"""
     global _loaded
-    from tools.registry import list_registered_tools
+    from tools.core.registry import list_registered_tools
 
     if _loaded and not force and list_registered_tools():
         return list(TOOL_MODULES)

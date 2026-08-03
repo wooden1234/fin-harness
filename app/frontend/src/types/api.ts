@@ -39,4 +39,4 @@ export interface Citation {
   source_type?: string
 }
 
-export type AgentRoute = 'faq' | 'account' | 'general'
+export type AgentRoute = 'direct' | 'tool_assisted' | 'deep_research' | 'clarify' | 'partial'

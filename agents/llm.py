@@ -31,13 +31,15 @@ def _get_async_http_client() -> httpx.AsyncClient:
 
 
 def _build_deepseek_llm(*, temperature: float) -> ChatDeepSeek:
+    thinking_type = "enabled" if settings.DEEPSEEK_THINKING_ENABLED else "disabled"
     return ChatDeepSeek(
         model=settings.DEEPSEEK_MODEL,
         api_key=_require_llm_api_key(),
         api_base=_normalize_api_base(settings.DEEPSEEK_BASE_URL),
         temperature=temperature,
-        max_retries=2,
+        max_retries=0,
         http_async_client=_get_async_http_client(),
+        extra_body={"thinking": {"type": thinking_type}},
     )
 
 

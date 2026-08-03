@@ -9,13 +9,22 @@ import type { Citation } from '@/types/api'
 import { citationFaviconUrl, citationHostname } from '@/utils/citations'
 
 const routeLabels = {
-  faq: 'FAQ 知识库',
-  account: '账户查询',
-  general: '通用对话',
+  direct: '直接回答',
+  tool_assisted: '工具辅助',
+  deep_research: '深度研究',
+  clarify: '需要澄清',
+  partial: '部分结果',
 } as const
 
 const CITATION_TOKEN_RE = /(\[\d+\])/g
 const CITATION_INDEX_RE = /^\[(\d+)\]$/
+/** 后端质量门附加的资料说明，前端不展示。 */
+const MATERIAL_NOTES_SECTION_RE = /\n*###\s*资料说明\s*\n[\s\S]*$/
+const DATA_SOURCE_CATEGORIES = new Set(['weather', 'market', 'web', 'research', 'financial', 'knowledge'])
+
+function displayAssistantContent(content: string): string {
+  return content.replace(MATERIAL_NOTES_SECTION_RE, '').trimEnd()
+}
 
 function FaviconStack({ citations }: { citations: Citation[] }) {
   const preview = citations.slice(0, 5)
@@ -110,6 +119,16 @@ export function ChatMessage({ message }: { message: Message }) {
   const openSources = useChatStore((state) => state.openSources)
   const selectCitation = useChatStore((state) => state.selectCitation)
   const citations = message.citations
+  const todos = message.agentTodos ?? []
+  const steps = message.agentSteps ?? []
+  const dataSourceCount = steps.filter(
+    (step) => step.category !== undefined && DATA_SOURCE_CATEGORIES.has(step.category),
+  ).length
+  const hasAnalysisDetails = todos.length > 0 || steps.length > 0
+  const analysisSummary = [
+    todos.length > 0 ? `执行 ${todos.length} 个步骤` : '',
+    dataSourceCount > 0 ? `查询 ${dataSourceCount} 个数据源` : '',
+  ].filter(Boolean).join('，')
 
   const markdownComponents: Components | undefined = citations?.length
     ? {
@@ -164,16 +183,36 @@ export function ChatMessage({ message }: { message: Message }) {
           </div>
         )}
 
-        {!isUser && message.agentSteps && message.agentSteps.length > 0 && (
+        {!isUser && hasAnalysisDetails && (
           <details className="mb-2 text-xs text-slate-500 dark:text-slate-400">
             <summary className="cursor-pointer select-none hover:text-slate-700 dark:hover:text-slate-200">
-              已完成分析，查询 {message.agentSteps.length} 个数据源
+              已完成分析{analysisSummary ? `，${analysisSummary}` : ''}
             </summary>
-            <ul className="mt-2 space-y-1 pl-3 border-l border-slate-200 dark:border-slate-700">
-              {message.agentSteps.map((step) => (
-                <li key={step.id}>{step.label}</li>
-              ))}
-            </ul>
+            <div className="mt-2 space-y-3 border-l border-slate-200 pl-3 dark:border-slate-700">
+              {todos.length > 0 && (
+                <section>
+                  <p className="mb-1 font-medium text-slate-600 dark:text-slate-300">执行计划</p>
+                  <ul className="space-y-1">
+                    {todos.map((todo) => (
+                      <li key={todo.id} className="flex gap-1.5">
+                        <span aria-hidden>{todo.status === 'completed' ? '✓' : todo.status === 'in_progress' ? '◌' : '○'}</span>
+                        <span>{todo.content}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
+              {steps.length > 0 && (
+                <section>
+                  <p className="mb-1 font-medium text-slate-600 dark:text-slate-300">执行记录</p>
+                  <ul className="space-y-1">
+                    {steps.map((step) => (
+                      <li key={step.id}>{step.label}</li>
+                    ))}
+                  </ul>
+                </section>
+              )}
+            </div>
           </details>
         )}
 
@@ -199,7 +238,7 @@ export function ChatMessage({ message }: { message: Message }) {
             message.content
           ) : (
             <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-              {message.content}
+              {displayAssistantContent(message.content)}
             </ReactMarkdown>
           )}
         </div>

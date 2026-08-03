@@ -1,4 +1,8 @@
-"""供 DeepAgent 使用的受治理本地知识检索工具。"""
+"""供 DeepAgent 使用的受治理本地知识检索工具。
+
+结构化财务数字通过 ``knowledge.fact.lookup`` 作为补充入口暴露，
+实现复用 ``tools.finance.fetch_financial_fact``（本地 PDF 表格入库子集）。
+"""
 
 from __future__ import annotations
 
@@ -13,8 +17,9 @@ from retrieval.services.knowledge import (
     search_faq_knowledge,
     search_pdf_knowledge,
 )
-from tools.base import ToolSpec
-from tools.registry import register_tool
+from tools.core.base import ToolSpec
+from tools.core.registry import register_tool
+from tools.finance import FactOperation, fetch_financial_fact
 
 PdfCategory = Literal[
     "annual_reports",
@@ -32,7 +37,7 @@ async def search_faq_knowledge_tool(
     domain: Literal["capital_market", "corporate_finance"],
     top_k: int = 3,
 ) -> dict[str, Any]:
-    """检索稳定金融规则、概念或企业财务制度模板。
+    """检索本地稳定金融规则、概念或企业财务制度模板。
 
     Args:
         query: 独立、完整的检索问题
@@ -123,11 +128,42 @@ async def search_pdf_knowledge_tool(
     return {"query": query, "evidence": evidence, "count": len(evidence)}
 
 
+@tool(parse_docstring=True)
+async def lookup_knowledge_fact(
+    question: str,
+    companies: list[str],
+    metrics: list[str],
+    years: list[int] | None = None,
+    operation: FactOperation = "latest",
+    top_k: int = 5,
+) -> dict[str, Any]:
+    """查询本地已入库财务事实表（PDF 表格抽取子集），作为知识补充。
+
+    不保证任意公司/指标/年份都能命中；未入库时返回错误，应改走 PDF 或其它来源。
+
+    Args:
+        question: 用户财务问题。
+        companies: 公司名称或代码。
+        metrics: 标准财务指标名称。
+        years: 财年列表，查询最新值时可为空。
+        operation: 查询操作。
+        top_k: 最大返回条数，最多 20。
+    """
+    return await fetch_financial_fact(
+        question,
+        companies,
+        metrics,
+        years=years,
+        operation=operation,
+        top_k=top_k,
+    )
+
+
 register_tool(
     ToolSpec(
         tool_id="knowledge.faq.search",
         name="search_faq_knowledge_tool",
-        description="检索已分域的稳定金融 FAQ 和企业财务制度模板",
+        description="检索本地分域金融 FAQ 与企业财务制度模板",
         risk_level="low",
         read_only=True,
     ),
@@ -137,7 +173,10 @@ register_tool(
     ToolSpec(
         tool_id="knowledge.pdf.catalog",
         name="catalog_pdf_knowledge_tool",
-        description="查询通过质量准入的本地 PDF 文档目录",
+        description=(
+            "仅查询已收录且通过质量准入的本地 PDF 目录；零命中表示本地无文档，"
+            "应切换其它来源"
+        ),
         risk_level="low",
         read_only=True,
     ),
@@ -147,16 +186,34 @@ register_tool(
     ToolSpec(
         tool_id="knowledge.pdf.search",
         name="search_pdf_knowledge_tool",
-        description="检索通过质量准入的本地 PDF 原文证据",
+        description=(
+            "仅检索本轮 PDF 目录返回的 doc_ids 对应原文；不是开放文档搜索，"
+            "零命中后应切换其它来源"
+        ),
         risk_level="low",
         read_only=True,
     ),
     langchain_tool=search_pdf_knowledge_tool,
 )
+register_tool(
+    ToolSpec(
+        tool_id="knowledge.fact.lookup",
+        name="lookup_knowledge_fact",
+        description=(
+            "仅按白名单形状窄查本地已入库财务事实：单公司单指标跨年，或同年"
+            "多公司单指标；不生成任意 SQL，复杂请求须拆分，未入库后切换来源"
+        ),
+        risk_level="low",
+        read_only=True,
+        timeout_seconds=5.0,
+    ),
+    langchain_tool=lookup_knowledge_fact,
+)
 
 
 __all__ = [
     "catalog_pdf_knowledge_tool",
+    "lookup_knowledge_fact",
     "search_faq_knowledge_tool",
     "search_pdf_knowledge_tool",
 ]

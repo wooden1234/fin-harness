@@ -10,7 +10,7 @@ export interface HotBoardPanel {
 
 export interface HotBoardResponse {
   as_of: string
-  source: 'web' | 'fallback'
+  source: 'web' | 'fallback' | 'stale'
   panels: HotBoardPanel[]
 }
 

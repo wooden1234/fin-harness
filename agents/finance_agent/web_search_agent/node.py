@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any, NotRequired
-from typing_extensions import TypedDict
-
-import httpx
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 
@@ -15,24 +11,14 @@ from agents.finance_agent.web_search_agent.prompts import (
     WEB_SEARCH_NO_RESULT_ANSWER,
 )
 from agents.states import Citation, FinAgentState
-from app.core.config import settings
 from app.core.logger import get_logger
+from tools.web_search import (
+    WebSearchResponse,
+    WebSearchResult,
+    fetch_web_search,
+)
 
 logger = get_logger(service="web_search_agent")
-
-
-class WebSearchResult(TypedDict):
-    title: NotRequired[str]
-    url: NotRequired[str]
-    content: NotRequired[str]
-    published_date: NotRequired[str]
-    score: NotRequired[float]
-
-
-class WebSearchResponse(TypedDict):
-    answer: str
-    results: list[WebSearchResult]
-    configured: bool
 
 
 def _latest_user_query(messages: list) -> str:
@@ -99,54 +85,9 @@ def _fallback_answer_from_results(results: list[WebSearchResult]) -> str:
     return "\n".join(parts)
 
 
-async def _search_tavily(query: str) -> WebSearchResponse:
-    if not settings.TAVILY_API_KEY:
-        return {
-            "answer": WEB_SEARCH_NO_CONFIG_ANSWER,
-            "results": [],
-            "configured": False,
-        }
-
-    max_results = max(1, min(settings.WEB_SEARCH_MAX_RESULTS, 10))
-    payload: dict[str, Any] = {
-        "api_key": settings.TAVILY_API_KEY,
-        "query": query,
-        "search_depth": "basic",
-        "max_results": max_results,
-        "include_answer": True,
-        "include_raw_content": False,
-    }
-
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        response = await client.post(settings.TAVILY_SEARCH_URL, json=payload)
-        response.raise_for_status()
-        data = response.json()
-
-    results = [
-        WebSearchResult(
-            title=str(item.get("title") or ""),
-            url=str(item.get("url") or ""),
-            content=str(item.get("content") or ""),
-            published_date=str(item.get("published_date") or ""),
-            score=float(item.get("score") or 0),
-        )
-        for item in list(data.get("results") or [])
-        if isinstance(item, dict)
-    ]
-    answer = str(data.get("answer") or "").strip()
-    return {"answer": answer, "results": results, "configured": True}
-
-
 async def search_web(query: str) -> WebSearchResponse:
-    provider = settings.WEB_SEARCH_PROVIDER.lower()
-    if provider != "tavily":
-        logger.warning("unsupported web search provider={}", settings.WEB_SEARCH_PROVIDER)
-        return {
-            "answer": WEB_SEARCH_NO_CONFIG_ANSWER,
-            "results": [],
-            "configured": False,
-        }
-    return await _search_tavily(query)
+    """兼容旧调用方；实际检索由 tools.web_search 完成（默认白名单）。"""
+    return await fetch_web_search(query, scope="allowlist")
 
 
 def _is_chain_fallback(state: FinAgentState) -> bool:
@@ -209,7 +150,9 @@ async def web_search_agent(
         }
 
     citations = _to_citations(search_response["results"], sub_task_id=sub_task_id)
-    if search_response["answer"]:
+    if not search_response.get("configured", True):
+        answer = WEB_SEARCH_NO_CONFIG_ANSWER
+    elif search_response["answer"]:
         answer = search_response["answer"]
     elif citations:
         answer = _fallback_answer_from_results(search_response["results"])

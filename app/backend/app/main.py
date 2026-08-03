@@ -12,6 +12,7 @@ from fastapi import FastAPI, Response, status
 
 from agents.checkpoint import close_checkpoint, init_checkpoint
 from agents.orchestrator.agent_registry import list_agent_specs
+from agents.orchestrator.graph import reset_orchestrator_graph_cache
 from app.services.memory.memory_store import close_memory_store, init_memory_store
 from app.services.memory.memory_catalog import validate_memory_configuration
 from app.api import api_router
@@ -28,6 +29,7 @@ logger = get_logger(service="main")
 async def lifespan(app: FastAPI):
     logger.info("fin-agent-platform 启动中")
     logger.info(f"环境: {settings.APP_ENV}")
+    reset_orchestrator_graph_cache()
     validate_memory_configuration(list_agent_specs())
     try:
         await init_checkpoint()
@@ -38,6 +40,7 @@ async def lifespan(app: FastAPI):
         await close_redis()
         await close_checkpoint()
         await close_memory_store()
+        reset_orchestrator_graph_cache()
         logger.info("fin-agent-platform 正在关闭")
 
 

@@ -2,8 +2,18 @@
 
 from __future__ import annotations
 
-# 用户可见的三类关键步骤（其余内部节点一律不展示）
+import hashlib
+from collections.abc import Mapping
+
+from agents.main_deep_agent.state import normalize_agent_todos
+
+# 用户可见的关键步骤（内部模型推理过程一律不展示）
 PUBLIC_STEPS: dict[str, dict[str, str]] = {
+    "problem_analysis": {
+        "label_running": "正在分析问题并选择资料",
+        "label_done": "已完成问题分析",
+        "short": "问题分析",
+    },
     "data_query": {
         "label_running": "正在查询数据表",
         "label_done": "已查询数据表",
@@ -24,16 +34,24 @@ PUBLIC_STEPS: dict[str, dict[str, str]] = {
         "label_done": "已生成答案",
         "short": "生成答案",
     },
+    "evidence_validation": {
+        "label_running": "正在验证证据与结论",
+        "label_done": "已完成证据验证",
+        "short": "证据验证",
+    },
 }
 
 # 内部节点 → 用户可见步骤（未映射的节点不推送 SSE）
 NODE_TO_PUBLIC_STEP: dict[str, str] = {
+    "main_deep_agent": "problem_analysis",
+    "evidence_quality_gate": "evidence_validation",
     "financial_query_agent": "data_query",
     "faq_agent": "knowledge_base",
     "pdf_agent": "knowledge_base",
     "web_search_agent": "web_search",
     "summarize": "generating_answer",
     "general_agent": "generating_answer",
+    "final_answer": "generating_answer",
 }
 
 VISIBLE_TASK_NODES = frozenset(NODE_TO_PUBLIC_STEP.keys())
@@ -85,3 +103,40 @@ def build_public_step_event(step_key: str, status: str) -> dict | None:
         category=step_key,
         short_label=short_label_for_public_step(step_key),
     )
+
+
+def extract_agent_todos_snapshot(
+    value: object,
+    *,
+    depth: int = 0,
+) -> list[dict[str, str]] | None:
+    """从 Main DeepAgent 子图 update 或最终 Journal 中提取 todo 全量快照。"""
+    if depth > 6 or not isinstance(value, Mapping):
+        return None
+    for key in ("todos", "agent_todos"):
+        if key in value:
+            return normalize_agent_todos(value.get(key))
+    for nested in value.values():
+        snapshot = extract_agent_todos_snapshot(nested, depth=depth + 1)
+        if snapshot is not None:
+            return snapshot
+    return None
+
+
+def build_todo_snapshot_event(raw_todos: object) -> dict:
+    """构造全量替换事件，稳定 ID 不暴露 todo 原文。"""
+    todos = normalize_agent_todos(raw_todos)
+    occurrences: dict[str, int] = {}
+    payload: list[dict[str, str]] = []
+    for todo in todos:
+        content = todo["content"]
+        occurrences[content] = occurrences.get(content, 0) + 1
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
+        payload.append(
+            {
+                "id": f"main-todo-{digest}-{occurrences[content]}",
+                "content": content,
+                "status": todo["status"],
+            }
+        )
+    return {"type": "todo_snapshot", "todos": payload}

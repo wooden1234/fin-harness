@@ -33,6 +33,9 @@ _DEFAULT_USER_READ_ONLY_TOOLS = (
     "knowledge.faq.search",
     "knowledge.pdf.catalog",
     "knowledge.pdf.search",
+    "knowledge.fact.lookup",
+    "web.search",
+    "calculation.run",
 )
 
 

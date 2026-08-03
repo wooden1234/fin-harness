@@ -6,15 +6,18 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from datetime import timezone
+from pathlib import Path
+import re
 import secrets
 from typing import Any
 from urllib.parse import urljoin
 
 import httpx
-from langchain_core.tools import tool
+from langchain_core.tools import BaseTool, tool
 
 from app.core.cache import (
     cache_get,
@@ -22,14 +25,58 @@ from app.core.cache import (
     make_record,
     normalize_cache_text,
 )
-from app.core.config import settings
+from app.core.config import PROJECT_ROOT, settings
 from app.core.redis_keys import redis_keys
 from skills.runners.iwencai import installed_skill_version, run_installed_skill
-from tools.base import ToolSpec
-from tools.registry import register_tool
+from tools.core.base import ToolSpec
+from tools.core.registry import register_tool
 
 _LEGACY_SKILL_ID = "legacy-query2data"
 _LEGACY_SKILL_VERSION = "1.0.0"
+_SKILL_DESCRIPTION_RE = re.compile(
+    r"^description:\s*[\"']?(.+?)[\"']?\s*$",
+    re.MULTILINE,
+)
+
+
+def _iwencai_skill_root() -> Path:
+    configured = Path(settings.IWENCAI_SKILL_ROOT)
+    if not configured.is_absolute():
+        configured = PROJECT_ROOT / configured
+    return configured.resolve()
+
+
+def skill_description(skill_id: str, *, fallback: str = "") -> str:
+    """读取官方 Skill frontmatter 的 description；缺失时回退 fallback。"""
+    path = _iwencai_skill_root() / skill_id / "SKILL.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return fallback
+    if not text.startswith("---"):
+        return fallback
+    end = text.find("\n---", 3)
+    if end < 0:
+        return fallback
+    frontmatter = text[3:end]
+    match = _SKILL_DESCRIPTION_RE.search(frontmatter)
+    if not match:
+        return fallback
+    description = match.group(1).strip()
+    return description or fallback
+
+
+def _apply_skill_description(
+    langchain_tool: BaseTool,
+    skill_id: str,
+    *,
+    fallback: str,
+) -> str:
+    """把官方技能描述赋给 LangChain Tool（模型可见）。"""
+    description = skill_description(skill_id, fallback=fallback)
+    langchain_tool.description = description
+    return description
+
 _IWENCAI_DOMAIN = "iwencai"
 _IWENCAI_DATA_TYPE = "iwencai_result"
 _MARKET_SKILLS = frozenset(
@@ -333,6 +380,134 @@ async def query_iwencai(query: str, page: int = 1, limit: int = 10) -> dict[str,
     return await fetch_iwencai(query, page=page, limit=limit)
 
 
+_MIN_COMPARE_ENTITIES = 2
+_MAX_COMPARE_ENTITIES = 6
+_CURRENCY_HINTS: tuple[tuple[str, str], ...] = (
+    ("港元", "HKD"),
+    ("HKD", "HKD"),
+    ("美元", "USD"),
+    ("USD", "USD"),
+    ("US$", "USD"),
+    ("人民币", "CNY"),
+    ("CNY", "CNY"),
+    ("RMB", "CNY"),
+)
+_FISCAL_HINT_RE = re.compile(r"(?:FY\s*)?(20\d{2})(?:\s*年)?(?:\s*Q([1-4]))?", re.I)
+
+
+def _detect_currency_hint(text: str) -> str:
+    """从原始问财返回文本里粗粒度识别币种，供多实体对比时提示口径差异。"""
+    for marker, currency in _CURRENCY_HINTS:
+        if marker in text:
+            return currency
+    return ""
+
+
+def _detect_fiscal_hints(text: str, *, limit: int = 3) -> list[str]:
+    """粗粒度提取财年/财季标签，仅用于口径差异提示，不作为精确事实。"""
+    hints: list[str] = []
+    for match in _FISCAL_HINT_RE.finditer(text):
+        year, quarter = match.group(1), match.group(2)
+        label = f"FY{year} Q{quarter}" if quarter else f"FY{year}"
+        if label not in hints:
+            hints.append(label)
+        if len(hints) >= limit:
+            break
+    return hints
+
+
+async def compare_entities_iwencai(
+    entities: list[str],
+    query: str,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """并发查询多个实体的同一指标，避免逐个改写重复调用浪费配额。
+
+    对每个实体拼出「实体 + 查询语句」独立请求问财，合并为按实体归集的结果，
+    并对返回文本做币种/财年粗粒度扫描，标记是否存在多币种或多财年口径。
+    """
+    entities = [str(item).strip() for item in entities if str(item).strip()]
+    if len(entities) < _MIN_COMPARE_ENTITIES:
+        raise ValueError("compare_entities_requires_at_least_two_entities")
+    if len(entities) > _MAX_COMPARE_ENTITIES:
+        raise ValueError(f"compare_entities_supports_up_to_{_MAX_COMPARE_ENTITIES}")
+    if not query.strip():
+        raise ValueError("query_must_not_be_empty")
+
+    per_entity_queries = {entity: f"{entity} {query}".strip() for entity in entities}
+    results = await asyncio.gather(
+        *(fetch_iwencai(text, limit=limit) for text in per_entity_queries.values()),
+        return_exceptions=True,
+    )
+
+    per_entity: dict[str, Any] = {}
+    per_entity_currency: dict[str, str] = {}
+    per_entity_periods: dict[str, list[str]] = {}
+    failed_entities: list[str] = []
+    currencies: list[str] = []
+    periods: list[str] = []
+    for entity, result in zip(per_entity_queries.keys(), results, strict=True):
+        if isinstance(result, BaseException) or not isinstance(result, dict) or not result.get("ok"):
+            failed_entities.append(entity)
+            continue
+        data = result.get("data")
+        per_entity[entity] = data
+        haystack = str(data)
+        currency = _detect_currency_hint(haystack)
+        if currency:
+            per_entity_currency[entity] = currency
+            if currency not in currencies:
+                currencies.append(currency)
+        entity_periods = _detect_fiscal_hints(haystack)
+        if entity_periods:
+            per_entity_periods[entity] = entity_periods
+        for period in entity_periods:
+            if period not in periods:
+                periods.append(period)
+
+    if not per_entity:
+        return {
+            "ok": False,
+            "error": "compare_entities_all_failed",
+            "failed_entities": failed_entities,
+        }
+    return {
+        "ok": True,
+        "provider": "iwencai",
+        "query": query,
+        "entities": list(per_entity.keys()),
+        "failed_entities": failed_entities,
+        "per_entity": per_entity,
+        "per_entity_currency": per_entity_currency,
+        "per_entity_periods": per_entity_periods,
+        "calibre": {
+            "currencies": currencies,
+            "multi_currency": len(currencies) > 1,
+            "periods": periods,
+            "multi_period": len(periods) > 1,
+        },
+    }
+
+
+@tool(parse_docstring=True)
+async def compare_entities_with_iwencai(
+    entities: list[str],
+    query: str,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """并发查询多个公司/指数的同一财务或行情指标，用于财报或同业对比。
+
+    比逐个调用 query_iwencai 更省配额，且会在返回中标注 calibre.multi_currency
+    / calibre.multi_period，提示是否存在币种或财年口径差异。
+
+    Args:
+        entities: 2-6 个待对比实体名称，如 ["腾讯", "阿里巴巴"]。
+        query: 对每个实体都适用的指标查询语句，如「近两个完整财年营业收入 归母净利润 销售毛利率」。
+        limit: 每个实体查询的返回条数上限。
+    """
+    return await compare_entities_iwencai(entities, query, limit=limit)
+
+
 @tool(parse_docstring=True)
 async def screen_iwencai(
     query: str,
@@ -519,89 +694,90 @@ register_tool(
     handler=query_iwencai.ainvoke,
 )
 
-for _tool_spec, _langchain_tool in (
+register_tool(
+    ToolSpec(
+        tool_id="iwencai.compare_entities",
+        name="compare_entities_with_iwencai",
+        description="并发查询多个公司/指数的同一指标并标注币种/财年口径差异，用于财报或同业对比",
+        risk_level="low",
+        read_only=True,
+        timeout_seconds=45.0,
+    ),
+    langchain_tool=compare_entities_with_iwencai,
+    handler=compare_entities_with_iwencai.ainvoke,
+)
+
+for _tool_id, _skill_id, _fallback, _langchain_tool in (
     (
-        ToolSpec(
-            tool_id="iwencai.market.query",
-            name="query_iwencai_market",
-            description="查询股票、ETF 和实时行情数据",
-            risk_level="low",
-            read_only=True,
-        ),
+        "iwencai.market.query",
+        "hithink-market-query",
+        "查询股票、ETF 和实时行情数据",
         query_iwencai_market,
     ),
     (
-        ToolSpec(
-            tool_id="iwencai.industry.query",
-            name="query_iwencai_industry",
-            description="查询行业估值、财务、盈利、行情和板块排名",
-            risk_level="low",
-            read_only=True,
-        ),
+        "iwencai.industry.query",
+        "hithink-industry-query",
+        "查询行业估值、财务、盈利、行情和板块排名",
         query_iwencai_industry,
     ),
     (
-        ToolSpec(
-            tool_id="iwencai.index.query",
-            name="query_iwencai_index",
-            description="查询主要指数行情和指标",
-            risk_level="low",
-            read_only=True,
-        ),
+        "iwencai.index.query",
+        "hithink-zhishu-query",
+        "查询主要指数行情和指标",
         query_iwencai_index,
     ),
     (
-        ToolSpec(
-            tool_id="iwencai.rating.query",
-            name="query_iwencai_rating",
-            description="查询研报评级、业绩预测和机构研究数据",
-            risk_level="low",
-            read_only=True,
-        ),
+        "iwencai.rating.query",
+        "hithink-insresearch-query",
+        "查询研报评级、业绩预测和机构研究数据",
         query_iwencai_rating,
     ),
     (
-        ToolSpec(
-            tool_id="iwencai.announcement.search",
-            name="search_iwencai_announcement",
-            description="搜索上市公司公告和重大事件",
-            risk_level="low",
-            read_only=True,
-        ),
+        "iwencai.announcement.search",
+        "announcement-search",
+        "搜索上市公司公告和重大事件",
         search_iwencai_announcement,
     ),
     (
-        ToolSpec(
-            tool_id="iwencai.report.search",
-            name="search_iwencai_report",
-            description="搜索券商研报和机构研究报告",
-            risk_level="low",
-            read_only=True,
-        ),
+        "iwencai.report.search",
+        "report-search",
+        "搜索券商研报和机构研究报告",
         search_iwencai_report,
     ),
     (
-        ToolSpec(
-            tool_id="iwencai.fund.screen",
-            name="screen_iwencai_fund",
-            description="筛选公募基金及其基金经理、业绩和持仓",
-            risk_level="low",
-            read_only=True,
-        ),
+        "iwencai.fund.screen",
+        "hithink-fund-selector",
+        "筛选公募基金及其基金经理、业绩和持仓",
         screen_iwencai_fund,
     ),
 ):
+    _description = _apply_skill_description(
+        _langchain_tool,
+        _skill_id,
+        fallback=_fallback,
+    )
     register_tool(
-        _tool_spec,
+        ToolSpec(
+            tool_id=_tool_id,
+            name=_langchain_tool.name,
+            description=_description,
+            risk_level="low",
+            read_only=True,
+        ),
         langchain_tool=_langchain_tool,
         handler=_langchain_tool.ainvoke,
     )
 
+_screen_description = _apply_skill_description(
+    screen_iwencai,
+    "hithink-astock-selector",
+    fallback="通过官方问财 Skill 筛选 A 股并返回结构化候选结果",
+)
 register_tool(
     ToolSpec(
         tool_id="iwencai.screen",
         name="screen_iwencai",
-        description="通过官方问财 Skill 筛选 A 股并返回结构化候选结果",
+        description=_screen_description,
         risk_level="low",
         read_only=True,
         timeout_seconds=settings.IWENCAI_SKILL_RUNNER_TIMEOUT_SEC,
@@ -622,4 +798,5 @@ __all__ = [
     "screen_iwencai_fund",
     "search_iwencai_announcement",
     "search_iwencai_report",
+    "skill_description",
 ]

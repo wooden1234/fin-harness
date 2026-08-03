@@ -13,6 +13,7 @@ from langgraph.types import Overwrite, Send
 
 from agents.context_compressor import compress_context
 from agents.final_answer import final_answer_node
+from agents.general_agent import general_agent
 from agents.guardrails import guardrails_edge, guardrails_node
 from agents.init_turn import init_turn_node
 from agents.memory_recall import (
@@ -20,7 +21,16 @@ from agents.memory_recall import (
     memory_action_edge,
     memory_action_node,
     memory_plan_node,
+    memory_recall_node,
+    post_turn_memory_node,
 )
+from agents.main_deep_agent import main_deep_agent_node, main_evidence_quality_gate
+from agents.orchestrator.execution_lane import (
+    classify_execution_lane_node,
+    route_after_execution_lane,
+    route_after_rule_lane,
+)
+from agents.orchestrator.execution_lane_resolver import resolve_execution_lane_node
 from agents.orchestrator.agent_registry import get_agent_spec, invoke_agent
 from agents.orchestrator.analyzer import analyze_request, heuristic_profile, latest_query
 from agents.orchestrator.contracts import (
@@ -1127,7 +1137,7 @@ async def clarify(
 
 
 def build_orchestrator_graph() -> StateGraph:
-    """构建 Root Orchestrator 图。"""
+    """构建两档 Root Graph：普通 general_agent / 金融 Main DeepAgent。"""
     builder = StateGraph(
         OrchestratorState,
         input_schema=FinAgentInput,
@@ -1136,22 +1146,15 @@ def build_orchestrator_graph() -> StateGraph:
     builder.add_node("init_turn", init_turn_node)
     builder.add_node("guardrails", guardrails_node)
     builder.add_node("memory_action", memory_action_node)
+    builder.add_node("memory_recall", memory_recall_node)
+    builder.add_node("classify_execution_lane", classify_execution_lane_node)
+    builder.add_node("resolve_execution_lane", resolve_execution_lane_node)
     builder.add_node("context_compressor", compress_context)
-    builder.add_node("query_rewrite", query_rewrite_node)
-    builder.add_node("analyze_request", analyze_request)
-    builder.add_node("build_plan", build_plan)
-    builder.add_node("memory_plan", memory_plan_node)
-    builder.add_node("load_task_memories", load_task_memories_node)
-    builder.add_node("prepare_wave", prepare_wave)
-    builder.add_node("execute_task", execute_task)
-    builder.add_node("wave_join", lambda state: {"steps": ["orchestrator:wave_join"]})
-    builder.add_node("evaluate_results", evaluate_results)
-    builder.add_node("map_claim_evidence", map_claim_evidence)
-    builder.add_node("quality_gate", quality_gate)
-    builder.add_node("replan", replan)
-    builder.add_node("synthesize", synthesize)
-    builder.add_node("clarify", clarify)
+    builder.add_node("general_agent", general_agent)
+    builder.add_node("main_deep_agent", main_deep_agent_node)
+    builder.add_node("evidence_quality_gate", main_evidence_quality_gate)
     builder.add_node("final_answer", final_answer_node)
+    builder.add_node("post_turn_memory", post_turn_memory_node)
 
     builder.add_edge(START, "init_turn")
     builder.add_edge("init_turn", "guardrails")
@@ -1163,70 +1166,39 @@ def build_orchestrator_graph() -> StateGraph:
     builder.add_conditional_edges(
         "memory_action",
         memory_action_edge,
-        {"continue": "context_compressor", "final_answer": "final_answer"},
+        {
+            "continue": "memory_recall",
+            "final_answer": "final_answer",
+        },
     )
+    builder.add_edge("memory_recall", "classify_execution_lane")
+    builder.add_conditional_edges(
+        "classify_execution_lane",
+        route_after_rule_lane,
+        {
+            "resolved": "context_compressor",
+            "uncertain": "resolve_execution_lane",
+        },
+    )
+    builder.add_edge("resolve_execution_lane", "context_compressor")
     builder.add_conditional_edges(
         "context_compressor",
         lambda state: (
             "final_answer"
             if bool(state.get("context_admission_rejected"))
-            else "query_rewrite"
+            else route_after_execution_lane(state)
         ),
         {
-            "query_rewrite": "query_rewrite",
+            "general": "general_agent",
+            "deep": "main_deep_agent",
             "final_answer": "final_answer",
         },
     )
-    builder.add_conditional_edges(
-        "query_rewrite",
-        route_after_query_rewrite,
-        {
-            "analyze_request": "analyze_request",
-            "clarify": "clarify",
-        },
-    )
-    builder.add_conditional_edges(
-        "analyze_request",
-        route_after_analyze_request,
-        {
-            "build_plan": "build_plan",
-            "clarify": "clarify",
-        },
-    )
-    builder.add_edge("build_plan", "memory_plan")
-    builder.add_edge("memory_plan", "load_task_memories")
-    builder.add_edge("load_task_memories", "prepare_wave")
-    builder.add_conditional_edges("prepare_wave", dispatch_wave)
-    builder.add_edge("execute_task", "wave_join")
-    builder.add_conditional_edges(
-        "wave_join",
-        wave_join_ready,
-        {"evaluate_results": "evaluate_results", END: END},
-    )
-    builder.add_conditional_edges(
-        "evaluate_results",
-        route_after_evaluation,
-        {
-            "schedule": "prepare_wave",
-            "quality_gate": "map_claim_evidence",
-            "clarify": "clarify",
-            "synthesize": "synthesize",
-        },
-    )
-    builder.add_edge("map_claim_evidence", "quality_gate")
-    builder.add_conditional_edges(
-        "quality_gate",
-        route_after_quality_gate,
-        {"replan": "replan", "synthesize": "synthesize"},
-    )
-    builder.add_conditional_edges(
-        "replan",
-        route_after_replan,
-        {"memory_plan": "memory_plan", "synthesize": "synthesize"},
-    )
-    builder.add_edge("synthesize", "final_answer")
-    builder.add_edge("clarify", "final_answer")
-    builder.add_edge("final_answer", END)
+    builder.add_edge("general_agent", "final_answer")
+    builder.add_edge("main_deep_agent", "evidence_quality_gate")
+    builder.add_edge("evidence_quality_gate", "final_answer")
+    builder.add_edge("final_answer", "post_turn_memory")
+    builder.add_edge("post_turn_memory", END)
     return builder
 
 
@@ -1236,6 +1208,7 @@ __all__ = [
     "get_orchestrator_graph",
     "reset_orchestrator_graph_cache",
     "route_after_analyze_request",
+    "route_after_execution_lane",
     "route_after_query_rewrite",
 ]
 

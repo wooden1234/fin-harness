@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type { AgentRoute, Citation, Conversation } from '@/types/api'
-import type { AgentStep, AgentStepStatus } from '@/types/agentSteps'
+import type { AgentStep, AgentStepStatus, AgentTodo } from '@/types/agentSteps'
 
 export interface Message {
   id: string
@@ -10,6 +10,7 @@ export interface Message {
   route?: AgentRoute
   interrupted?: boolean
   agentSteps?: AgentStep[]
+  agentTodos?: AgentTodo[]
   timestamp: number
 }
 
@@ -19,6 +20,7 @@ interface ChatState {
   messages: Message[]
   isGenerating: boolean
   agentSteps: AgentStep[]
+  agentTodos: AgentTodo[]
   hitlPending: boolean
   hitlMessage: string | null
   sourcesOpen: boolean
@@ -31,6 +33,8 @@ interface ChatState {
   updateMessage: (id: string, patch: Partial<Message>) => void
   setGenerating: (value: boolean) => void
   resetAgentSteps: () => void
+  setAgentTodos: (todos: AgentTodo[]) => void
+  resetAgentTodos: () => void
   upsertAgentStep: (step: {
     id: string
     label: string
@@ -51,6 +55,7 @@ export const useChatStore = create<ChatState>((set) => ({
   messages: [],
   isGenerating: false,
   agentSteps: [],
+  agentTodos: [],
   hitlPending: false,
   hitlMessage: null,
   sourcesOpen: false,
@@ -67,6 +72,8 @@ export const useChatStore = create<ChatState>((set) => ({
     })),
   setGenerating: (value) => set({ isGenerating: value }),
   resetAgentSteps: () => set({ agentSteps: [] }),
+  setAgentTodos: (agentTodos) => set({ agentTodos }),
+  resetAgentTodos: () => set({ agentTodos: [] }),
   upsertAgentStep: (step) =>
     set((state) => {
       const existingIndex = state.agentSteps.findIndex((item) => item.id === step.id)
@@ -101,6 +108,7 @@ export const useChatStore = create<ChatState>((set) => ({
       activeConversationId: null,
       isGenerating: false,
       agentSteps: [],
+      agentTodos: [],
       hitlPending: false,
       hitlMessage: null,
       sourcesOpen: false,

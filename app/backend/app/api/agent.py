@@ -14,6 +14,8 @@ from agents.runtime_context import AgentRuntimeContext
 from app.api.agent_progress import (
     VISIBLE_TASK_NODES,
     build_public_step_event,
+    build_todo_snapshot_event,
+    extract_agent_todos_snapshot,
     map_node_to_public_step,
 )
 from app.core.config import settings
@@ -192,8 +194,7 @@ async def agent_query(
         conversation_id=conversation_key,
         run_id=run_id,
         deadline_seconds=(
-            settings.AGENT_V2_COMPOUND_HARD_DEADLINE_SEC
-            + settings.AGENT_V2_FINALIZATION_GRACE_SEC
+            settings.MAIN_AGENT_API_DEADLINE_SEC
         ),
         max_concurrency=settings.AGENT_V2_MAX_CONCURRENCY,
     )
@@ -203,6 +204,8 @@ async def agent_query(
         assistant_full_response = ""
         assistant_message_id: int | None = None
         generating_answer_active = False
+        emitted_main_tool_steps: set[str] = set()
+        last_main_todo_snapshot: tuple[tuple[str, str], ...] | None = None
         try:
             if conversation_pk is not None:
                 await CheckpointRebuildService.rebuild_if_missing(
@@ -218,7 +221,7 @@ async def agent_query(
                     input_payload,
                     config=thread_config,
                     context=runtime_context,
-                    stream_mode=["messages", "tasks", "updates"],
+                    stream_mode=["messages", "tasks", "updates", "custom"],
                     subgraphs=True,
                 ),
                 runtime_context.remaining_seconds(),
@@ -227,6 +230,49 @@ async def agent_query(
                     continue
                 namespace, mode, data = chunk
                 ns_tuple = namespace if isinstance(namespace, tuple) else ()
+
+                if mode == "custom" and isinstance(data, dict):
+                    if data.get("kind") == "main_finalization":
+                        yield _sse({
+                            "type": "step",
+                            "id": "main-finalization",
+                            "label": "资料覆盖完成，正在整理答案",
+                            "status": "running",
+                            "category": "answer",
+                            "short_label": "整理答案",
+                        })
+                        continue
+                    if data.get("kind") != "main_tool_progress":
+                        continue
+                    step_id = str(data.get("step_id") or "")
+                    if not step_id:
+                        continue
+                    family = str(data.get("source_family") or "tool")
+                    labels = {
+                        "weather": "天气数据",
+                        "market": "市场数据",
+                        "web": "联网搜索",
+                        "research": "研报与公告",
+                        "financial": "财务数据",
+                        "knowledge": "知识库",
+                        "calculation": "受限计算",
+                    }
+                    status = str(data.get("status") or "running")
+                    if status in {"done", "error"}:
+                        emitted_main_tool_steps.add(step_id)
+                    yield _sse({
+                        "type": "step",
+                        "id": step_id,
+                        "label": (
+                            f"正在查询{labels.get(family, '资料')}"
+                            if status == "running"
+                            else f"已完成{labels.get(family, '资料查询')}"
+                        ),
+                        "status": status,
+                        "category": family,
+                        "short_label": labels.get(family, "工具"),
+                    })
+                    continue
 
                 if mode == "tasks" and isinstance(data, dict):
                     node_name = data.get("name")
@@ -264,6 +310,50 @@ async def agent_query(
                             yield _sse(event)
                     continue
 
+                if mode == "updates" and isinstance(data, dict):
+                    in_main_deep_agent = any(
+                        str(part).split(":", 1)[0] == "main_deep_agent"
+                        for part in ns_tuple
+                    ) or "main_deep_agent" in data
+                    if in_main_deep_agent:
+                        todo_snapshot = extract_agent_todos_snapshot(data)
+                        if todo_snapshot is not None:
+                            fingerprint = tuple(
+                                (item["content"], item["status"])
+                                for item in todo_snapshot
+                            )
+                            if fingerprint != last_main_todo_snapshot:
+                                last_main_todo_snapshot = fingerprint
+                                yield _sse(build_todo_snapshot_event(todo_snapshot))
+                    main_update = data.get("main_deep_agent")
+                    if isinstance(main_update, dict):
+                        journal = main_update.get("main_agent_journal") or {}
+                        for index, entry in enumerate(journal.get("entries") or [], start=1):
+                            tool_id = str(entry.get("tool_id") or "tool")
+                            step_id = f"main-tool-{index}-{tool_id}"
+                            if step_id in emitted_main_tool_steps:
+                                continue
+                            emitted_main_tool_steps.add(step_id)
+                            family = str(entry.get("source_family") or "tool")
+                            labels = {
+                                "weather": "天气数据",
+                                "market": "市场数据",
+                                "web": "联网搜索",
+                                "research": "研报与公告",
+                                "financial": "财务数据",
+                                "knowledge": "知识库",
+                                "calculation": "受限计算",
+                            }
+                            yield _sse({
+                                "type": "step",
+                                "id": step_id,
+                                "label": f"已完成{labels.get(family, '资料查询')}",
+                                "status": "done" if entry.get("status") == "completed" else "error",
+                                "category": family,
+                                "short_label": labels.get(family, "工具"),
+                            })
+                    continue
+
                 if mode != "messages":
                     continue
 
@@ -294,6 +384,17 @@ async def agent_query(
 
             state = await graph.aget_state(thread_config)
             values = (state.values if state else {}) or {}
+            final_todos = extract_agent_todos_snapshot(
+                values.get("main_agent_journal") or {}
+            )
+            if final_todos is not None:
+                final_fingerprint = tuple(
+                    (item["content"], item["status"])
+                    for item in final_todos
+                )
+                if final_fingerprint != last_main_todo_snapshot:
+                    last_main_todo_snapshot = final_fingerprint
+                    yield _sse(build_todo_snapshot_event(final_todos))
             checkpoint_id = None
             if state is not None:
                 checkpoint_id = (state.config or {}).get("configurable", {}).get("checkpoint_id")
@@ -303,9 +404,48 @@ async def agent_query(
                 summary_snapshot={
                     "content": _extract_final_response(values),
                     "citations": values.get("citations") or [],
-                    "route": values.get("route"),
+                    "route": values.get("execution_mode") or values.get("route"),
+                    "execution_mode": values.get("execution_mode"),
                     "execution_status": values.get("execution_status"),
                     "budget_tier": runtime_context.budget_tier,
+                    "model_rounds": (values.get("main_agent_journal") or {}).get("model_rounds", 0),
+                    "tool_calls": len((values.get("main_agent_journal") or {}).get("entries", [])),
+                    "source_families": (values.get("main_agent_journal") or {}).get("source_families", []),
+                    "evidence_count": len(values.get("evidence") or []),
+                    "statement_coverage": getattr(values.get("quality_report"), "claim_coverage", 0.0),
+                    **dict(values.get("main_quality_metrics") or {}),
+                    "finalization_started_at": (values.get("main_agent_journal") or {}).get("finalization_started_at"),
+                    "tool_budget_exhausted": sum(
+                        1
+                        for entry in (values.get("main_agent_journal") or {}).get("entries", [])
+                        if "budget_exhausted" in str(entry.get("error") or "")
+                    ),
+                    "insufficient_tool_result": sum(
+                        1
+                        for entry in (values.get("main_agent_journal") or {}).get("entries", [])
+                        if entry.get("error") == "insufficient_tool_result"
+                    ),
+                    "salvaged": (
+                        values.get("execution_mode") == "partial"
+                        and bool(values.get("evidence"))
+                        and (
+                            "timeout" in str((values.get("main_agent_journal") or {}).get("agent_status") or "")
+                            or bool((values.get("main_agent_journal") or {}).get("soft_deadline_reached"))
+                        )
+                    ),
+                    "salvage_eligible": (
+                        "timeout" in str((values.get("main_agent_journal") or {}).get("agent_status") or "")
+                        or bool((values.get("main_agent_journal") or {}).get("soft_deadline_reached"))
+                    ) and bool(values.get("evidence")),
+                    "timed_out": (
+                        "timeout" in str((values.get("main_agent_journal") or {}).get("agent_status") or "")
+                        or bool((values.get("main_agent_journal") or {}).get("soft_deadline_reached"))
+                    ),
+                    "unauthorized_tool_attempts": sum(
+                        1
+                        for entry in (values.get("main_agent_journal") or {}).get("entries", [])
+                        if entry.get("error") == "tool_not_authorized"
+                    ),
                     "duration_ms": round(
                         (time.monotonic() - runtime_context.started_monotonic)
                         * 1000,
@@ -489,7 +629,7 @@ async def agent_query(
                 "persistence_status": persistence_status,
                 "content": final_response,
                 "citations": citations,
-                "route": values.get("route"),
+                "route": values.get("execution_mode") or values.get("route"),
                 "compliance_action": values.get("compliance_action"),
                 "compliance_reason_code": values.get("compliance_reason_code"),
             })

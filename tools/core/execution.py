@@ -8,8 +8,8 @@ from typing import Any, Mapping
 
 from harness.context import RunContext
 from harness.policy import can_use_tool
-from tools.base import ToolResult
-from tools.registry import get_registered_tool
+from tools.core.base import ToolResult
+from tools.core.registry import get_registered_tool
 
 
 def _normalize_result(tool_id: str, data: Any) -> ToolResult:

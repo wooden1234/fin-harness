@@ -47,15 +47,43 @@ def parse_weather_request(query: str) -> WeatherRequest | None:
 
 def format_weather_result(result: dict[str, Any]) -> str:
     """把结构化天气结果投影成简短回答，不让第二次 LLM 复述工具数据。"""
-    city = str(result.get("query_city") or "该城市")
+    city = str(result.get("query_city") or result.get("city") or "该城市")
     if not result.get("ok"):
+        error = str(result.get("error") or "")
+        if error == "need_city":
+            reason = str(result.get("reason") or "")
+            candidates = [
+                item
+                for item in result.get("candidates") or []
+                if isinstance(item, dict)
+            ]
+            if reason == "ambiguous" and candidates:
+                labels = []
+                for item in candidates[:4]:
+                    label = str(
+                        item.get("local_name") or item.get("name") or ""
+                    ).strip()
+                    state = str(item.get("state") or "").strip()
+                    if label and state:
+                        labels.append(f"{label}（{state}）")
+                    elif label:
+                        labels.append(label)
+                if labels:
+                    return (
+                        f"“{city}”对应多个地点，请告诉我更具体的城市"
+                        f"（例如：{'、'.join(labels)}）。"
+                    )
+            return (
+                f"“{city}”还不够具体或无法可靠定位，"
+                "请补充具体城市名（例如西安、宝鸡），我再帮你查天气。"
+            )
         errors = {
             "not_configured": "天气服务尚未配置",
             "invalid_api_key": "天气服务认证失败",
             "city_not_found": f"没有找到“{city}”的天气位置",
             "timeout": "天气服务响应超时",
         }
-        return errors.get(str(result.get("error") or ""), "天气服务暂时不可用") + "。"
+        return errors.get(error, "天气服务暂时不可用") + "。"
 
     location = dict(result.get("location") or {})
     current = dict(result.get("current") or {})

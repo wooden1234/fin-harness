@@ -15,7 +15,7 @@ def can_use_tool(context: RunContext, tool_id: str) -> bool:
     if not context.permissions:
         return False
     try:
-        from tools.registry import get_tool_spec
+        from tools.core.registry import get_tool_spec
 
         get_tool_spec(tool_id)
     except KeyError:

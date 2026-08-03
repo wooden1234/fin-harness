@@ -18,7 +18,7 @@ class HotBoardPanel(BaseModel):
 
 class HotBoardResponse(BaseModel):
     as_of: str
-    source: Literal["web", "fallback"]
+    source: Literal["web", "fallback", "stale"]
     panels: list[HotBoardPanel]
 
 

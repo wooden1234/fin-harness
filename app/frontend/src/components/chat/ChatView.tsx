@@ -10,7 +10,11 @@ import {
   fetchHotBoard,
   type HotBoardPanel,
   type HotBoardPanelId,
+  type HotBoardResponse,
 } from '@/services/api/hotBoard'
+
+// stale 数据返回后，等后台刷新大概跑完再悄悄拉一次最新结果。
+const HOT_BOARD_STALE_RETRY_MS = 6000
 import caiceLogo from '@/assets/caice-zhida-logo.png'
 
 const PANEL_ICONS: Record<HotBoardPanelId, typeof Flame> = {
@@ -56,28 +60,46 @@ const FALLBACK_PANELS: HotBoardPanel[] = [
 ]
 
 export function ChatView() {
-  const { messages, isGenerating, hitlPending, hitlMessage, agentSteps } = useChatStore()
+  const { messages, isGenerating, hitlPending, hitlMessage, agentSteps, agentTodos } = useChatStore()
   const { sendQuery, resumeAgent, cancelStream } = useAgentChat()
   const [input, setInput] = useState('')
   const [panels, setPanels] = useState<HotBoardPanel[]>(FALLBACK_PANELS)
   const [hotAsOf, setHotAsOf] = useState('')
   const [hotLoading, setHotLoading] = useState(false)
+  const [hotRefreshing, setHotRefreshing] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, isGenerating, hitlPending, agentSteps])
+  }, [messages, isGenerating, hitlPending, agentSteps, agentTodos])
 
   useEffect(() => {
     if (messages.length > 0) return
     let cancelled = false
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
+
+    const applyBoard = (board: HotBoardResponse) => {
+      if (cancelled || !board.panels?.length) return
+      setPanels(board.panels)
+      setHotAsOf(board.as_of)
+    }
+
     setHotLoading(true)
     void fetchHotBoard()
       .then((board) => {
-        if (cancelled) return
-        if (board.panels?.length) {
-          setPanels(board.panels)
-          setHotAsOf(board.as_of)
+        applyBoard(board)
+        // 后端用 stale-while-revalidate：拿到的是昨日缓存或本地兜底，
+        // 后台已经在异步重新生成，这里延迟悄悄拉一次最新结果，不打断当前展示。
+        if (!cancelled && board.source === 'stale') {
+          setHotRefreshing(true)
+          retryTimer = setTimeout(() => {
+            void fetchHotBoard()
+              .then(applyBoard)
+              .catch(() => undefined)
+              .finally(() => {
+                if (!cancelled) setHotRefreshing(false)
+              })
+          }, HOT_BOARD_STALE_RETRY_MS)
         }
       })
       .catch(() => {
@@ -91,6 +113,7 @@ export function ChatView() {
       })
     return () => {
       cancelled = true
+      if (retryTimer) clearTimeout(retryTimer)
     }
   }, [messages.length])
 
@@ -142,7 +165,9 @@ export function ChatView() {
                       </span>
                     ) : null}
                     {hotLoading ? (
-                      <span className="text-[11px] text-slate-400">更新中…</span>
+                      <span className="text-[11px] text-slate-400">加载中…</span>
+                    ) : hotRefreshing ? (
+                      <span className="text-[11px] text-slate-400">后台更新中…</span>
                     ) : null}
                   </div>
                 </div>
@@ -206,7 +231,11 @@ export function ChatView() {
               return (
                 <Fragment key={msg.id}>
                   {showStepsBefore && (
-                    <AgentStepsPanel steps={agentSteps} isGenerating={isGenerating} />
+                    <AgentStepsPanel
+                      steps={agentSteps}
+                      todos={agentTodos}
+                      isGenerating={isGenerating}
+                    />
                   )}
                   <ChatMessage message={msg} />
                 </Fragment>
@@ -214,7 +243,11 @@ export function ChatView() {
             })}
             {isGenerating &&
               (messages.length === 0 || messages[messages.length - 1].role !== 'assistant') && (
-                <AgentStepsPanel steps={agentSteps} isGenerating={isGenerating} />
+                <AgentStepsPanel
+                  steps={agentSteps}
+                  todos={agentTodos}
+                  isGenerating={isGenerating}
+                />
               )}
             <div ref={messagesEndRef} />
           </div>

@@ -71,6 +71,10 @@ class Settings(BaseSettings):
     IWENCAI_CACHE_DOCUMENT_TTL_SEC: int = 600
     IWENCAI_CACHE_SCREEN_TTL_SEC: int = 60
     IWENCAI_CACHE_MAX_BYTES: int = 524288
+    # 天气当前结果 Cache-Aside；Redis 不可用时自动回源 OpenWeather
+    WEATHER_CACHE_ENABLED: bool = True
+    WEATHER_CACHE_TTL_SEC: int = 600
+    WEATHER_CACHE_MAX_BYTES: int = 262144
     SECRET_KEY: str
     ALGORITHM: str
     ACCESS_TOKEN_EXPIRE_MINUTES: int
@@ -123,6 +127,8 @@ class Settings(BaseSettings):
     DEEPSEEK_API_KEY: str = ""
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
     DEEPSEEK_MODEL: str = "deepseek-v4-flash"
+    # DeepSeek Thinking 模式当前不支持结构化工具选择，工具 Agent 默认关闭。
+    DEEPSEEK_THINKING_ENABLED: bool = False
     AGENT_ROUTER_TEMPERATURE: float = 0.0
     PDF_QUERY_FILTER_MIN_CONFIDENCE: float = 0.85
     PDF_KB_UNSUPPORTED_MIN_CONFIDENCE: float = 0.90
@@ -170,15 +176,17 @@ class Settings(BaseSettings):
     WEB_SEARCH_PROVIDER: str = "tavily"
     TAVILY_API_KEY: str = ""
     TAVILY_SEARCH_URL: str = "https://api.tavily.com/search"
-    WEB_SEARCH_MAX_RESULTS: int = 5
+    WEB_SEARCH_MAX_RESULTS: int = 4
+    # 保守起步：中文金融查询 score 分布未知，过严会触发重试风暴。
+    WEB_SEARCH_MIN_SCORE: float = 0.2
+    # 非空时覆盖默认金融白名单（逗号分隔）；模型 search_web 固定 allowlist。
+    WEB_SEARCH_ALLOWED_DOMAINS: str = ""
 
     # 天气（OpenWeatherMap）。配置 OPENWEATHER_API_KEY 后启用。
     OPENWEATHER_API_KEY: str = ""
     OPENWEATHER_GEOCODE_URL: str = "https://api.openweathermap.org/geo/1.0/direct"
     OPENWEATHER_CURRENT_URL: str = "https://api.openweathermap.org/data/2.5/weather"
-    OPENWEATHER_FORECAST_URL: str = "https://api.openweathermap.org/data/2.5/forecast"
     OPENWEATHER_TIMEOUT_SEC: float = 10.0
-    OPENWEATHER_MAX_DAYS: int = 5
 
     # 同花顺问财 SkillHub OpenAPI。密钥只从环境变量读取。
     IWENCAI_BASE_URL: str = "https://openapi.iwencai.com"
@@ -210,6 +218,18 @@ class Settings(BaseSettings):
     AGENT_V2_WORKFLOW_TIMEOUT_SEC: float = 30.0
     AGENT_V2_TOOL_SKILL_TIMEOUT_SEC: float = 10.0
     AGENT_V2_MAX_CONCURRENCY: int = 4
+
+    # Main DeepAgent 根据实际工具行为升级预算，不做前置题型路由。
+    MAIN_AGENT_DIRECT_HARD_DEADLINE_SEC: float = 22.0
+    MAIN_AGENT_STANDARD_SOFT_DEADLINE_SEC: float = 25.0
+    MAIN_AGENT_STANDARD_HARD_DEADLINE_SEC: float = 35.0
+    MAIN_AGENT_RESEARCH_SOFT_DEADLINE_SEC: float = 42.0
+    MAIN_AGENT_RESEARCH_HARD_DEADLINE_SEC: float = 50.0
+    MAIN_AGENT_RESEARCH_TOOL_CUTOFF_SEC: float = 40.0
+    MAIN_AGENT_INFLIGHT_GRACE_SEC: float = 2.0
+    MAIN_AGENT_API_DEADLINE_SEC: float = 53.0
+    MAIN_AGENT_MAX_TOOL_CALLS: int = 12
+    MAIN_AGENT_RECURSION_LIMIT: int = 30
 
     # 上下文空间：业务窗口不会随模型物理窗口自动增长。
     CONTEXT_STRUCTURED_SUMMARY_MODE: str = "off"

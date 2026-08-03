@@ -16,7 +16,7 @@ from tools import execute_tool, get_langchain_tool, load_all_tools, validate_too
 _PROFILE_LOCK = threading.Lock()
 _PROFILE_READY = False
 _EXCLUDED_BUILTIN_TOOLS = frozenset(
-    {"execute", "task", "write_todos", "write_file", "edit_file"}
+    {"execute", "task", "write_file", "edit_file"}
 )
 
 

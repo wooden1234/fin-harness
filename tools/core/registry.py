@@ -8,7 +8,7 @@ from typing import Any
 
 from langchain_core.tools import BaseTool
 
-from tools.base import ToolSource, ToolSpec
+from tools.core.base import ToolSource, ToolSpec
 
 ToolHandler = Callable[[dict[str, Any]], Awaitable[Any]]
 
