@@ -1,6 +1,6 @@
 import { create } from 'zustand'
-import type { AgentRoute, Citation, Conversation } from '@/types/api'
-import type { AgentStep, AgentStepStatus, AgentTodo } from '@/types/agentSteps'
+import type { AnswerChartSpec, AgentRoute, Citation, Conversation } from '@/types/api'
+import type { AgentStep, AgentStepDetail, AgentStepStatus, AgentTodo } from '@/types/agentSteps'
 
 export interface Message {
   id: string
@@ -11,6 +11,8 @@ export interface Message {
   interrupted?: boolean
   agentSteps?: AgentStep[]
   agentTodos?: AgentTodo[]
+  followUps?: string[]
+  charts?: AnswerChartSpec[]
   timestamp: number
 }
 
@@ -41,6 +43,7 @@ interface ChatState {
     status: AgentStepStatus
     category?: string
     shortLabel?: string
+    detail?: AgentStepDetail
   }) => void
   setHitlPending: (value: boolean, message?: string | null) => void
   openSources: (messageId: string, citationIndex?: number) => void
@@ -79,7 +82,13 @@ export const useChatStore = create<ChatState>((set) => ({
       const existingIndex = state.agentSteps.findIndex((item) => item.id === step.id)
       if (existingIndex >= 0) {
         const agentSteps = [...state.agentSteps]
-        agentSteps[existingIndex] = { ...agentSteps[existingIndex], ...step }
+        const previous = agentSteps[existingIndex]
+        agentSteps[existingIndex] = {
+          ...previous,
+          ...step,
+          // 避免后续无 detail 的进度事件把可展开摘要冲掉
+          detail: step.detail ?? previous.detail,
+        }
         return { agentSteps }
       }
       return { agentSteps: [...state.agentSteps, step] }

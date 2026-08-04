@@ -124,6 +124,13 @@ export function ChatView() {
     void sendQuery(text)
   }
 
+  const handleFollowUp = (text: string) => {
+    const query = text.trim()
+    if (!query || isGenerating || hitlPending) return
+    setInput('')
+    void sendQuery(query)
+  }
+
   return (
     <div className="flex-1 flex flex-col min-h-0">
       <div className="flex-1 overflow-y-auto">
@@ -237,7 +244,11 @@ export function ChatView() {
                       isGenerating={isGenerating}
                     />
                   )}
-                  <ChatMessage message={msg} />
+                  <ChatMessage
+                    message={msg}
+                    onFollowUp={handleFollowUp}
+                    followUpDisabled={isGenerating || hitlPending}
+                  />
                 </Fragment>
               )
             })}

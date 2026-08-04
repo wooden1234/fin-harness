@@ -55,6 +55,8 @@ def begin_turn_workspace() -> dict:
         "main_agent_response": None,
         "main_agent_journal": {},
         "main_quality_metrics": {},
+        "answer_follow_ups": [],
+        "answer_charts": [],
         "investment_action_sensitive": False,
         "execution_mode": "",
         "execution_status": "",

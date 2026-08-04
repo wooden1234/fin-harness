@@ -10,34 +10,34 @@ from agents.main_deep_agent.state import normalize_agent_todos
 # 用户可见的关键步骤（内部模型推理过程一律不展示）
 PUBLIC_STEPS: dict[str, dict[str, str]] = {
     "problem_analysis": {
-        "label_running": "正在分析问题并选择资料",
-        "label_done": "已完成问题分析",
-        "short": "问题分析",
+        "label_running": "正在理解问题…",
+        "label_done": "已理解问题",
+        "short": "问题理解",
     },
     "data_query": {
-        "label_running": "正在查询数据表",
-        "label_done": "已查询数据表",
-        "short": "金融数据",
+        "label_running": "正在查询财务数据…",
+        "label_done": "已取得财务数据",
+        "short": "财务数据",
     },
     "knowledge_base": {
-        "label_running": "正在查找相关知识库",
-        "label_done": "已查找相关知识库",
+        "label_running": "正在查阅知识库…",
+        "label_done": "已查阅知识库",
         "short": "知识库",
     },
     "web_search": {
-        "label_running": "正在通过搜索进行查找",
-        "label_done": "已通过搜索进行查找",
-        "short": "联网搜索",
+        "label_running": "正在检索联网资料…",
+        "label_done": "已取得联网资料",
+        "short": "联网资料",
     },
     "generating_answer": {
-        "label_running": "正在生成答案",
-        "label_done": "已生成答案",
-        "short": "生成答案",
+        "label_running": "正在整理答案…",
+        "label_done": "已整理答案",
+        "short": "整理答案",
     },
     "evidence_validation": {
-        "label_running": "正在验证证据与结论",
-        "label_done": "已完成证据验证",
-        "short": "证据验证",
+        "label_running": "正在核对证据…",
+        "label_done": "已核对证据",
+        "short": "核对证据",
     },
 }
 
@@ -72,6 +72,40 @@ def short_label_for_public_step(step_key: str) -> str:
     return PUBLIC_STEPS.get(step_key, {}).get("short", step_key)
 
 
+def sanitize_step_detail(raw: object) -> dict | None:
+    """只保留前端可渲染的展示字段，拒绝透传原始工具 payload。"""
+    if not isinstance(raw, Mapping):
+        return None
+    detail: dict = {}
+    title = str(raw.get("title") or "").strip()[:80]
+    query = str(raw.get("query") or "").strip()[:200]
+    display_text = str(raw.get("display_text") or "").strip()[:800]
+    error = str(raw.get("error") or "").strip()[:120]
+    if title:
+        detail["title"] = title
+    if query:
+        detail["query"] = query
+    if display_text and not display_text.startswith(("{", "[")):
+        detail["display_text"] = display_text
+    if error:
+        detail["error"] = error
+    columns = raw.get("columns")
+    rows = raw.get("rows")
+    if isinstance(columns, list) and isinstance(rows, list) and columns and rows:
+        clean_columns = [str(item).strip()[:40] for item in columns[:6] if str(item).strip()]
+        clean_rows: list[list[str]] = []
+        for row in rows[:8]:
+            if not isinstance(row, (list, tuple)):
+                continue
+            cells = [str(cell).strip()[:80] for cell in list(row)[: len(clean_columns)]]
+            if len(cells) == len(clean_columns) and any(cells):
+                clean_rows.append(cells)
+        if clean_columns and clean_rows:
+            detail["columns"] = clean_columns
+            detail["rows"] = clean_rows
+    return detail or None
+
+
 def build_step_event(
     *,
     step_id: str,
@@ -79,6 +113,7 @@ def build_step_event(
     status: str,
     category: str | None = None,
     short_label: str | None = None,
+    detail: object | None = None,
 ) -> dict:
     payload: dict = {
         "type": "step",
@@ -90,6 +125,9 @@ def build_step_event(
         payload["category"] = category
     if short_label:
         payload["short_label"] = short_label
+    cleaned = sanitize_step_detail(detail)
+    if cleaned:
+        payload["detail"] = cleaned
     return payload
 
 

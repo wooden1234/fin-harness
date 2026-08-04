@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
-from agents.main_deep_agent.entities import (
-    OFFICIAL_ENTITY_DOMAINS,
-    normalize_entity,
-)
 from agents.runtime_context import AgentRuntimeContext
+
+
+def normalize_entity(value: str) -> str:
+    """规范化实体字符串；不做公司别名白名单映射。"""
+    return str(value or "").strip()
 
 
 def permissions_allow(context: AgentRuntimeContext, tool_id: str) -> bool:
@@ -30,12 +31,9 @@ def domain_matches(hostname: str, domain: str) -> bool:
 
 
 def official_search_domains(entity: str) -> list[str]:
-    """返回实体官网和监管披露域名。"""
-    canonical = normalize_entity(entity)
-    domains = list(OFFICIAL_ENTITY_DOMAINS.get(canonical, ()))
-    if canonical in OFFICIAL_ENTITY_DOMAINS:
-        domains.append("sec.gov")
-    return list(dict.fromkeys(domains))
+    """无公司域名白名单时，仅返回通用监管披露域名。"""
+    del entity
+    return ["sec.gov"]
 
 
 def apply_source_preference(
@@ -72,6 +70,7 @@ def apply_source_preference(
 __all__ = [
     "apply_source_preference",
     "domain_matches",
+    "normalize_entity",
     "normalize_search_domain",
     "official_search_domains",
     "permissions_allow",

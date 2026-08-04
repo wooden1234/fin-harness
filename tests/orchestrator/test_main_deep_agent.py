@@ -2,6 +2,7 @@
 
 import json
 import time
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -12,7 +13,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from agents.main_deep_agent.assembly import MainDeepAgentAssembly, run_main_deep_agent
 from agents.main_deep_agent.node import main_deep_agent_node
 from agents.main_deep_agent.prompts import build_main_system_prompt
-from tools.web_domains import resolve_search_domains
+from tools.web_domains import DEFAULT_WEB_SEARCH_DOMAINS, resolve_search_domains
 from agents.main_deep_agent.middleware.budget import MainAgentBudgetController
 from agents.main_deep_agent.middleware.finalization import (
     MainAgentFailureFinalizationMiddleware,
@@ -20,7 +21,6 @@ from agents.main_deep_agent.middleware.finalization import (
 from agents.main_deep_agent.middleware.quality import MainEvidenceQualityMiddleware
 from agents.main_deep_agent.contracts import (
     MainAgentResponse,
-    MainAgentSection,
     MainAgentStatement,
     MainAgentTable,
     MainAgentTableRow,
@@ -42,8 +42,16 @@ from agents.main_deep_agent.tools.factory import build_main_tools, resolve_main_
 from agents.orchestrator.contracts import Evidence
 from agents.runtime_context import AgentRuntimeContext
 from app.api.agent_progress import (
+    build_step_event,
     build_todo_snapshot_event,
     extract_agent_todos_snapshot,
+    label_for_public_step,
+    sanitize_step_detail,
+)
+from agents.main_deep_agent.tools.step_detail import build_public_tool_step_detail
+from agents.main_deep_agent.quality.enrichments import (
+    build_answer_charts,
+    sanitize_follow_ups,
 )
 from tools.calculation import run_calculation
 from tools.finance import fetch_financial_fact, lookup_financial_fact
@@ -125,11 +133,101 @@ def test_main_prompt_maps_dynamic_memory_preferences_to_output_contract() -> Non
     assert "以「小财」自称" in prompt
     assert "preferred_output_format=table" in prompt
     assert "不得强行比较" not in prompt
-    assert "禁止因币种不同而拒答" in prompt
-    assert "非同一会计期间" in prompt
+    assert "最近完整财年" in prompt
+    assert "按公司年结分别取值" in prompt
+    assert "禁止为对齐把 3 月年结公司压回更早一年" in prompt
+    assert "截至2026-03-31" in prompt or "2026-03-31" in prompt
     assert "response_detail_level=brief" in prompt
-    assert "sections[].tables" in prompt
-    assert "每个 table row 必须引用真实 Evidence ID" in prompt
+    assert "根级 tables" in prompt
+    assert "table row 引用真实 Evidence ID" in prompt
+    assert "简单单点事实无需 todos" in prompt
+    assert "3–5 条可执行 todos" in prompt
+    assert "禁止空泛" in prompt
+    assert "异年结必须分开查" in prompt
+    assert "苹果约 9 月末" in prompt
+    assert "不用网页金额覆盖财务主表" in prompt
+    assert "传闻/政策/审批提速" in prompt
+    assert "调用 `search_web` 前必须把用户口语改写成检索问句" in prompt
+    assert "禁止把多槽位糊成一句超长搜索" in prompt
+    assert "板块领涨" in prompt
+    assert "只用 `query_iwencai_industry`" in prompt
+    assert "最近已结束交易日" in prompt
+    assert "session_phase=" in prompt
+    assert "单一结构化事实不为凑来源" in prompt
+    assert "不使用口号式总结" in prompt
+    assert "statement_type=caveat" in prompt
+    assert "不要写「主表：」" in prompt
+    assert "不为对齐财年或币种继续 Web" in prompt
+    assert "query_iwencai_finance" in prompt
+    assert "同口径年结多实体必须合查" in prompt
+    assert "含「累计」" in prompt or "累计" in prompt
+    assert "禁止用单季度或最新价" in prompt
+    assert "catalog_pdf_knowledge_tool` 每任务最多 1 次" in prompt
+    assert "禁止同族反复改参重试" in prompt
+    assert "有累计财务 Evidence 后应立即 MainAgentResponse 成稿" in prompt
+    assert "screen_iwencai_usstock" in prompt
+    assert "search_iwencai_announcement` 只检索公告文档" in prompt
+    assert "禁止塞入营业收入/归母净利润" in prompt
+    assert "total=0" in prompt
+    assert "主表保留财务 Skill 原值" in prompt
+    assert "禁止用中期或其他未结束期间填主表" in prompt
+    assert "不强行换算到同一财年或同一币种" in prompt
+    assert "follow_ups" in prompt
+
+
+def test_cn_equity_session_context_before_close_uses_previous_weekday() -> None:
+    from zoneinfo import ZoneInfo
+
+    from agents.main_deep_agent.prompts import resolve_cn_equity_session_context
+
+    # 2026-08-05 00:08 上海：盘前，最近已结束交易日应为 2026-08-04
+    now = datetime(2026, 8, 5, 0, 8, tzinfo=ZoneInfo("Asia/Shanghai"))
+    ctx = resolve_cn_equity_session_context(now=now)
+    assert ctx["session_phase"] == "before_close"
+    assert ctx["last_session_date"] == "2026-08-04"
+    assert ctx["last_session_ymd"] == "20260804"
+    assert "2026年8月4日" in ctx["last_session_cn"]
+
+
+@pytest.mark.asyncio
+async def test_brief_grounded_renders_prose_without_heading_or_bullets() -> None:
+    evidence = _evidence("e-brief", "financial")
+    evidence.metadata["entity"] = "川金诺"
+    response = MainAgentResponse(
+        mode="grounded",
+        heading="川金诺增长情况",
+        statements=[
+            MainAgentStatement(
+                text=(
+                    "川金诺（300505）2025年前三季度归母净利润同比增长"
+                    "175.61%，归母净利润为3.04亿元。"
+                ),
+                evidence_ids=[evidence.evidence_id],
+            )
+        ],
+        follow_ups=[
+            "川金诺同期营业收入是多少？",
+            "现在还能买入吗？",
+        ],
+    )
+    update = await main_evidence_quality_gate(
+        {
+            "messages": [
+                HumanMessage(content="川金诺2025年前三季度净利润同比增长多少？")
+            ],
+            "main_agent_response": response,
+            "evidence": [evidence],
+        }
+    )
+    summary = update["summary"]
+    assert "### " not in summary
+    assert "- 川金诺" not in summary
+    assert summary.startswith("**川金诺")
+    assert "175.61%" in summary
+    assert "[1]" not in summary
+    assert update["answer_follow_ups"] == ["川金诺同期营业收入是多少？"]
+    # 单期事实不出图
+    assert update["answer_charts"] == []
 
 
 @pytest.mark.asyncio
@@ -139,11 +237,11 @@ async def test_main_node_injects_current_memory_preferences(monkeypatch) -> None
     async def fake_run_main_deep_agent(*, messages, context, **_kwargs):
         captured_messages.append(list(messages))
         return (
-            MainAgentResponse(mode="direct", direct_answer="测试回答"),
-            MainAgentProgressJournal(),
-            MainAgentBudgetController(started_monotonic=context.started_monotonic),
-            "completed",
-            "",
+        MainAgentResponse(mode="direct", direct_answer="测试回答"),
+        MainAgentProgressJournal(),
+        MainAgentBudgetController(started_monotonic=context.started_monotonic),
+        "completed",
+        "",
         )
 
     monkeypatch.setattr(
@@ -183,8 +281,8 @@ async def test_main_node_injects_current_memory_preferences(monkeypatch) -> None
 def test_main_table_requires_consistent_column_count() -> None:
     with pytest.raises(ValueError, match="table_row_column_count_mismatch"):
         MainAgentTable(
-            columns=["公司", "营收"],
-            rows=[MainAgentTableRow(cells=["腾讯"], evidence_ids=["e1"])],
+        columns=["公司", "营收"],
+        rows=[MainAgentTableRow(cells=["腾讯"], evidence_ids=["e1"])],
         )
 
 
@@ -192,10 +290,10 @@ def test_journal_normalizes_agent_todos_for_observability() -> None:
     journal = MainAgentProgressJournal()
     journal.set_agent_todos(
         [
-            {"content": "  查询财报  ", "status": "in_progress", "extra": "hidden"},
-            {"content": "x" * 400, "status": "completed"},
-            {"content": "非法状态", "status": "failed"},
-            {"status": "pending"},
+        {"content": "  查询财报  ", "status": "in_progress", "extra": "hidden"},
+        {"content": "x" * 400, "status": "completed"},
+        {"content": "非法状态", "status": "failed"},
+        {"status": "pending"},
         ]
     )
 
@@ -278,10 +376,10 @@ async def test_run_main_deep_agent_discards_stale_quality_response(monkeypatch) 
 def test_todo_snapshot_event_uses_full_replacement_payload() -> None:
     raw_update = {
         "tools": {
-            "todos": [
-                {"content": "查询天气", "status": "completed"},
-                {"content": "整理答案", "status": "in_progress"},
-            ]
+        "todos": [
+            {"content": "查询天气", "status": "completed"},
+            {"content": "整理答案", "status": "in_progress"},
+        ]
         }
     }
     snapshot = extract_agent_todos_snapshot(raw_update)
@@ -299,8 +397,18 @@ def test_todo_snapshot_event_uses_full_replacement_payload() -> None:
     assert all(item["id"].startswith("main-todo-") for item in event["todos"])
 
 
+def test_public_step_labels_use_narrative_copy() -> None:
+    assert label_for_public_step("problem_analysis", "running") == "正在理解问题…"
+    assert label_for_public_step("problem_analysis", "done") == "已理解问题"
+    assert label_for_public_step("web_search", "done") == "已取得联网资料"
+    assert "已完成" not in label_for_public_step("evidence_validation", "done")
+
+
 def test_main_tool_catalog_keeps_specialized_argument_contracts() -> None:
     assert "web.search" in MAIN_TOOL_IDS
+    assert "iwencai.query" in MAIN_TOOL_IDS
+    assert "iwencai.finance.query" in MAIN_TOOL_IDS
+    assert "iwencai.usstock.screen" in MAIN_TOOL_IDS
     assert "knowledge.fact.lookup" in MAIN_TOOL_IDS
     assert "finance.fact.lookup" not in MAIN_TOOL_IDS
     assert "finance.query_advanced" not in MAIN_TOOL_IDS
@@ -308,8 +416,15 @@ def test_main_tool_catalog_keeps_specialized_argument_contracts() -> None:
         "web.search",
         "knowledge.faq.search",
         "knowledge.pdf.search",
-        "iwencai.compare_entities",
+        "calculation.run",
     }
+    web_args = MAIN_TOOL_ARGS_SCHEMAS["web.search"]
+    with pytest.raises(ValueError):
+        web_args.model_validate({"query": "苹果2025财年年度报告"})
+    validated = web_args.model_validate(
+        {"query": "苹果2025财年年度报告", "entities": ["苹果公司"]}
+    )
+    assert validated.entities == ["苹果公司"]
 
 
 def test_runtime_permissions_reduce_visible_tool_catalog() -> None:
@@ -362,24 +477,20 @@ def test_quality_evaluation_counts_tables_but_not_caveats() -> None:
     evidence = _evidence("e-table", "financial")
     response = MainAgentResponse(
         mode="grounded",
-        sections=[
-            MainAgentSection(
-                heading="结果",
-                statements=[
-                    MainAgentStatement(
-                        text="请结合自身风险承受能力。",
-                        statement_type="caveat",
-                    )
-                ],
-                tables=[
-                    MainAgentTable(
-                        columns=["公司", "结果"],
-                        rows=[
-                            MainAgentTableRow(
-                                cells=["示例公司", "已核验"],
-                                evidence_ids=["e-table"],
-                            )
-                        ],
+        heading="结果",
+        statements=[
+            MainAgentStatement(
+                text="请结合自身风险承受能力。",
+                statement_type="caveat",
+            )
+        ],
+        tables=[
+            MainAgentTable(
+                columns=["公司", "结果"],
+                rows=[
+                    MainAgentTableRow(
+                        cells=["示例公司", "已核验"],
+                        evidence_ids=["e-table"],
                     )
                 ],
             )
@@ -408,15 +519,12 @@ async def test_quality_middleware_revises_once_with_existing_evidence() -> None:
     )
     rejected = MainAgentResponse(
         mode="grounded",
-        sections=[
-            MainAgentSection(
-                heading="结论",
-                statements=[
-                    MainAgentStatement(
-                        text="引用不存在的证据。",
-                        evidence_ids=["missing"],
-                    )
-                ],
+        
+        heading="结论",
+        statements=[
+            MainAgentStatement(
+                text="引用不存在的证据。",
+                evidence_ids=["missing"],
             )
         ],
     )
@@ -436,15 +544,12 @@ async def test_quality_middleware_revises_once_with_existing_evidence() -> None:
 
     accepted = MainAgentResponse(
         mode="grounded",
-        sections=[
-            MainAgentSection(
-                heading="结论",
-                statements=[
-                    MainAgentStatement(
-                        text="这是已有证据支持的结果。",
-                        evidence_ids=["e-valid"],
-                    )
-                ],
+        
+        heading="结论",
+        statements=[
+            MainAgentStatement(
+                text="这是已有证据支持的结果。",
+                evidence_ids=["e-valid"],
             )
         ],
     )
@@ -490,20 +595,17 @@ async def test_quality_middleware_rejects_stale_structured_response() -> None:
     middleware = MainEvidenceQualityMiddleware(
         journal=journal,
         budget=MainAgentBudgetController(
-            started_monotonic=time.monotonic(),
-            soft_seconds=10.0,
-            hard_seconds=20.0,
+        started_monotonic=time.monotonic(),
+        soft_seconds=10.0,
+        hard_seconds=20.0,
         ),
         investment_action_sensitive=False,
     )
     rejected = MainAgentResponse(
         mode="grounded",
-        sections=[
-            MainAgentSection(
                 heading="结论",
-                statements=[MainAgentStatement(text="无效引用", evidence_ids=["missing"])],
-            )
-        ],
+        statements=[MainAgentStatement(text="无效引用", evidence_ids=["missing"])],
+
     )
     update = await middleware.aafter_agent(
         {"messages": [HumanMessage(content="测试")], "structured_response": rejected},
@@ -513,12 +615,12 @@ async def test_quality_middleware_rejects_stale_structured_response() -> None:
 
     second_update = await middleware.aafter_agent(
         {
-            "messages": [
-                HumanMessage(content="测试"),
-                update["messages"][0],
-                AIMessage(content="没有重新生成结构化输出"),
-            ],
-            "structured_response": rejected,
+        "messages": [
+            HumanMessage(content="测试"),
+            update["messages"][0],
+            AIMessage(content="没有重新生成结构化输出"),
+        ],
+        "structured_response": rejected,
         },
         None,
     )
@@ -542,13 +644,10 @@ async def test_quality_middleware_stops_after_fresh_invalid_revision() -> None:
     )
     rejected = MainAgentResponse(
         mode="grounded",
-        sections=[
-            MainAgentSection(
-                heading="结论",
-                statements=[
-                    MainAgentStatement(text="无效引用", evidence_ids=["missing"])
-                ],
-            )
+        
+        heading="结论",
+        statements=[
+            MainAgentStatement(text="无效引用", evidence_ids=["missing"])
         ],
     )
     update = await middleware.aafter_agent(
@@ -607,15 +706,11 @@ async def test_quality_middleware_does_not_revise_partial_valid_answer() -> None
     )
     response = MainAgentResponse(
         mode="grounded",
-        sections=[
-            MainAgentSection(
-                heading="结论",
-                statements=[
-                    MainAgentStatement(text="有效事实", evidence_ids=["e-valid"]),
-                    MainAgentStatement(text="无效事实", evidence_ids=["missing"]),
-                ],
-            )
-        ],
+                    heading="结论",
+            statements=[
+                MainAgentStatement(text="有效事实", evidence_ids=["e-valid"]),
+                MainAgentStatement(text="无效事实", evidence_ids=["missing"]),
+            ],
     )
 
     update = await middleware.aafter_agent(
@@ -683,11 +778,11 @@ async def test_sensitive_direct_without_evidence_skips_revision() -> None:
 
     update = await middleware.aafter_agent(
         {
-            "messages": [HumanMessage(content="现在能买吗？")],
-            "structured_response": MainAgentResponse(
-                mode="direct",
-                direct_answer="建议立即买入。",
-            ),
+        "messages": [HumanMessage(content="现在能买吗？")],
+        "structured_response": MainAgentResponse(
+            mode="direct",
+            direct_answer="建议立即买入。",
+        ),
         },
         None,
     )
@@ -702,16 +797,13 @@ async def test_research_with_one_family_salvages_without_action_conclusion() -> 
     response = MainAgentResponse(
         mode="grounded",
         gaps=["当前资料不足以判断是否买入。"],
-        sections=[
-            MainAgentSection(
-                heading="结论",
-                statements=[
-                    MainAgentStatement(
-                        text="建议立即买入并加仓。",
-                        statement_type="inference",
-                        evidence_ids=["e-web"],
-                    )
-                ],
+        
+        heading="结论",
+        statements=[
+            MainAgentStatement(
+                text="建议立即买入并加仓。",
+                statement_type="inference",
+                evidence_ids=["e-web"],
             )
         ],
     )
@@ -734,21 +826,18 @@ async def test_research_with_one_family_salvages_without_action_conclusion() -> 
 async def test_grounded_statements_require_real_evidence_ids() -> None:
     response = MainAgentResponse(
         mode="grounded",
-        sections=[
-            MainAgentSection(
                 heading="事实",
-                statements=[
-                    MainAgentStatement(text="无法核验的事实", evidence_ids=["missing"])
-                ],
-            )
+        statements=[
+            MainAgentStatement(text="无法核验的事实", evidence_ids=["missing"])
         ],
+
     )
     update = await main_evidence_quality_gate(
         {
-            "messages": [HumanMessage(content="查询事实")],
-            "main_agent_response": response,
-            "main_agent_journal": {"source_families": ["knowledge"]},
-            "evidence": [_evidence("e-faq", "knowledge")],
+        "messages": [HumanMessage(content="查询事实")],
+        "main_agent_response": response,
+        "main_agent_journal": {"source_families": ["knowledge"]},
+        "evidence": [_evidence("e-faq", "knowledge")],
         }
     )
     assert update["execution_status"] == "completed_with_gaps"
@@ -760,24 +849,21 @@ async def test_grounded_statements_require_real_evidence_ids() -> None:
 async def test_grounded_table_renders_only_rows_with_real_evidence() -> None:
     response = MainAgentResponse(
         mode="grounded",
-        sections=[
-            MainAgentSection(
-                heading="营业收入对比",
-                tables=[
-                    MainAgentTable(
-                        title="最近完整财年",
-                        columns=["公司", "营业收入"],
-                        rows=[
-                            MainAgentTableRow(
-                                cells=["腾讯", "6600 亿元"],
-                                evidence_ids=["e-tencent"],
-                            ),
-                            MainAgentTableRow(
-                                cells=["阿里", "未知数据"],
-                                evidence_ids=["missing"],
-                            ),
-                        ],
-                    )
+        
+        heading="营业收入对比",
+        tables=[
+            MainAgentTable(
+                title="最近完整财年",
+                columns=["公司", "营业收入"],
+                rows=[
+                    MainAgentTableRow(
+                        cells=["腾讯", "6600 亿元"],
+                        evidence_ids=["e-tencent"],
+                    ),
+                    MainAgentTableRow(
+                        cells=["阿里", "未知数据"],
+                        evidence_ids=["missing"],
+                    ),
                 ],
             )
         ],
@@ -791,11 +877,145 @@ async def test_grounded_table_renders_only_rows_with_real_evidence() -> None:
     )
 
     assert "| 公司 | 营业收入 |" in update["summary"]
-    assert "| 腾讯 | 6600 亿元[1] |" in update["summary"]
+    assert "| 腾讯 | 6600 亿元 |" in update["summary"]
+    assert "[1]" not in update["summary"]
     assert "未知数据" not in update["summary"]
     assert update["execution_status"] == "completed_with_gaps"
     assert update["citations"][0]["evidence_id"] == "e-tencent"
     assert "table_row_missing_evidence" in update["quality_report"].missing_evidence
+
+
+def test_table_row_allows_empty_evidence_ids_for_parse_then_quality_drop() -> None:
+    """模型偶发交出空 evidence_ids 时不应在结构化解析阶段整单失败。"""
+    row = MainAgentTableRow.model_validate(
+        {"cells": ["美团", "未知"], "evidence_ids": []}
+    )
+    assert row.evidence_ids == []
+
+    response = MainAgentResponse.model_validate(
+        {
+            "mode": "grounded",
+            "heading": "结论",
+            "tables": [
+                {
+                    "title": "对比",
+                    "columns": ["公司", "营收"],
+                    "rows": [
+                        {
+                            "cells": ["腾讯", "1"],
+                            "evidence_ids": ["e-tencent"],
+                        },
+                        {"cells": ["美团", "未知"], "evidence_ids": []},
+                    ],
+                }
+            ],
+        }
+    )
+    assert response.tables[0].rows[1].evidence_ids == []
+
+
+def test_drop_unknown_top_level_keys_falls_back_to_salvage_not_silent_fold() -> None:
+    """未知顶层字段（如 sections）直接丢弃，不做语义折回；已知字段仍可解析。"""
+    response = MainAgentResponse.model_validate(
+        {
+            "mode": "grounded",
+            "heading": "结论",
+            "statements": [
+                {
+                    "text": "微软营收为正。",
+                    "statement_type": "fact",
+                    "evidence_ids": ["main:msft"],
+                }
+            ],
+            "tables": [
+                {
+                    "title": "最近完整财年财务对比",
+                    "columns": ["公司", "营收"],
+                    "rows": [
+                        {
+                            "cells": ["微软", "3318亿"],
+                            "evidence_ids": ["main:msft"],
+                        }
+                    ],
+                }
+            ],
+            "gaps": ["苹果数值缺失"],
+            "follow_ups": ["需要补充苹果数据吗？"],
+            # 模型又发明了 sections：应被丢弃，不折回
+            "sections": [
+                {
+                    "heading": "不应出现",
+                    "statements": [
+                        {
+                            "text": "这段应被丢弃。",
+                            "evidence_ids": ["main:drop"],
+                        }
+                    ],
+                }
+            ],
+            "invented_field": {"foo": 1},
+        }
+    )
+    assert response.heading == "结论"
+    assert len(response.statements) == 1
+    assert response.statements[0].text == "微软营收为正。"
+    assert len(response.tables) == 1
+    assert response.tables[0].title == "最近完整财年财务对比"
+    assert response.gaps == ["苹果数值缺失"]
+    assert response.follow_ups == ["需要补充苹果数据吗？"]
+    dumped = response.model_dump()
+    assert "sections" not in dumped
+    assert "invented_field" not in dumped
+    assert all(s.text != "这段应被丢弃。" for s in response.statements)
+
+
+@pytest.mark.asyncio
+async def test_comparison_section_renders_conclusion_table_then_caveat() -> None:
+    """比较题：结论在前、表格居中、caveat 口径差异在表后；去掉重复表题。"""
+    evidence = _evidence("e-moutai", "financial")
+    evidence.metadata["entity"] = "贵州茅台"
+    response = MainAgentResponse(
+        mode="grounded",
+        heading="主要财务数据对比（2025年度）",
+        statements=[
+            MainAgentStatement(
+                text="两家公司2025年度均实现盈利，茅台营收与利润规模更大。",
+                statement_type="fact",
+                evidence_ids=["e-moutai"],
+            ),
+            MainAgentStatement(
+                text="茅台区分营业总收入与营业收入；五粮液两者相同。",
+                statement_type="caveat",
+                evidence_ids=["e-moutai"],
+            ),
+        ],
+        tables=[
+            MainAgentTable(
+                title="主表：最近一个完整财年财务对比",
+                columns=["公司", "营业收入", "归母净利润"],
+                rows=[
+                    MainAgentTableRow(
+                        cells=["贵州茅台", "1688亿元", "823亿元"],
+                        evidence_ids=["e-moutai"],
+                    ),
+                ],
+            )
+        ],
+    )
+    update = await main_evidence_quality_gate(
+        {
+            "messages": [HumanMessage(content="比较茅台五粮液")],
+            "main_agent_response": response,
+            "evidence": [evidence],
+        }
+    )
+    summary = update["summary"]
+    conclusion_at = summary.index("均实现盈利")
+    table_at = summary.index("最近一个完整财年财务对比")
+    caveat_at = summary.index("区分营业总收入")
+    assert conclusion_at < table_at < caveat_at
+    assert "主表：" not in summary
+    assert "### 主要财务数据对比" not in summary
 
 
 @pytest.mark.asyncio
@@ -817,26 +1037,126 @@ async def test_sensitive_question_cannot_use_direct_action_answer() -> None:
 
 
 @pytest.mark.asyncio
-async def test_calculation_requires_input_evidence() -> None:
+async def test_calculation_executes_resolved_batch() -> None:
     rejected = await run_calculation.ainvoke(
-        {
-            "operation": "change_rate",
-            "current_value": 120,
-            "reference_value": 100,
-            "input_evidence_ids": [],
-        }
+        {"calculations": []}
     )
     assert rejected["ok"] is False
     accepted = await run_calculation.ainvoke(
         {
-            "operation": "change_rate",
-            "current_value": 120,
-            "reference_value": 100,
-            "input_evidence_ids": ["e1"],
+            "calculations": [{
+                "calculation_id": "growth",
+                "operation": "change_rate",
+                "current_value": 120,
+                "reference_value": 100,
+                "input_evidence_ids": ["e-current", "e-reference"],
+                "operand_refs": [
+                    {"evidence_id": "e-current", "fact_index": 0},
+                    {"evidence_id": "e-reference", "fact_index": 0},
+                ],
+            }],
         }
     )
-    assert accepted["value"] == 20.0
-    assert accepted["formula"]
+    assert accepted["calculations"][0]["value"] == 20.0
+    assert accepted["calculations"][0]["formula"]
+
+
+@pytest.mark.asyncio
+async def test_main_calculation_resolves_evidence_facts_and_blocks_duplicate() -> None:
+    current = _evidence("e-current", "financial")
+    current.metadata["facts"] = [{
+        "entity": "甲公司",
+        "metric": "revenue",
+        "fiscal_period": "FY2025 Q4",
+        "value": 120.0,
+        "unit": "CNY",
+        "currency": "CNY",
+    }]
+    reference = _evidence("e-reference", "financial")
+    reference.metadata["facts"] = [{
+        "entity": "甲公司",
+        "metric": "revenue",
+        "fiscal_period": "FY2024 Q4",
+        "value": 100.0,
+        "unit": "CNY",
+        "currency": "CNY",
+    }]
+    journal = MainAgentProgressJournal()
+    journal.record(
+        tool_id="knowledge.fact.lookup",
+        source_family="financial",
+        status="completed",
+        duration_ms=1.0,
+        evidence=[current, reference],
+    )
+    budget = MainAgentBudgetController(started_monotonic=time.monotonic())
+    tools = build_main_tools(
+        context=AgentRuntimeContext(permissions=("calculation.run",)),
+        budget=budget,
+        journal=journal,
+    )
+    calculation = {item.name: item for item in tools}["run_calculation"]
+    arguments = {
+        "calculations": [{
+            "calculation_id": "growth",
+            "operation": "change_rate",
+            "current": {"evidence_id": "e-current", "fact_index": 0},
+            "reference": {"evidence_id": "e-reference", "fact_index": 0},
+        }]
+    }
+
+    result = await calculation.ainvoke(arguments)
+    duplicate = await calculation.ainvoke(arguments)
+
+    assert result["ok"] is True, result
+    assert result["evidence"][0]["metadata"]["input_evidence_ids"] == [
+        "e-current",
+        "e-reference",
+    ]
+    assert budget.tool_counts["calculation"] == 1
+    assert duplicate["error"] == "duplicate_tool_call"
+    assert duplicate["retryable"] is False
+
+
+def test_calculation_statement_requires_existing_operand_facts() -> None:
+    current = _evidence("e-current", "financial")
+    current.metadata["facts"] = [{"value": 120.0}]
+    reference = _evidence("e-reference", "financial")
+    reference.metadata["facts"] = [{"value": 100.0}]
+    calculation = _evidence("e-calculation", "calculation")
+    calculation.source_type = "calculation.run"
+    calculation.metadata.update(
+        {
+            "formula": "(current_value-reference_value)/abs(reference_value)*100",
+            "input_evidence_ids": ["e-current", "e-reference"],
+            "operand_refs": [
+                {"evidence_id": "e-current", "fact_index": 0},
+                {"evidence_id": "e-reference", "fact_index": 0},
+            ],
+        }
+    )
+    response = MainAgentResponse(
+        mode="grounded",
+        statements=[MainAgentStatement(
+            text="增速为20%。",
+            statement_type="calculation",
+            evidence_ids=["e-calculation"],)],
+    )
+
+    accepted = evaluate_main_response(
+        response,
+        [current, reference, calculation],
+        sensitive=False,
+    )
+    rejected = evaluate_main_response(
+        response,
+        [current, calculation],
+        sensitive=False,
+    )
+
+    assert accepted.quality_report.passed is True
+    assert rejected.quality_report.passed is False
+    assert "invalid_calculation_evidence" in rejected.quality_report.missing_evidence
 
 
 @pytest.mark.asyncio
@@ -968,6 +1288,87 @@ async def test_failed_tool_middleware_returns_finalization_message() -> None:
     assert "MainAgentResponse" in response.system_message
 
 
+@pytest.mark.asyncio
+async def test_finalization_forces_when_idle_with_cumulative_finance_facts() -> None:
+    budget = MainAgentBudgetController(started_monotonic=time.monotonic())
+    budget.tool_calls = 1
+    journal = MainAgentProgressJournal()
+    evidence = _evidence("e-cum", "iwencai.finance.query")
+    evidence.metadata["facts"] = [
+        {
+            "entity": "苹果",
+            "metric": "营业收入(累计)[20251231]",
+            "fiscal_period": "FY2025 Q4",
+            "value": 416161000000.0,
+            "unit": "",
+        },
+        {
+            "entity": "微软",
+            "metric": "归属于母公司股东的净利润(累计)[20251231]",
+            "fiscal_period": "FY2025 Q4",
+            "value": 101832000000.0,
+            "unit": "",
+        },
+    ]
+    journal.evidence[evidence.evidence_id] = evidence
+    middleware = MainAgentFailureFinalizationMiddleware(
+        budget,
+        journal=journal,
+        business_tool_names={"query_iwencai_finance"},
+        idle_wraps_with_evidence=2,
+    )
+
+    class Request:
+        tools = [SimpleNamespace(name="query_iwencai_finance"), SimpleNamespace(name="MainAgentResponse")]
+        system_message = "原始指令"
+
+        def override(self, **kwargs):
+            return SimpleNamespace(**kwargs)
+
+    async def handler(request):
+        return request
+
+    first = await middleware.awrap_model_call(Request(), handler)
+    assert budget.stop_new_tools is False
+    assert len(first.tools) == 2
+
+    second = await middleware.awrap_model_call(Request(), handler)
+    assert budget.stop_new_tools is True
+    assert budget.finalization_reason == "idle_with_finance_evidence"
+    assert [tool.name for tool in second.tools] == ["MainAgentResponse"]
+    assert "累计" in second.system_message
+
+
+def test_iwencai_normalize_prefers_cumulative_over_quote_and_quarter() -> None:
+    from tools.iwencai import _normalize_iwencai_payload
+
+    payload = _normalize_iwencai_payload(
+        {
+            "ok": True,
+            "data": {
+                "datas": [
+                    {
+                        "股票简称": "苹果",
+                        "最新价": 303.42,
+                        "最新涨跌幅": -1.777,
+                        "营业收入(累计)[20251231]": 416161000000.0,
+                        "归属于母公司股东的净利润(累计)[20251231]": 112010000000.0,
+                        "营业收入(单季度)[20251231]": 102466000000.0,
+                    }
+                ]
+            },
+        }
+    )
+    metrics = [item["metric"] for item in payload["data"]["facts"]]
+    assert "营业收入(累计)[20251231]" in metrics
+    assert "归属于母公司股东的净利润(累计)[20251231]" in metrics
+    assert "最新价" not in metrics
+    assert "最新涨跌幅" not in metrics
+    assert metrics.index("营业收入(累计)[20251231]") < metrics.index(
+        "营业收入(单季度)[20251231]"
+    )
+
+
 def test_web_results_are_split_and_aggregate_answer_is_not_evidence() -> None:
     evidence = web_evidence_from_payload(
         {
@@ -1031,6 +1432,39 @@ def test_web_family_budget_exhausted_only_stops_web_family() -> None:
     assert budget.stop_new_tools is False
     assert budget.finalization_reason == ""
     assert budget.authorize("iwencai.query", entity="甲公司")[0] is True
+
+
+def test_repeated_family_budget_rejects_force_finalization() -> None:
+    budget = MainAgentBudgetController(started_monotonic=time.monotonic())
+    for _ in range(2):
+        assert budget.authorize("knowledge.pdf.catalog")[0] is True
+        budget.register("knowledge.pdf.catalog")
+
+    first_ok, first_reason = budget.authorize("knowledge.pdf.search")
+    assert first_ok is False
+    assert first_reason == "tool_family_budget_exhausted:knowledge"
+    assert budget.stop_new_tools is False
+
+    second_ok, second_reason = budget.authorize("knowledge.pdf.search")
+    assert second_ok is False
+    assert second_reason == "tool_family_budget_exhausted:knowledge"
+    assert budget.stop_new_tools is True
+    assert budget.finalization_reason == "tool_family_budget_exhausted:knowledge"
+
+    third_ok, third_reason = budget.authorize("web.search", entity="甲公司")
+    assert third_ok is False
+    assert third_reason == "tool_family_budget_exhausted:knowledge"
+
+
+def test_market_family_allows_four_calls() -> None:
+    budget = MainAgentBudgetController(started_monotonic=time.monotonic())
+    for _ in range(4):
+        assert budget.authorize("iwencai.finance.query")[0] is True
+        budget.register("iwencai.finance.query")
+    allowed, reason = budget.authorize("iwencai.finance.query")
+    assert allowed is False
+    assert reason == "tool_family_budget_exhausted:market"
+    assert budget.stop_new_tools is False
 
 
 @pytest.mark.asyncio
@@ -1105,9 +1539,15 @@ async def test_pdf_search_requires_doc_id_returned_by_catalog(monkeypatch) -> No
             "doc_ids": ["another-report"],
         }
     )
-    admitted = await by_name["search_pdf_knowledge_tool"].ainvoke(
+    autofilled = await by_name["search_pdf_knowledge_tool"].ainvoke(
         {
             "query": "营业收入",
+            "categories": ["annual_reports"],
+        }
+    )
+    admitted = await by_name["search_pdf_knowledge_tool"].ainvoke(
+        {
+            "query": "营业收入 显式 doc_ids",
             "categories": ["annual_reports"],
             "doc_ids": ["report-2025"],
         }
@@ -1116,7 +1556,9 @@ async def test_pdf_search_requires_doc_id_returned_by_catalog(monkeypatch) -> No
     assert rejected["error"] == "pdf_doc_ids_not_cataloged"
     assert rejected["retryable"] is False
     assert rejected["requires_tool_id"] == "knowledge.pdf.catalog"
-    assert admitted["error"] == "local_document_evidence_not_found"
+    assert autofilled["error"] == "local_document_evidence_not_found"
+    # knowledge 族配额=2：catalog + 自动补齐 search 已用尽
+    assert admitted["error"] == "tool_family_budget_exhausted:knowledge"
     assert admitted["fallback_tool_ids"] == ["web.search"]
 
 
@@ -1235,27 +1677,26 @@ async def test_apple_amazon_comparison_keeps_evidence_backed_facts() -> None:
     response = MainAgentResponse(
         mode="grounded",
         gaps=["当前资料不足以判断是否买入。"],
-        sections=[MainAgentSection(
-            heading="业务亮点",
-            statements=[
-                MainAgentStatement(
-                    text="Apple 服务业务收入同比增长15%。",
-                    evidence_ids=[apple.evidence_id],
-                    entity="Apple",
-                    metric="services_revenue_growth",
-                    period="FY2025 Q4",
-                    unit="%",
-                ),
-                MainAgentStatement(
-                    text="Amazon AWS收入同比增长24%。",
-                    evidence_ids=[amazon.evidence_id],
-                    entity="Amazon",
-                    metric="aws_revenue_growth",
-                    period="FY2025 Q4",
-                    unit="%",
-                ),
-            ],
-        )],
+        
+        heading="业务亮点",
+        statements=[
+            MainAgentStatement(
+                text="Apple 服务业务收入同比增长15%。",
+                evidence_ids=[apple.evidence_id],
+                entity="Apple",
+                metric="services_revenue_growth",
+                period="FY2025 Q4",
+                unit="%",
+            ),
+            MainAgentStatement(
+                text="Amazon AWS收入同比增长24%。",
+                evidence_ids=[amazon.evidence_id],
+                entity="Amazon",
+                metric="aws_revenue_growth",
+                period="FY2025 Q4",
+                unit="%",
+            ),
+        ],
     )
     update = await main_evidence_quality_gate({
         "messages": [HumanMessage(content=question)],
@@ -1320,19 +1761,18 @@ async def test_multi_currency_comparison_keeps_answer_and_adds_soft_gap() -> Non
     )
     response = MainAgentResponse(
         mode="grounded",
-        sections=[MainAgentSection(
-            heading="营收对照",
-            statements=[
-                MainAgentStatement(
-                    text="腾讯最近完整财年营收约 8377 亿港元。",
-                    evidence_ids=[tencent.evidence_id],
-                ),
-                MainAgentStatement(
-                    text="阿里最近完整财年营收约 1484 亿美元。",
-                    evidence_ids=[alibaba.evidence_id],
-                ),
-            ],
-        )],
+        
+        heading="营收对照",
+        statements=[
+            MainAgentStatement(
+                text="腾讯最近完整财年营收约 8377 亿港元。",
+                evidence_ids=[tencent.evidence_id],
+            ),
+            MainAgentStatement(
+                text="阿里最近完整财年营收约 1484 亿美元。",
+                evidence_ids=[alibaba.evidence_id],
+            ),
+        ],
     )
     update = await main_evidence_quality_gate({
         "messages": [HumanMessage(content="比较腾讯和阿里营收")],
@@ -1370,16 +1810,15 @@ async def test_cross_period_statement_is_removed() -> None:
     }, entity="Amazon")[0]
     response = MainAgentResponse(
         mode="grounded",
-        sections=[MainAgentSection(
-            heading="比较",
-            statements=[MainAgentStatement(
-                text="Apple FY2025 Q3服务收入增长15%。",
-                evidence_ids=[apple.evidence_id],
-                entity="Apple",
-                metric="services_revenue_growth",
-                period="FY2025 Q3",
-                unit="%",
-            )],
+        
+        heading="比较",
+        statements=[MainAgentStatement(
+            text="Apple FY2025 Q3服务收入增长15%。",
+            evidence_ids=[apple.evidence_id],
+            entity="Apple",
+            metric="services_revenue_growth",
+            period="FY2025 Q3",
+            unit="%",
         )],
     )
     update = await main_evidence_quality_gate({
@@ -1422,16 +1861,13 @@ async def test_tavily_applies_tool_side_domain_allowlist(monkeypatch) -> None:
 
     monkeypatch.setattr(web_search_tool.settings, "TAVILY_API_KEY", "test-key")
     monkeypatch.setattr(web_search_tool.settings, "WEB_SEARCH_ALLOWED_DOMAINS", "")
+    monkeypatch.setattr(web_search_tool.settings, "WEB_SEARCH_MAX_DOMAINS", 20)
     monkeypatch.setattr(web_search_tool.httpx, "AsyncClient", FakeClient)
 
     await web_search_tool.search_web.ainvoke({"query": "今日 A 股热点有哪些"})
-    assert captured["payload"]["include_domains"] == [
-        "cninfo.com.cn",
-        "sse.com.cn",
-        "szse.cn",
-        "sec.gov",
-        "10jqka.com.cn",
-    ]
+    assert captured["payload"]["include_domains"] == list(DEFAULT_WEB_SEARCH_DOMAINS)[:20]
+    assert "eastmoney.com" in captured["payload"]["include_domains"]
+    assert "gov.cn" in captured["payload"]["include_domains"]
 
     captured.clear()
     await web_search_tool.fetch_web_search("今日财经热搜", scope="open")
@@ -1439,15 +1875,13 @@ async def test_tavily_applies_tool_side_domain_allowlist(monkeypatch) -> None:
 
 
 def test_web_search_domain_policy_allowlist_or_open() -> None:
-    assert resolve_search_domains(scope="allowlist") == [
-        "cninfo.com.cn",
-        "sse.com.cn",
-        "szse.cn",
-        "sec.gov",
-        "10jqka.com.cn",
-    ]
+    domains = resolve_search_domains(scope="allowlist")
+    assert domains == list(DEFAULT_WEB_SEARCH_DOMAINS)[:20]
+    assert "eastmoney.com" in domains
+    assert "gov.cn" in domains
+    assert len(domains) == min(20, len(DEFAULT_WEB_SEARCH_DOMAINS))
     assert resolve_search_domains(scope="open") == []
-
+    assert len(resolve_search_domains(scope="allowlist", max_domains=5)) == 5
 
 def test_web_search_soft_score_filter_keeps_threshold_hits_in_order() -> None:
     from tools.web_search import _rank_and_filter_results
@@ -1455,10 +1889,10 @@ def test_web_search_soft_score_filter_keeps_threshold_hits_in_order() -> None:
     kept, stats = _rank_and_filter_results(
         [
             {"title": "low", "url": "https://a", "content": "x", "score": 0.1},
-            {"title": "mid", "url": "https://b", "content": "y", "score": 0.25},
+            {"title": "mid", "url": "https://b", "content": "y", "score": 0.36},
             {"title": "high", "url": "https://c", "content": "z", "score": 0.5},
         ],
-        min_score=0.2,
+        min_score=0.35,
         max_results=4,
     )
     assert [item["title"] for item in kept] == ["high", "mid"]
@@ -1469,7 +1903,7 @@ def test_web_search_soft_score_filter_keeps_threshold_hits_in_order() -> None:
     assert stats["max"] == 0.5
 
 
-def test_web_search_soft_score_filter_fallback_keeps_top1() -> None:
+def test_web_search_score_filter_returns_empty_when_all_below_threshold() -> None:
     from tools.web_search import _rank_and_filter_results
 
     kept, stats = _rank_and_filter_results(
@@ -1478,14 +1912,13 @@ def test_web_search_soft_score_filter_fallback_keeps_top1() -> None:
             {"title": "b", "url": "https://b", "content": "y", "score": 0.12},
             {"title": "c", "url": "https://c", "content": "z", "score": 0.08},
         ],
-        min_score=0.2,
+        min_score=0.35,
         max_results=4,
     )
-    assert len(kept) == 1
-    assert kept[0]["title"] == "b"
-    assert stats["fallback_kept"] is True
-    assert stats["kept_count"] == 1
-    assert stats["dropped_by_score"] == 2
+    assert kept == []
+    assert stats["fallback_kept"] is False
+    assert stats["kept_count"] == 0
+    assert stats["dropped_by_score"] == 3
 
 
 def test_web_sanitize_payload_keeps_displayable_summaries_only() -> None:
@@ -1609,21 +2042,20 @@ async def test_inference_with_one_publisher_keeps_verified_facts() -> None:
     }, entity="Tencent")[0]
     response = MainAgentResponse(
         mode="grounded",
-        sections=[MainAgentSection(
-            heading="近况",
-            statements=[
-                MainAgentStatement(
-                    text="腾讯增值服务收入同比增长12%。",
-                    statement_type="fact",
-                    evidence_ids=[evidence.evidence_id],
-                ),
-                MainAgentStatement(
-                    text="若行业景气延续，后续仍值得跟踪。",
-                    statement_type="inference",
-                    evidence_ids=[evidence.evidence_id],
-                ),
-            ],
-        )],
+        
+        heading="近况",
+        statements=[
+            MainAgentStatement(
+                text="腾讯增值服务收入同比增长12%。",
+                statement_type="fact",
+                evidence_ids=[evidence.evidence_id],
+            ),
+            MainAgentStatement(
+                text="若行业景气延续，后续仍值得跟踪。",
+                statement_type="inference",
+                evidence_ids=[evidence.evidence_id],
+            ),
+        ],
     )
     update = await main_evidence_quality_gate({
         "messages": [HumanMessage(content="腾讯最近状况")],
@@ -1666,6 +2098,31 @@ def test_entity_mismatch_podcast_is_not_counted_as_apple() -> None:
     assert evidence.metadata["entity_mismatch"] is True
     assert evidence.metadata["displayable"] is False
     assert evidence.metadata["available_fields"] == []
+
+
+def test_web_results_must_match_one_requested_entity() -> None:
+    evidence = web_evidence_from_payload(
+        {
+            "results": [
+                {
+                    "title": "腾讯控股发布年度业绩",
+                    "url": "https://example.com/tencent",
+                    "content": "腾讯控股2025财年营业收入与净利润。",
+                },
+                {
+                    "title": "无关公司年度报告",
+                    "url": "https://example.com/unrelated",
+                    "content": "龙芯中科2025年营业收入与净利润。",
+                },
+            ]
+        },
+        entity="",
+        entities=["腾讯控股", "阿里巴巴"],
+    )
+    assert evidence[0].metadata["entity"] == "腾讯控股"
+    assert evidence[0].metadata["displayable"] is True
+    assert evidence[1].metadata["entity_mismatch"] is True
+    assert evidence[1].metadata["displayable"] is False
 
 
 def test_title_platform_and_consumer_subdomain_do_not_count_as_official_entity() -> None:
@@ -1758,7 +2215,7 @@ def test_finance_fact_lookup_builds_structured_evidence() -> None:
     )[0]
     assert evidence.metadata["source_grade"] == "structured"
     assert "official_earnings" in evidence.metadata["available_fields"]
-    assert evidence.metadata["entity"] == "Tencent"
+    assert evidence.metadata["entity"] == "腾讯"
     assert evidence.metadata["displayable"] is True
 
     rating = _structured_tool_evidence(
@@ -1780,6 +2237,7 @@ def test_finance_fact_lookup_builds_structured_evidence() -> None:
         ("knowledge.pdf.search", {"query": "营业收入", "evidence": [], "count": 0}),
     ],
 )
+
 def test_empty_local_retrieval_does_not_fabricate_evidence(tool_id, payload) -> None:
     from agents.main_deep_agent.tools.evidence_adapter import _evidence_from_payload
 
@@ -1844,6 +2302,7 @@ def test_iwencai_query_builds_displayable_structured_evidence() -> None:
             "ok": True,
             "provider": "iwencai",
             "query": "腾讯近两年营业收入净利润毛利率",
+            "answer": "腾讯财报表现最好，建议继续关注。",
             "data": {
                 "datas": [{
                     "股票简称": "腾讯控股",
@@ -1857,8 +2316,8 @@ def test_iwencai_query_builds_displayable_structured_evidence() -> None:
                     "period_year": 2025,
                     "metric": "营业收入",
                     "value": "837768030400",
-                    "unit": "港元",
-                    "currency": "HKD",
+                    "unit": "人民币",
+                    "currency": "CNY",
                 }],
             },
         },
@@ -1868,49 +2327,55 @@ def test_iwencai_query_builds_displayable_structured_evidence() -> None:
     assert item.evidence_id.startswith("main:")
     assert item.metadata["displayable"] is True
     assert item.metadata["source_grade"] == "structured"
-    assert "腾讯" in item.metadata["display_text"] or "营业收入" in item.metadata["display_text"]
+    assert item.metadata["display_text"]
     assert item.metadata["facts"]
-    assert item.metadata["facts"][0]["currency"] == "HKD"
+    assert item.metadata["facts"][0]["currency"] == "CNY"
     assert item.metadata["fiscal_period"] == "FY2025 Q4"
+    preview = item.metadata["preview_table"]
+    assert "营业收入" in preview["columns"]
+    assert preview["rows"][0][preview["columns"].index("营业收入")] == "837768030400"
+    assert "=" not in item.metadata["display_text"]
+    assert "建议继续关注" not in item.content
 
 
-def test_compare_entities_payload_splits_into_per_entity_evidence_with_calibre_facts() -> None:
+def test_iwencai_model_answer_without_structured_rows_is_not_evidence() -> None:
     from agents.main_deep_agent.tools.evidence_adapter import _evidence_from_payload
 
     evidence = _evidence_from_payload(
-        "iwencai.compare_entities",
+        "iwencai.query",
         {
             "ok": True,
             "provider": "iwencai",
-            "query": "近两个完整财年营业收入",
-            "entities": ["腾讯", "阿里巴巴"],
-            "failed_entities": [],
-            "per_entity": {
-                "腾讯": {"datas": [{"股票简称": "腾讯控股", "营业收入": "8377亿港元"}]},
-                "阿里巴巴": {"datas": [{"股票简称": "阿里巴巴", "营业收入": "1484亿美元"}]},
-            },
-            "per_entity_currency": {"腾讯": "HKD", "阿里巴巴": "USD"},
-            "per_entity_periods": {"腾讯": ["FY2025"], "阿里巴巴": ["FY2026"]},
-            "calibre": {
-                "currencies": ["HKD", "USD"],
-                "multi_currency": True,
-                "periods": ["FY2025", "FY2026"],
-                "multi_period": True,
+            "query": "比较三家公司财务数据",
+            "data": {"answer": "腾讯规模最大，美团仍需看拐点。", "datas": []},
+        },
+    )
+    assert evidence == []
+
+
+def test_iwencai_multi_entity_rows_become_separate_evidence() -> None:
+    from agents.main_deep_agent.tools.evidence_adapter import _evidence_from_payload
+
+    evidence = _evidence_from_payload(
+        "iwencai.query",
+        {
+            "ok": True,
+            "provider": "iwencai",
+            "query": "腾讯控股 阿里巴巴 美团 2025财年营业收入",
+            "data": {
+                "datas": [
+                    {"股票代码": "0700.HK", "营业收入": "8377.68亿", "报告期截止日": 20251231},
+                    {"股票代码": "9988.HK", "营业收入": "9963.47亿", "报告期截止日": 20250331},
+                    {"股票代码": "3690.HK", "营业收入": "4065.94亿", "报告期截止日": 20251231},
+                ]
             },
         },
     )
-    assert len(evidence) == 2
-    entities = {item.metadata["entity"] for item in evidence}
-    assert "Tencent" in entities or "腾讯" in entities
-    currencies = {
-        fact["currency"]
-        for item in evidence
-        for fact in item.metadata.get("facts") or []
-    }
-    assert currencies == {"HKD", "USD"}
-    periods = {item.metadata.get("fiscal_period") for item in evidence}
-    assert periods == {"FY2025", "FY2026"}
-    assert all(item.metadata["displayable"] for item in evidence)
+    assert len(evidence) == 3
+    assert all(item.metadata["entity"] == "" for item in evidence)
+    first_preview = evidence[0].metadata["preview_table"]
+    date_index = first_preview["columns"].index("报告期截止日")
+    assert first_preview["rows"][0][date_index] == "20251231"
 
 
 def test_preview_article_is_not_official_earnings() -> None:
@@ -1932,3 +2397,169 @@ def test_preview_article_is_not_official_earnings() -> None:
     assert "official_earnings" not in evidence.metadata["available_fields"]
     assert "earnings_preview" in evidence.metadata["available_fields"]
     assert evidence.metadata["display_text"].startswith("【未披露·前瞻/预估】")
+
+
+def test_public_tool_step_detail_uses_displayable_evidence_only() -> None:
+    evidence = _evidence("e-detail", "financial")
+    evidence.metadata.update(
+        {
+            "displayable": True,
+            "display_text": "川金诺（300505.SZ），归母净利润同比增长率[20250930] 175.61",
+            "entity": "川金诺",
+            "fiscal_period": "FY2025 Q3",
+            "preview_table": {
+                "query": "川金诺2025年前三季度归母净利润同比增长率",
+                "columns": ["股票代码", "股票简称", "归母净利润同比增长率[20250930]"],
+                "rows": [["300505.SZ", "川金诺", "175.61"]],
+            },
+            "facts": [
+                {
+                    "entity": "川金诺",
+                    "metric": "net_income_growth",
+                    "fiscal_period": "FY2025 Q3",
+                    "value": 175.61,
+                    "unit": "%",
+                }
+            ],
+        }
+    )
+    running = build_public_tool_step_detail(
+        tool_id="iwencai.query",
+        source_family="market",
+        query="川金诺2025年前三季度净利润同比增长多少",
+        status="running",
+    )
+    assert running is not None
+    assert running["title"] == "问财数据"
+    assert running["query"].startswith("川金诺")
+    assert "display_text" not in running
+
+    done = build_public_tool_step_detail(
+        tool_id="iwencai.query",
+        source_family="market",
+        query="川金诺2025年前三季度净利润同比增长多少",
+        evidence=[evidence],
+        status="done",
+    )
+    assert done is not None
+    assert done["title"] == "问财数据"
+    assert "175.61" in done["display_text"]
+    assert "股票代码=" not in done["display_text"]
+    assert done["columns"][0] == "股票代码"
+    assert done["rows"][0][1] == "川金诺"
+
+
+def test_sanitize_follow_ups_keeps_model_text_and_filters_action_language() -> None:
+    follow_ups = sanitize_follow_ups(
+        [
+            "川金诺同期营业收入是多少？",
+            "川金诺2025年前三季度净利润同比增长多少？",  # 与当前问题重复
+            "川金诺现在适合买入吗？",
+            "川金诺同期毛利率是多少？",
+        ],
+        query="川金诺2025年前三季度净利润同比增长多少？",
+        investment_action_sensitive=True,
+    )
+    assert follow_ups == [
+        "川金诺同期营业收入是多少？",
+        "川金诺同期毛利率是多少？",
+    ]
+
+
+def test_build_answer_charts_requires_multi_period_facts() -> None:
+    single = _evidence("e-single", "financial")
+    single.metadata.update(
+        {
+            "entity": "川金诺",
+            "facts": [
+                {
+                    "entity": "川金诺",
+                    "metric": "net_income_growth",
+                    "fiscal_period": "FY2025 Q3",
+                    "value": 175.61,
+                    "unit": "%",
+                }
+            ],
+        }
+    )
+    assert build_answer_charts(evidence=[single]) == []
+
+    multi = _evidence("e-multi", "financial")
+    multi.metadata.update(
+        {
+            "entity": "川金诺",
+            "facts": [
+                {
+                    "entity": "川金诺",
+                    "metric": "net_income_growth",
+                    "fiscal_period": "FY2023 Q4",
+                    "value": -40.0,
+                    "unit": "%",
+                },
+                {
+                    "entity": "川金诺",
+                    "metric": "net_income_growth",
+                    "fiscal_period": "FY2024 Q4",
+                    "value": 80.0,
+                    "unit": "%",
+                },
+                {
+                    "entity": "川金诺",
+                    "metric": "net_income_growth",
+                    "fiscal_period": "FY2025 Q3",
+                    "value": 175.61,
+                    "unit": "%",
+                },
+            ],
+        }
+    )
+    charts = build_answer_charts(evidence=[multi])
+    assert len(charts) == 1
+    assert charts[0]["categories"] == ["FY2023 Q4", "FY2024 Q4", "FY2025 Q3"]
+    assert charts[0]["lines"][0]["values"] == [-40.0, 80.0, 175.61]
+
+
+def test_sanitize_step_detail_drops_raw_json_and_extra_keys() -> None:
+    cleaned = sanitize_step_detail(
+        {
+            "title": "财务数据",
+            "query": "测试查询",
+            "display_text": '{"ok": true, "secret": 1}',
+            "raw_payload": {"datas": [{"a": 1}]},
+            "columns": ["实体", "数值"],
+            "rows": [["川金诺", "3.04亿"], ["坏行"]],
+        }
+    )
+    assert cleaned is not None
+    assert cleaned["title"] == "财务数据"
+    assert cleaned["query"] == "测试查询"
+    assert "display_text" not in cleaned
+    assert "raw_payload" not in cleaned
+    assert cleaned["rows"] == [["川金诺", "3.04亿"]]
+
+    event = build_step_event(
+        step_id="main-tool-1-iwencai.query",
+        label="已取得财务数据",
+        status="done",
+        category="financial",
+        short_label="财务数据",
+        detail=cleaned,
+    )
+    assert event["type"] == "step"
+    assert event["detail"]["query"] == "测试查询"
+
+
+def test_tool_error_is_visible_in_step_detail() -> None:
+    detail = build_public_tool_step_detail(
+        tool_id="iwencai.query",
+        source_family="market",
+        query="腾讯控股 2025 财年营业收入",
+        status="error",
+        error="iwencai_timeout",
+    )
+    assert detail is not None
+    assert detail["error"] == "iwencai_timeout"
+    cleaned = sanitize_step_detail(detail)
+    assert cleaned is not None
+    assert cleaned["error"] == "iwencai_timeout"
+

@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from datetime import timezone
@@ -47,7 +46,7 @@ def _iwencai_skill_root() -> Path:
 
 
 def skill_description(skill_id: str, *, fallback: str = "") -> str:
-    """读取官方 Skill frontmatter 的 description；缺失时回退 fallback。"""
+    """读取 `.iwencai-skills/<id>/SKILL.md` frontmatter 的 description。"""
     path = _iwencai_skill_root() / skill_id / "SKILL.md"
     try:
         text = path.read_text(encoding="utf-8")
@@ -66,24 +65,154 @@ def skill_description(skill_id: str, *, fallback: str = "") -> str:
     return description or fallback
 
 
-def _apply_skill_description(
-    langchain_tool: BaseTool,
-    skill_id: str,
-    *,
-    fallback: str,
-) -> str:
-    """把官方技能描述赋给 LangChain Tool（模型可见）。"""
-    description = skill_description(skill_id, fallback=fallback)
+def _apply_skill_description(langchain_tool: BaseTool, skill_id: str) -> str:
+    """用官方 Skill description 覆盖 Tool 描述（模型可见）。"""
+    description = skill_description(
+        skill_id,
+        fallback=str(getattr(langchain_tool, "description", "") or skill_id),
+    )
     langchain_tool.description = description
     return description
 
 _IWENCAI_DOMAIN = "iwencai"
 _IWENCAI_DATA_TYPE = "iwencai_result"
+
+
+def _finance_fact_rank(metric: str) -> int:
+    """完整财年优先用累计字段；单季次之；行情垫底。"""
+    if "最新价" in metric or "涨跌幅" in metric:
+        return 90
+    if "单季度" in metric or "单季" in metric:
+        return 50
+    if "累计" in metric and any(
+        marker in metric for marker in ("营业收入", "营业额", "收入", "净利润", "归母", "净利")
+    ):
+        return 0
+    if "累计" in metric:
+        return 10
+    return 40
+
+
+def _prioritize_finance_facts(row_facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """同实体行内：累计财务指标优先；若已有累计营收/净利则丢掉纯行情字段。"""
+    ordered = sorted(
+        row_facts,
+        key=lambda item: (
+            _finance_fact_rank(str(item.get("metric") or "")),
+            str(item.get("metric") or ""),
+        ),
+    )
+    has_cumulative = any(
+        _finance_fact_rank(str(item.get("metric") or "")) == 0 for item in ordered
+    )
+    if not has_cumulative:
+        return ordered
+    return [
+        item
+        for item in ordered
+        if _finance_fact_rank(str(item.get("metric") or "")) < 90
+    ]
+
+
+def _normalize_iwencai_payload(result: dict[str, Any]) -> dict[str, Any]:
+    """在工具边界补齐通用 facts；无法确认的内容保留为 unmapped_rows。"""
+    payload = deepcopy(result)
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return payload
+    rows = [row for row in list(data.get("datas") or []) if isinstance(row, dict)]
+    if not rows:
+        return payload
+
+    facts: list[dict[str, Any]] = []
+    unmapped_rows: list[dict[str, Any]] = []
+    for row_index, row in enumerate(rows):
+        row_facts: list[dict[str, Any]] = []
+        entity = ""
+        for key, value in row.items():
+            key_text = str(key).strip().lower()
+            if key_text in {"entity", "company", "股票简称", "证券简称", "股票名称"}:
+                if value not in (None, ""):
+                    entity = str(value).strip()
+                break
+
+        period = ""
+        for key, value in row.items():
+            key_text = str(key).lower()
+            if "报告期" not in key_text and "财年" not in key_text and "period" not in key_text:
+                continue
+            # 优先从单元格值解析日期；列名里可能带无关的字段编号后缀（如
+            # "报告期截止日[20260630]": "20250930"），只用 key 兜底避免误取。
+            source_text = str(value) if value not in (None, "") else str(key)
+            match = re.search(r"(20\d{2})(?:[-./年]?(\d{1,2}))?(?:[-./月]?(\d{1,2}))?", source_text)
+            if match:
+                year, month, _day = match.groups()
+                period = f"FY{year} Q4"
+                if month and int(month) <= 9:
+                    period = f"FY{year}"
+                break
+
+        for field_name, raw_value in row.items():
+            if raw_value in (None, "") or isinstance(raw_value, bool):
+                continue
+            text = str(raw_value).strip().replace(",", "")
+            number_match = re.match(r"[-+]?\d+(?:\.\d+)?", text)
+            suffix = text[number_match.end():].strip() if number_match else ""
+            if not number_match or suffix not in {"", "%", "亿", "万", "元", "亿港元", "亿元", "亿美元", "万港元", "万人民币", "美元", "港元", "人民币"}:
+                continue
+            if re.search(r"报告期|日期|时间|代码|股票代码|证券代码", str(field_name), re.I):
+                continue
+            value = float(number_match.group(0))
+            unit = "%" if "%" in text else ""
+            currency = ""
+            for marker, code in (("美元", "USD"), ("港元", "HKD"), ("人民币", "CNY")):
+                if marker in text or marker in str(field_name):
+                    currency = code
+                    unit = unit or marker
+                    break
+            # 指标名自带 [YYYYMMDD] 时，该日期直接对应本字段的取数口径，
+            # 比行级 "报告期" 猜测更可靠（尤其在同一行混有不同截止日字段时）。
+            fact_period = period
+            bracket_match = re.search(r"\[(\d{4})(\d{2})(\d{2})\]", str(field_name))
+            if bracket_match:
+                bracket_year, bracket_month, _bracket_day = bracket_match.groups()
+                fact_period = (
+                    f"FY{bracket_year} Q4"
+                    if int(bracket_month) == 12
+                    else f"FY{bracket_year}"
+                )
+            row_facts.append({
+                "entity": entity,
+                "metric": str(field_name),
+                "fiscal_period": fact_period,
+                "value": value,
+                "unit": unit,
+                "currency": currency,
+                "provider_field": str(field_name),
+                "provider_row_index": row_index,
+            })
+        if row_facts:
+            facts.extend(_prioritize_finance_facts(row_facts))
+        else:
+            unmapped_rows.append(row)
+
+    normalized = dict(data)
+    existing_facts = [item for item in list(data.get("facts") or []) if isinstance(item, dict)]
+    normalized["facts"] = existing_facts + facts
+    normalized["unmapped_rows"] = unmapped_rows
+    normalized["coverage"] = {
+        "entities": sorted({str(item.get("entity") or "") for item in facts if item.get("entity")}),
+        "metrics": sorted({str(item.get("metric") or "") for item in facts if item.get("metric")}),
+        "periods": sorted({str(item.get("fiscal_period") or "") for item in facts if item.get("fiscal_period")}),
+    }
+    payload["data"] = normalized
+    return payload
 _MARKET_SKILLS = frozenset(
     {
         "hithink-market-query",
         "hithink-zhishu-query",
         "hithink-industry-query",
+        "hithink-finance-query",
         _LEGACY_SKILL_ID,
     }
 )
@@ -97,6 +226,7 @@ _DOCUMENT_SKILLS = frozenset(
 _SCREEN_SKILLS = frozenset(
     {
         "hithink-astock-selector",
+        "hithink-usstock-selector",
         "hithink-fund-selector",
     }
 )
@@ -370,142 +500,40 @@ async def fetch_iwencai(
 
 @tool(parse_docstring=True)
 async def query_iwencai(query: str, page: int = 1, limit: int = 10) -> dict[str, Any]:
-    """使用自然语言查询同花顺问财数据。
+    """使用自然语言查询同花顺问财数据（通用/兼容入口）。
 
     Args:
         query: 股票、指数、财务或选股查询语句。
         page: 结果页码，从 1 开始。
         limit: 每页返回条数，最大值由配置控制。
     """
-    return await fetch_iwencai(query, page=page, limit=limit)
-
-
-_MIN_COMPARE_ENTITIES = 2
-_MAX_COMPARE_ENTITIES = 6
-_CURRENCY_HINTS: tuple[tuple[str, str], ...] = (
-    ("港元", "HKD"),
-    ("HKD", "HKD"),
-    ("美元", "USD"),
-    ("USD", "USD"),
-    ("US$", "USD"),
-    ("人民币", "CNY"),
-    ("CNY", "CNY"),
-    ("RMB", "CNY"),
-)
-_FISCAL_HINT_RE = re.compile(r"(?:FY\s*)?(20\d{2})(?:\s*年)?(?:\s*Q([1-4]))?", re.I)
-
-
-def _detect_currency_hint(text: str) -> str:
-    """从原始问财返回文本里粗粒度识别币种，供多实体对比时提示口径差异。"""
-    for marker, currency in _CURRENCY_HINTS:
-        if marker in text:
-            return currency
-    return ""
-
-
-def _detect_fiscal_hints(text: str, *, limit: int = 3) -> list[str]:
-    """粗粒度提取财年/财季标签，仅用于口径差异提示，不作为精确事实。"""
-    hints: list[str] = []
-    for match in _FISCAL_HINT_RE.finditer(text):
-        year, quarter = match.group(1), match.group(2)
-        label = f"FY{year} Q{quarter}" if quarter else f"FY{year}"
-        if label not in hints:
-            hints.append(label)
-        if len(hints) >= limit:
-            break
-    return hints
-
-
-async def compare_entities_iwencai(
-    entities: list[str],
-    query: str,
-    limit: int = 10,
-) -> dict[str, Any]:
-    """并发查询多个实体的同一指标，避免逐个改写重复调用浪费配额。
-
-    对每个实体拼出「实体 + 查询语句」独立请求问财，合并为按实体归集的结果，
-    并对返回文本做币种/财年粗粒度扫描，标记是否存在多币种或多财年口径。
-    """
-    entities = [str(item).strip() for item in entities if str(item).strip()]
-    if len(entities) < _MIN_COMPARE_ENTITIES:
-        raise ValueError("compare_entities_requires_at_least_two_entities")
-    if len(entities) > _MAX_COMPARE_ENTITIES:
-        raise ValueError(f"compare_entities_supports_up_to_{_MAX_COMPARE_ENTITIES}")
-    if not query.strip():
-        raise ValueError("query_must_not_be_empty")
-
-    per_entity_queries = {entity: f"{entity} {query}".strip() for entity in entities}
-    results = await asyncio.gather(
-        *(fetch_iwencai(text, limit=limit) for text in per_entity_queries.values()),
-        return_exceptions=True,
-    )
-
-    per_entity: dict[str, Any] = {}
-    per_entity_currency: dict[str, str] = {}
-    per_entity_periods: dict[str, list[str]] = {}
-    failed_entities: list[str] = []
-    currencies: list[str] = []
-    periods: list[str] = []
-    for entity, result in zip(per_entity_queries.keys(), results, strict=True):
-        if isinstance(result, BaseException) or not isinstance(result, dict) or not result.get("ok"):
-            failed_entities.append(entity)
-            continue
-        data = result.get("data")
-        per_entity[entity] = data
-        haystack = str(data)
-        currency = _detect_currency_hint(haystack)
-        if currency:
-            per_entity_currency[entity] = currency
-            if currency not in currencies:
-                currencies.append(currency)
-        entity_periods = _detect_fiscal_hints(haystack)
-        if entity_periods:
-            per_entity_periods[entity] = entity_periods
-        for period in entity_periods:
-            if period not in periods:
-                periods.append(period)
-
-    if not per_entity:
-        return {
-            "ok": False,
-            "error": "compare_entities_all_failed",
-            "failed_entities": failed_entities,
-        }
-    return {
-        "ok": True,
-        "provider": "iwencai",
-        "query": query,
-        "entities": list(per_entity.keys()),
-        "failed_entities": failed_entities,
-        "per_entity": per_entity,
-        "per_entity_currency": per_entity_currency,
-        "per_entity_periods": per_entity_periods,
-        "calibre": {
-            "currencies": currencies,
-            "multi_currency": len(currencies) > 1,
-            "periods": periods,
-            "multi_period": len(periods) > 1,
-        },
-    }
+    result = await fetch_iwencai(query, page=page, limit=limit)
+    return _normalize_iwencai_payload(result)
 
 
 @tool(parse_docstring=True)
-async def compare_entities_with_iwencai(
-    entities: list[str],
+async def query_iwencai_finance(
     query: str,
+    page: int = 1,
     limit: int = 10,
+    call_type: str = "normal",
 ) -> dict[str, Any]:
-    """并发查询多个公司/指数的同一财务或行情指标，用于财报或同业对比。
-
-    比逐个调用 query_iwencai 更省配额，且会在返回中标注 calibre.multi_currency
-    / calibre.multi_period，提示是否存在币种或财年口径差异。
+    """查询全市场个股财务指标（营收、净利、ROE、负债率、现金流等）。
 
     Args:
-        entities: 2-6 个待对比实体名称，如 ["腾讯", "阿里巴巴"]。
-        query: 对每个实体都适用的指标查询语句，如「近两个完整财年营业收入 归母净利润 销售毛利率」。
-        limit: 每个实体查询的返回条数上限。
+        query: 财务指标自然语言查询语句。
+        page: 结果页码，从 1 开始。
+        limit: 每页返回条数。
+        call_type: 调用类型，只能是 normal 或 retry。
     """
-    return await compare_entities_iwencai(entities, query, limit=limit)
+    result = await _run_query_skill(
+        "hithink-finance-query",
+        query,
+        page=page,
+        limit=limit,
+        call_type=call_type,
+    )
+    return _normalize_iwencai_payload(result)
 
 
 @tool(parse_docstring=True)
@@ -535,16 +563,42 @@ async def screen_iwencai(
 
 
 @tool(parse_docstring=True)
+async def screen_iwencai_usstock(
+    query: str,
+    page: int = 1,
+    limit: int = 10,
+    call_type: str = "normal",
+) -> dict[str, Any]:
+    """通过已安装的官方问财 Skill 执行美股筛选。
+
+    Args:
+        query: 自然语言美股筛选条件。
+        page: 结果页码，从 1 开始。
+        limit: 每页返回条数。
+        call_type: 调用类型，只能是 normal 或 retry。
+    """
+    return await _run_query_skill(
+        "hithink-usstock-selector",
+        query,
+        page=page,
+        limit=limit,
+        call_type=call_type,
+    )
+
+
+@tool(parse_docstring=True)
 async def query_iwencai_market(
     query: str,
     page: int = 1,
     limit: int = 10,
     call_type: str = "normal",
 ) -> dict[str, Any]:
-    """查询股票、ETF 和实时行情数据。
+    """查询股票、ETF 和指数等行情（价、涨跌幅、成交、资金等）。
+
+    不用于板块领涨或行业涨跌幅排名（请用 query_iwencai_industry）。
 
     Args:
-        query: 行情查询语句。
+        query: 行情查询语句（个股/ETF/指数；A股「今日」未收盘时请改写为明确交易日）。
         page: 结果页码，从 1 开始。
         limit: 每页返回条数。
         call_type: 调用类型，只能是 normal 或 retry。
@@ -565,10 +619,10 @@ async def query_iwencai_industry(
     limit: int = 10,
     call_type: str = "normal",
 ) -> dict[str, Any]:
-    """查询行业估值、财务、盈利、行情和板块排名。
+    """查询行业估值、财务、盈利、行情和板块排名（含领涨板块/涨跌幅排名）。
 
     Args:
-        query: 行业数据查询语句。
+        query: 行业/板块查询语句；「今日领涨」在未收盘时请改写为系统提示中的最近已结束交易日（形如「YYYY年M月D日A股板块涨幅排名」），禁止写死某一天。
         page: 结果页码，从 1 开始。
         limit: 每页返回条数。
         call_type: 调用类型，只能是 normal 或 retry。
@@ -686,7 +740,7 @@ register_tool(
     ToolSpec(
         tool_id="iwencai.query",
         name="query_iwencai",
-        description="通过同花顺问财自然语言查询股票、指数和选股数据",
+        description="通过同花顺问财自然语言查询股票、指数和选股数据（兼容入口）",
         risk_level="low",
         read_only=True,
     ),
@@ -694,68 +748,27 @@ register_tool(
     handler=query_iwencai.ainvoke,
 )
 
-register_tool(
-    ToolSpec(
-        tool_id="iwencai.compare_entities",
-        name="compare_entities_with_iwencai",
-        description="并发查询多个公司/指数的同一指标并标注币种/财年口径差异，用于财报或同业对比",
-        risk_level="low",
-        read_only=True,
-        timeout_seconds=45.0,
+# 描述一律取自 `.iwencai-skills/<skill_id>/SKILL.md` 的 description，不在此重复维护文案。
+_TOOL_SKILL_BINDINGS: tuple[tuple[str, str, BaseTool, dict[str, Any]], ...] = (
+    ("iwencai.finance.query", "hithink-finance-query", query_iwencai_finance, {}),
+    ("iwencai.market.query", "hithink-market-query", query_iwencai_market, {}),
+    ("iwencai.industry.query", "hithink-industry-query", query_iwencai_industry, {}),
+    ("iwencai.index.query", "hithink-zhishu-query", query_iwencai_index, {}),
+    ("iwencai.rating.query", "hithink-insresearch-query", query_iwencai_rating, {}),
+    ("iwencai.announcement.search", "announcement-search", search_iwencai_announcement, {}),
+    ("iwencai.report.search", "report-search", search_iwencai_report, {}),
+    ("iwencai.fund.screen", "hithink-fund-selector", screen_iwencai_fund, {}),
+    ("iwencai.usstock.screen", "hithink-usstock-selector", screen_iwencai_usstock, {}),
+    (
+        "iwencai.screen",
+        "hithink-astock-selector",
+        screen_iwencai,
+        {"timeout_seconds": settings.IWENCAI_SKILL_RUNNER_TIMEOUT_SEC},
     ),
-    langchain_tool=compare_entities_with_iwencai,
-    handler=compare_entities_with_iwencai.ainvoke,
 )
 
-for _tool_id, _skill_id, _fallback, _langchain_tool in (
-    (
-        "iwencai.market.query",
-        "hithink-market-query",
-        "查询股票、ETF 和实时行情数据",
-        query_iwencai_market,
-    ),
-    (
-        "iwencai.industry.query",
-        "hithink-industry-query",
-        "查询行业估值、财务、盈利、行情和板块排名",
-        query_iwencai_industry,
-    ),
-    (
-        "iwencai.index.query",
-        "hithink-zhishu-query",
-        "查询主要指数行情和指标",
-        query_iwencai_index,
-    ),
-    (
-        "iwencai.rating.query",
-        "hithink-insresearch-query",
-        "查询研报评级、业绩预测和机构研究数据",
-        query_iwencai_rating,
-    ),
-    (
-        "iwencai.announcement.search",
-        "announcement-search",
-        "搜索上市公司公告和重大事件",
-        search_iwencai_announcement,
-    ),
-    (
-        "iwencai.report.search",
-        "report-search",
-        "搜索券商研报和机构研究报告",
-        search_iwencai_report,
-    ),
-    (
-        "iwencai.fund.screen",
-        "hithink-fund-selector",
-        "筛选公募基金及其基金经理、业绩和持仓",
-        screen_iwencai_fund,
-    ),
-):
-    _description = _apply_skill_description(
-        _langchain_tool,
-        _skill_id,
-        fallback=_fallback,
-    )
+for _tool_id, _skill_id, _langchain_tool, _extra in _TOOL_SKILL_BINDINGS:
+    _description = _apply_skill_description(_langchain_tool, _skill_id)
     register_tool(
         ToolSpec(
             tool_id=_tool_id,
@@ -763,39 +776,24 @@ for _tool_id, _skill_id, _fallback, _langchain_tool in (
             description=_description,
             risk_level="low",
             read_only=True,
+            **_extra,
         ),
         langchain_tool=_langchain_tool,
         handler=_langchain_tool.ainvoke,
     )
 
-_screen_description = _apply_skill_description(
-    screen_iwencai,
-    "hithink-astock-selector",
-    fallback="通过官方问财 Skill 筛选 A 股并返回结构化候选结果",
-)
-register_tool(
-    ToolSpec(
-        tool_id="iwencai.screen",
-        name="screen_iwencai",
-        description=_screen_description,
-        risk_level="low",
-        read_only=True,
-        timeout_seconds=settings.IWENCAI_SKILL_RUNNER_TIMEOUT_SEC,
-    ),
-    langchain_tool=screen_iwencai,
-    handler=screen_iwencai.ainvoke,
-)
-
 
 __all__ = [
     "fetch_iwencai",
     "query_iwencai",
+    "query_iwencai_finance",
     "query_iwencai_index",
     "query_iwencai_industry",
     "query_iwencai_market",
     "query_iwencai_rating",
     "screen_iwencai",
     "screen_iwencai_fund",
+    "screen_iwencai_usstock",
     "search_iwencai_announcement",
     "search_iwencai_report",
     "skill_description",

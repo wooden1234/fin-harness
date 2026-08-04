@@ -1,6 +1,6 @@
 ---
 name: announcement-search
-description: 查询 A 股、港股、基金和 ETF 公告、财报、分红、回购、重组等披露信息时使用。
+description: 支持A股、港股、基金、ETF等金融标的公告的查询，同时公告类型包括不限于定期财务报告、分红派息、回购增持、资产重组等等。
 required_tools:
   - iwencai.announcement.search
 ---

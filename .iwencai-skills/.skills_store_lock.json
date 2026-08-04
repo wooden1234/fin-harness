@@ -48,6 +48,18 @@
       "zip_url": "http://ms.10jqka.com.cn/gateway/market/api/v1/skills/square/download?name=hithink-fund-selector",
       "source": "skillhub",
       "version": ""
+    },
+    "hithink-finance-query": {
+      "name": "hithink-finance-query",
+      "zip_url": "http://ms.10jqka.com.cn/gateway/market/api/v1/skills/square/download?name=hithink-finance-query",
+      "source": "skillhub",
+      "version": ""
+    },
+    "hithink-usstock-selector": {
+      "name": "hithink-usstock-selector",
+      "zip_url": "http://ms.10jqka.com.cn/gateway/market/api/v1/skills/square/download?name=hithink-usstock-selector",
+      "source": "skillhub",
+      "version": ""
     }
   }
 }

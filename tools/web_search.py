@@ -69,7 +69,7 @@ def _rank_and_filter_results(
     min_score: float,
     max_results: int,
 ) -> tuple[list[WebSearchResult], WebSearchScoreStats]:
-    """按 score 降序软过滤；全低于阈值时保底保留最高分 1 条。"""
+    """按 score 降序过滤；低于阈值一律丢弃，不保底返回。"""
     ordered = sorted(
         results,
         key=lambda item: float(item.get("score") or 0.0),
@@ -91,14 +91,8 @@ def _rank_and_filter_results(
     above_threshold = [
         item for item in ordered if float(item.get("score") or 0.0) >= min_score
     ]
-    fallback_kept = False
-    if above_threshold:
-        kept = above_threshold[: max(1, max_results)]
-        dropped_by_score = raw_count - len(above_threshold)
-    else:
-        kept = ordered[:1]
-        fallback_kept = True
-        dropped_by_score = raw_count - 1
+    kept = above_threshold[: max(1, max_results)] if above_threshold else []
+    dropped_by_score = raw_count - len(above_threshold)
     stats: WebSearchScoreStats = {
         "min": min(scores),
         "max": max(scores),
@@ -106,7 +100,7 @@ def _rank_and_filter_results(
         "raw_count": raw_count,
         "kept_count": len(kept),
         "dropped_by_score": dropped_by_score,
-        "fallback_kept": fallback_kept,
+        "fallback_kept": False,
     }
     return kept, stats
 
@@ -120,7 +114,7 @@ async def _search_tavily(
         return _empty_response(configured=False)
 
     max_results = max(1, min(int(settings.WEB_SEARCH_MAX_RESULTS), 10))
-    min_score = float(getattr(settings, "WEB_SEARCH_MIN_SCORE", 0.2) or 0.0)
+    min_score = float(getattr(settings, "WEB_SEARCH_MIN_SCORE", 0.35) or 0.0)
     # 多取少量候选，软过滤后仍尽量填满 max_results。
     fetch_count = max(max_results, min(10, max_results + 2))
     payload: dict[str, Any] = {
@@ -133,9 +127,9 @@ async def _search_tavily(
     }
     domains = [
         str(item).strip().lower()
-        for item in list(include_domains or [])[:5]
+        for item in list(include_domains or [])
         if str(item).strip()
-    ]
+    ][:30]
     if domains:
         payload["include_domains"] = domains
 
@@ -189,7 +183,7 @@ async def fetch_web_search(
 ) -> WebSearchResponse:
     """执行联网搜索。
 
-    - scope=\"allowlist\"（默认）：金融白名单，最多 5 个域名
+    - scope=\"allowlist\"（默认）：金融/政策白名单，数量由 WEB_SEARCH_MAX_DOMAINS 控制
     - scope=\"open\"：不限域名（如热榜）
     """
     provider = str(settings.WEB_SEARCH_PROVIDER or "").strip().lower()
@@ -198,10 +192,11 @@ async def fetch_web_search(
         return _empty_response(configured=False)
 
     mode: WebSearchScope = "open" if str(scope).strip().lower() == "open" else "allowlist"
+    max_domains = max(1, min(int(getattr(settings, "WEB_SEARCH_MAX_DOMAINS", 20) or 20), 30))
     domains = resolve_search_domains(
         scope=mode,
         allowed_domains=str(getattr(settings, "WEB_SEARCH_ALLOWED_DOMAINS", "") or ""),
-        max_domains=5,
+        max_domains=max_domains,
     )
     return await _search_tavily(query, include_domains=domains or None)
 
@@ -211,7 +206,7 @@ async def search_web(query: str) -> dict[str, Any]:
     """联网搜索公开网页信息，用于最新动态、公开资料补充。
 
     Args:
-        query: 搜索关键词或完整问句
+        query: 已改写的检索关键词（主体+事件+时间）；不要传用户原话里的买卖/仓位话术
     """
     # 模型入口固定走白名单，避免被配置误开成全网搜。
     return await fetch_web_search(query, scope="allowlist")

@@ -953,19 +953,11 @@ async def synthesize(
             for evidence_id in statement.evidence_ids
         )
     )
-    citation_number = {
-        evidence_id: index
-        for index, evidence_id in enumerate(used_evidence_ids, start=1)
-    }
     parts = []
     for statement in constrained.statements:
-        markers = "".join(
-            f"[{citation_number[evidence_id]}]"
-            for evidence_id in statement.evidence_ids
-            if evidence_id in citation_number
-        )
+        # 正文不插入 [n] 角标；来源仍通过 citations 列表单独展示。
         prefix = "分析判断：" if statement.statement_type == "inference" else ""
-        parts.append(f"{prefix}{statement.text}{markers}")
+        parts.append(f"{prefix}{statement.text}")
     if constrained.caveats:
         parts.append(
             "### 限制与未解决问题\n"

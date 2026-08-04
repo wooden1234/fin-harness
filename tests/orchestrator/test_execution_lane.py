@@ -44,6 +44,13 @@ from agents.orchestrator.execution_lane_resolver import (
         ("如何理解 ROE", "general"),
         ("什么是市盈率，比较腾讯和阿里", "deep"),
         ("查询当前市盈率", "deep"),
+        (
+            "2026-08-04 01:59:48.335 | WARNING | agents.main_deep_agent.assembly:"
+            "run_main_deep_agent:190 - main agent failed: exception_type=ValueError "
+            "message=deep_summary_unknown_evidence_id tool_calls=5 journal_entries=7",
+            "general",
+        ),
+        ("Traceback (most recent call last):\n  File \"a.py\", line 1", "general"),
     ],
 )
 def test_classify_execution_lane_rules(query: str, expected: str) -> None:

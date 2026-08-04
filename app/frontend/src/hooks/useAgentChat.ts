@@ -35,6 +35,7 @@ export function useAgentChat() {
     upsertAgentStep,
     agentSteps,
     setHitlPending,
+    closeSources,
   } = useChatStore()
 
   const resetAgentProgress = () => {
@@ -73,6 +74,7 @@ export function useAgentChat() {
           status: event.status,
           category: event.category,
           shortLabel: event.short_label,
+          ...(event.detail ? { detail: event.detail } : {}),
         })
       }
 
@@ -122,10 +124,9 @@ export function useAgentChat() {
             route: event.route,
             agentSteps: [...useChatStore.getState().agentSteps],
             agentTodos: [...useChatStore.getState().agentTodos],
+            followUps: event.follow_ups ?? [],
+            charts: event.charts ?? [],
           })
-          if (event.citations && event.citations.length > 0) {
-            useChatStore.getState().openSources(assistantMessageId, 0)
-          }
         }
         resetAgentProgress()
         setGenerating(false)
@@ -224,6 +225,7 @@ export function useAgentChat() {
       setGenerating(true)
       resetAgentProgress()
       setHitlPending(false)
+      closeSources()
 
       const fields: Record<string, string> = {
         query: trimmed,
@@ -260,6 +262,7 @@ export function useAgentChat() {
     setGenerating(true)
     resetAgentProgress()
     setHitlPending(false)
+    closeSources()
 
     await runStream('/api/agent/resume', {
       conversation_id: activeConversationId,

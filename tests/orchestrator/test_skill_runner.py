@@ -43,6 +43,13 @@ async def test_skill_runner_rejects_unknown_skill(monkeypatch):
     assert result["error"] == "skill_not_allowed:unknown"
 
 
+def test_skill_runner_allows_finance_and_usstock_skills():
+    from skills.runners.iwencai import installed_skill_version
+
+    assert installed_skill_version("hithink-finance-query") == "1.0.0"
+    assert installed_skill_version("hithink-usstock-selector") == "1.0.0"
+
+
 def test_skill_runner_builds_query_skill_arguments():
     args = _command_args(
         "hithink-industry-query",

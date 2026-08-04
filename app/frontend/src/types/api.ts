@@ -40,3 +40,17 @@ export interface Citation {
 }
 
 export type AgentRoute = 'direct' | 'tool_assisted' | 'deep_research' | 'clarify' | 'partial'
+
+export interface AnswerChartSeries {
+  name: string
+  values: number[]
+}
+
+export interface AnswerChartSpec {
+  type: string
+  title?: string
+  categories: string[]
+  unit?: string
+  bars?: AnswerChartSeries[]
+  lines?: AnswerChartSeries[]
+}

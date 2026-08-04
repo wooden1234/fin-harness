@@ -9,10 +9,48 @@ from agents.orchestrator.contracts import Evidence
 from agents.research_workflow.contracts import ResearchContextSummary
 from agents.research_workflow.deep_agent.context_middleware import (
     GovernedResearchSummarizationMiddleware,
+    _serialize_message_for_summary,
 )
 from agents.research_workflow.deep_agent.runtime import (
     _assert_single_summary_middleware,
 )
+
+
+def test_serialize_message_for_summary_accepts_plain_strings() -> None:
+    assert _serialize_message_for_summary("纯文本片段") == "message: 纯文本片段"
+    assert _serialize_message_for_summary(
+        HumanMessage(content="用户问题")
+    ).startswith("human:")
+
+
+@pytest.mark.asyncio
+async def test_acreate_summary_tolerates_string_messages_in_batch() -> None:
+    class FakeStructuredModel:
+        def with_structured_output(self, _schema):
+            return self
+
+        async def ainvoke(self, _messages):
+            return ResearchContextSummary(
+                objective="继续成稿",
+                pending_questions=[],
+                failed_sources=[],
+                next_actions=["基于已有证据回答"],
+                evidence_ids=["main:abc"],
+                findings=[],
+            )
+
+    middleware = GovernedResearchSummarizationMiddleware(
+        FakeStructuredModel(),
+        journal=MainAgentProgressJournal(),
+    )
+    rendered = await middleware._acreate_summary(
+        [
+            HumanMessage(content="比较苹果微软谷歌"),
+            "中间夹杂的纯字符串消息",
+            AIMessage(content="已检索部分证据 main:abc"),
+        ]
+    )
+    assert "继续成稿" in rendered or "objective" in rendered
 
 
 def test_deep_agent_requires_exactly_one_summary_middleware() -> None:

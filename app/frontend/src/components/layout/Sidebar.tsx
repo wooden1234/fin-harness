@@ -82,7 +82,6 @@ export function Sidebar({
       resetChat()
       setActiveConversationId(conversationId)
       await refreshConversations()
-      onToast('已创建新会话', 'success')
     } catch (error) {
       onToast(error instanceof Error ? error.message : '创建会话失败', 'error')
     }
@@ -124,7 +123,6 @@ export function Sidebar({
         resetChat()
       }
       await refreshConversations()
-      onToast('会话已删除', 'success')
     } catch (error) {
       onToast(error instanceof Error ? error.message : '删除失败', 'error')
     }

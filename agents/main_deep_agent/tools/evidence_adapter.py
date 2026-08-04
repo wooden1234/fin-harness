@@ -7,15 +7,11 @@ import json
 import re
 from collections import defaultdict
 from datetime import UTC, datetime
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from urllib.parse import urlparse
 
 from agents.main_deep_agent.middleware.budget import TOOL_SOURCE_FAMILY
-from agents.main_deep_agent.entities import (
-    OFFICIAL_ENTITY_DOMAINS,
-    entity_aliases,
-    normalize_entity,
-)
+from agents.main_deep_agent.middleware.authorization import normalize_entity
 from agents.orchestrator.contracts import Evidence
 
 _FISCAL_PATTERNS = (
@@ -91,43 +87,48 @@ def _domain_matches(hostname: str, domain: str) -> bool:
     return hostname == domain or hostname.endswith(f".{domain}")
 
 
+def _entity_token(entity: str) -> str:
+    """从实体名提取可用于域名匹配的字母数字 token，无公司白名单。"""
+    return re.sub(r"[^a-z0-9]+", "", normalize_entity(entity).lower())
+
+
 def _is_official_host(entity: str, hostname: str) -> bool:
-    """官方域 = 注册域名本身，或通用 IR/新闻前缀；不把任意子域当官网。"""
-    canonical = normalize_entity(entity)
+    """启发式判断官网：二级域含实体 token，且非子域消费站（如 podcasts.）。
+
+    无公司域名白名单；约 like aboutamazon.com / apple.com / newsroom.apple.com。
+    """
     host = (hostname or "").lower().removeprefix("www.")
-    if not host:
+    token = _entity_token(entity)
+    if len(token) < 3 or not host or "." not in host:
         return False
-    for domain in OFFICIAL_ENTITY_DOMAINS.get(canonical, ()):
-        apex = domain.lower().removeprefix("www.")
-        if host == apex:
-            return True
-        label, separator, remainder = host.partition(".")
-        if separator and remainder == apex and label in _OFFICIAL_HOST_LABELS:
-            return True
-    return False
+    labels = host.split(".")
+    if len(labels) < 2:
+        return False
+    apex = labels[-2]
+    brand_match = apex == token or (len(token) >= 4 and token in apex)
+    if not brand_match:
+        return False
+    if len(labels) == 2:
+        return True
+    return labels[0] in _OFFICIAL_HOST_LABELS
 
 
 def _entity_mentioned(entity: str, text: str) -> bool:
-    """实体别名需近似词边界命中（不针对单家公司写特例）。"""
-    for alias in entity_aliases(entity):
-        if not alias or len(alias.strip()) < 2:
-            continue
-        pattern = rf"(?<![A-Za-z0-9]){re.escape(alias)}(?![A-Za-z0-9])"
-        if re.search(pattern, text, re.I):
-            return True
-    return False
+    """实体名需近似词边界命中；不做别名表扩展。"""
+    alias = normalize_entity(entity)
+    if not alias or len(alias) < 2:
+        return False
+    # 中文实体通常会紧邻财年、季度或数字，不能用英文单词边界限制。
+    if re.search(r"[\u4e00-\u9fff]", alias):
+        return alias in text
+    pattern = rf"(?<![A-Za-z0-9]){re.escape(alias)}(?![A-Za-z0-9])"
+    return bool(re.search(pattern, text, re.I))
 
 
 def _foreign_entity_dominant(requested: str, text: str) -> bool:
-    """正文主要在讲其他已知公司时视为污染。"""
-    mentioned_others = [
-        entity
-        for entity in OFFICIAL_ENTITY_DOMAINS
-        if entity != normalize_entity(requested) and _entity_mentioned(entity, text)
-    ]
-    if not mentioned_others:
-        return False
-    return not _entity_mentioned(requested, text)
+    """无公司注册表时不做跨实体污染推断；交给「未提及目标实体」规则处理。"""
+    del requested, text
+    return False
 
 
 def _has_financial_numbers(text: str) -> bool:
@@ -174,16 +175,9 @@ def _source_grade(entity: str, hostname: str, text: str) -> str:
 
 
 def _resolve_result_entity(requested_entity: str, hostname: str, text: str) -> str:
-    """冲突检索按结果域名回填真实实体，避免比较占位符污染 Evidence。"""
-    canonical = normalize_entity(requested_entity)
-    if canonical.lower() != "comparison":
-        return canonical
-    for entity in OFFICIAL_ENTITY_DOMAINS:
-        if _is_official_host(entity, hostname):
-            return entity
-        if _entity_mentioned(entity, text):
-            return entity
-    return canonical
+    """无公司注册表时保留请求实体；comparison 占位也不做域名反查。"""
+    del hostname, text
+    return normalize_entity(requested_entity)
 
 
 def _fiscal_period(text: str) -> str:
@@ -390,6 +384,7 @@ def web_evidence_from_payload(
     data: Any,
     *,
     entity: str,
+    entities: Sequence[str] | None = None,
 ) -> list[Evidence]:
     """将每条 Web 结果转换为独立 Evidence；聚合 answer 永不作为证据。"""
     if not isinstance(data, Mapping):
@@ -407,12 +402,30 @@ def web_evidence_from_payload(
         hostname = _publisher_domain(url)
         # 归属与抽数以正文为准，避免标题平台名（如 * Podcasts）或 URL 子域误匹配。
         body_text = snippet
-        resolved_entity = _resolve_result_entity(entity, hostname, body_text)
+        target_entities = [
+            normalize_entity(str(item).strip())
+            for item in list(entities or [])
+            if str(item).strip()
+        ]
+        if not target_entities and entity:
+            target_entities = [normalize_entity(entity)]
+        matched_entity = next(
+            (
+                candidate
+                for candidate in target_entities
+                if _entity_mentioned(candidate, body_text)
+            ),
+            "",
+        )
+        resolved_entity = matched_entity or _resolve_result_entity(
+            entity,
+            hostname,
+            body_text,
+        )
         entity_mismatch = bool(
-            entity
-            and normalize_entity(entity).lower() != "comparison"
+            target_entities
             and (
-                not _entity_mentioned(resolved_entity, body_text)
+                not matched_entity
                 or _foreign_entity_dominant(resolved_entity, body_text)
             )
         )
@@ -629,12 +642,18 @@ def _find_data_time(value: Any, *, depth: int = 0) -> str | None:
     return None
 
 
+_IWENCAI_FACT_QUERY_TOOL_IDS = frozenset({
+    "iwencai.query",
+    "iwencai.finance.query",
+})
 _STRUCTURED_EVIDENCE_TOOL_IDS = frozenset({
     "knowledge.fact.lookup",
     "finance.fact.lookup",
     "finance.query_advanced",
     "iwencai.query",
+    "iwencai.finance.query",
     "iwencai.screen",
+    "iwencai.usstock.screen",
     "iwencai.rating.query",
     "iwencai.market.query",
     "iwencai.report.search",
@@ -649,8 +668,9 @@ _OFFICIAL_STRUCTURED_TOOL_IDS = frozenset({
 })
 _STRUCTURED_GRADE_TOOL_IDS = frozenset({
     "iwencai.query",
+    "iwencai.finance.query",
     "iwencai.screen",
-    "iwencai.compare_entities",
+    "iwencai.usstock.screen",
     "iwencai.market.query",
 })
 
@@ -681,6 +701,112 @@ def _row_display_chunk(row: Mapping[str, Any], *, max_fields: int = 8) -> str:
         if len(chunks) >= max_fields:
             break
     return "，".join(chunks)
+
+
+def _format_preview_cell(value: object) -> str:
+    if value in (None, ""):
+        return "—"
+    text = " ".join(str(value).split()).strip()
+    return text[:80] if len(text) > 80 else text
+
+
+def _is_numeric_cell(value: object) -> bool:
+    if value in (None, ""):
+        return False
+    try:
+        float(str(value).replace(",", "").replace("%", "").strip())
+        return True
+    except ValueError:
+        return False
+
+
+def _preview_keys_for_datas(rows: list[Mapping[str, Any]]) -> list[str]:
+    """按「数值列优先、保持首行出现顺序」选列，不写死字段名白名单。"""
+    first = rows[0]
+    keys = [
+        str(key).strip()
+        for key in first
+        if str(key).strip() and not str(key).startswith("_")
+    ]
+    if not keys:
+        return []
+
+    def score(key: str) -> tuple[int, int, int]:
+        numeric_hits = sum(1 for row in rows if _is_numeric_cell(row.get(key)))
+        # 累计财务列优先；单季次之；最新价/涨跌幅尽量不进摘要。
+        if "最新价" in key or "涨跌幅" in key:
+            preference = 100
+        elif "单季度" in key or "单季" in key:
+            preference = 40
+        elif "累计" in key and any(
+            marker in key for marker in ("营业收入", "营业额", "收入", "净利润", "归母", "净利")
+        ):
+            preference = -100
+        elif "累计" in key:
+            preference = -40
+        else:
+            preference = 0
+        return (preference, -numeric_hits, keys.index(key))
+
+    return sorted(keys, key=score)[:8]
+
+
+def _preview_table_from_datas(
+    datas: object,
+    *,
+    query: str = "",
+) -> dict[str, Any] | None:
+    """把问财 datas 收成前端可渲染的小表，避免 key=value 长串。"""
+    if not isinstance(datas, list):
+        return None
+    rows_raw = [item for item in datas[:5] if isinstance(item, Mapping)]
+    if not rows_raw:
+        return None
+    columns = _preview_keys_for_datas(rows_raw)
+    if not columns:
+        return None
+    rows = [
+        [_format_preview_cell(item.get(column)) for column in columns]
+        for item in rows_raw
+    ]
+    preview: dict[str, Any] = {"columns": columns, "rows": rows}
+    cleaned_query = " ".join(str(query or "").split()).strip()[:200]
+    if cleaned_query:
+        preview["query"] = cleaned_query
+    return preview
+
+
+def _short_summary_from_preview(
+    preview: Mapping[str, Any],
+    *,
+    entity: str = "",
+) -> str:
+    """用预览表前几列动态拼短摘要，不写死指标名。"""
+    columns = list(preview.get("columns") or [])
+    rows = list(preview.get("rows") or [])
+    if not columns or not rows:
+        return ""
+    first = list(rows[0])
+    pairs = [
+        (str(columns[index]), str(first[index]))
+        for index in range(min(len(columns), len(first)))
+        if str(first[index]).strip() and str(first[index]).strip() != "—"
+    ]
+    if not pairs:
+        return ""
+    # 首个非纯数值列更像名称；其余取最多两个数值列
+    name = entity
+    for key, value in pairs:
+        if not _is_numeric_cell(value):
+            name = value
+            break
+    numeric_parts = [
+        f"{key} {value}"
+        for key, value in pairs
+        if _is_numeric_cell(value)
+    ][:2]
+    parts = [part for part in (name, *numeric_parts) if part]
+    return "，".join(parts)[:240]
 
 
 def _display_text_from_mapping(data: Mapping[str, Any], *, limit: int = 800) -> str:
@@ -731,11 +857,33 @@ def _structured_tool_evidence(tool_id: str, data: Mapping[str, Any]) -> list[Evi
     source_family = TOOL_SOURCE_FAMILY.get(tool_id, "unknown")
     observed_at = datetime.now(UTC).isoformat()
     payload = _unwrap_tool_mapping(data)
-    display_text = _display_text_from_mapping(payload)
+    datas = [
+        dict(item)
+        for item in list(payload.get("datas") or [])
+        if isinstance(item, Mapping)
+    ]
+    if tool_id in _IWENCAI_FACT_QUERY_TOOL_IDS and not datas and not payload.get("facts"):
+        return []
+    if tool_id in _IWENCAI_FACT_QUERY_TOOL_IDS and len(datas) > 1:
+        evidence: list[Evidence] = []
+        for row in datas:
+            row_payload = dict(payload)
+            row_payload["datas"] = [row]
+            # 多行返回中的顶层 facts 无可靠行归属，拆分时不跨实体复制。
+            row_payload["facts"] = []
+            evidence.extend(_structured_tool_evidence(tool_id, row_payload))
+        return evidence
+    display_payload = payload
+    if tool_id in _IWENCAI_FACT_QUERY_TOOL_IDS and datas:
+        display_payload = {
+            "query": payload.get("query") or data.get("query") or "",
+            "datas": datas,
+        }
+    display_text = _display_text_from_mapping(display_payload)
     if not display_text:
         # 保留顶层 query，便于空 facts 时仍有可读摘要。
         display_text = _display_text_from_mapping(data)
-    content = display_text or _safe_json(payload, limit=4000)
+    content = display_text or _safe_json(display_payload, limit=4000)
     if not content or content in {"null", "{}", "[]"}:
         return []
     published_at = _find_data_time(payload) or _find_data_time(data)
@@ -755,17 +903,6 @@ def _structured_tool_evidence(tool_id: str, data: Mapping[str, Any]) -> list[Evi
                     candidate = str(item).strip()
                 if candidate:
                     entity = normalize_entity(candidate)
-                    break
-        if not entity:
-            for item in list(payload.get("datas") or [])[:3]:
-                if not isinstance(item, Mapping):
-                    continue
-                for key in ("股票简称", "股票名称", "name", "company", "entity"):
-                    candidate = str(item.get(key) or "").strip()
-                    if candidate:
-                        entity = normalize_entity(candidate)
-                        break
-                if entity:
                     break
     period = ""
     for key in ("fiscal_period", "period", "period_label"):
@@ -809,13 +946,16 @@ def _structured_tool_evidence(tool_id: str, data: Mapping[str, Any]) -> list[Evi
         fact_entity = normalize_entity(
             str(item.get("company") or item.get("entity") or entity or "")
         )
-        metric_name = str(item.get("metric") or "").lower()
-        metric = "eps_consensus" if "eps" in metric_name or "预期" in metric_name else "revenue_growth"
+        metric = str(
+            item.get("canonical_metric") or item.get("metric") or ""
+        ).strip()
+        if not metric:
+            continue
         try:
             value = float(str(item.get("value")).replace("%", "").replace(",", ""))
         except (TypeError, ValueError):
             continue
-        fact_period = period
+        fact_period = str(item.get("fiscal_period") or period or "").strip()
         if item.get("period_year") not in (None, ""):
             fact_period = f"FY{item.get('period_year')} Q4"
         facts.append(
@@ -830,7 +970,30 @@ def _structured_tool_evidence(tool_id: str, data: Mapping[str, Any]) -> list[Evi
             }
         )
     readable = bool(display_text) and not display_text.startswith(("{", "["))
+    preview_table = _preview_table_from_datas(
+        payload.get("datas") or data.get("datas"),
+        query=str(payload.get("query") or data.get("query") or ""),
+    )
+    short_summary = ""
+    if preview_table is not None:
+        short_summary = _short_summary_from_preview(preview_table, entity=entity)
     digest = hashlib.sha256(f"{tool_id}:{content}".encode("utf-8")).hexdigest()[:20]
+    metadata: dict[str, Any] = {
+        "source_family": source_family,
+        "tool_id": tool_id,
+        "entity": entity,
+        "publisher_domain": source_family,
+        "source_grade": grade,
+        "fiscal_period": period,
+        "available_fields": sorted(fields),
+        "data_time_valid": bool(published_at or period),
+        # 面向用户的步骤卡优先用短摘要；完整 key=value 仍留在 content 供排查。
+        "display_text": short_summary or display_text or content[:800],
+        "displayable": readable,
+        "facts": facts,
+    }
+    if preview_table is not None:
+        metadata["preview_table"] = preview_table
     return [
         Evidence(
             evidence_id=f"main:{digest}",
@@ -843,62 +1006,110 @@ def _structured_tool_evidence(tool_id: str, data: Mapping[str, Any]) -> list[Evi
             published_at=published_at,
             observed_at=observed_at,
             confidence=0.85 if grade == "structured" else 0.75,
+            metadata=metadata,
+        )
+    ]
+
+
+def _pdf_catalog_evidence(data: Mapping[str, Any]) -> list[Evidence]:
+    """把本地 PDF 目录结果转成可展示、可引用的 Evidence。"""
+    documents = [
+        item
+        for item in list(data.get("documents") or [])
+        if isinstance(item, Mapping) and str(item.get("doc_id") or "").strip()
+    ]
+    if not documents:
+        return []
+    by_category: dict[str, list[str]] = {}
+    lines: list[str] = []
+    for item in documents:
+        doc_id = str(item.get("doc_id") or "").strip()
+        title = str(item.get("title") or doc_id).strip()
+        category = str(item.get("category") or "unknown").strip() or "unknown"
+        by_category.setdefault(category, []).append(f"{doc_id}｜{title}")
+        lines.append(f"{category}/{doc_id}: {title}")
+    summary_parts = [
+        f"{category} {len(items)} 份"
+        for category, items in sorted(by_category.items())
+    ]
+    display_text = (
+        f"本地 PDF 目录共 {len(documents)} 份："
+        + "；".join(summary_parts)
+    )
+    content = "\n".join(lines)[:4000]
+    digest = hashlib.sha256(f"knowledge.pdf.catalog:{content}".encode("utf-8")).hexdigest()[:20]
+    observed_at = datetime.now(UTC).isoformat()
+    return [
+        Evidence(
+            evidence_id=f"main:{digest}",
+            task_id="main",
+            source_type="knowledge.pdf.catalog",
+            provider="knowledge",
+            title="本地 PDF 目录",
+            content=content,
+            observed_at=observed_at,
+            confidence=0.9,
             metadata={
-                "source_family": source_family,
-                "tool_id": tool_id,
-                "entity": entity,
-                "publisher_domain": source_family,
-                "source_grade": grade,
-                "fiscal_period": period,
-                "available_fields": sorted(fields),
-                "data_time_valid": bool(published_at or period),
-                "display_text": display_text or content[:800],
-                "displayable": readable,
-                "facts": facts,
+                "source_family": "knowledge",
+                "tool_id": "knowledge.pdf.catalog",
+                "display_text": display_text,
+                "displayable": True,
+                "source_grade": "structured",
+                "doc_ids": [str(item.get("doc_id") or "").strip() for item in documents],
+                "available_fields": ["source_document"],
+                "data_time_valid": True,
             },
         )
     ]
 
 
-def _compare_entities_evidence(data: Mapping[str, Any]) -> list[Evidence]:
-    """把并发多实体问财结果拆成逐实体 Evidence，并把口径提示写进 facts。"""
-    per_entity = data.get("per_entity")
-    if not isinstance(per_entity, Mapping) or not per_entity:
-        return []
-    query = str(data.get("query") or "")
-    per_entity_currency = data.get("per_entity_currency")
-    per_entity_currency = per_entity_currency if isinstance(per_entity_currency, Mapping) else {}
-    per_entity_periods = data.get("per_entity_periods")
-    per_entity_periods = per_entity_periods if isinstance(per_entity_periods, Mapping) else {}
+def _calculation_evidence(data: Mapping[str, Any]) -> list[Evidence]:
+    """把批量计算结果拆成可独立引用、可追溯的 Calculation Evidence。"""
+    observed_at = datetime.now(UTC).isoformat()
     evidence: list[Evidence] = []
-    for entity_name, entity_data in per_entity.items():
-        if not isinstance(entity_data, Mapping):
+    for raw in list(data.get("calculations") or []):
+        if not isinstance(raw, Mapping) or not raw.get("ok"):
             continue
-        currency = str(per_entity_currency.get(entity_name) or "")
-        period_hints = list(per_entity_periods.get(entity_name) or [])
-        period = period_hints[0] if period_hints else ""
-        synthetic_facts = (
-            [{
-                "entity": normalize_entity(entity_name),
-                "metric": "revenue_growth",
-                "value": 0.0,
-                "unit": "",
-                "currency": currency,
-            }]
-            if currency or period
-            else []
+        formula = str(raw.get("formula") or "").strip()
+        evidence_ids = [
+            str(item).strip()
+            for item in list(raw.get("input_evidence_ids") or [])
+            if str(item).strip()
+        ]
+        if not formula or not evidence_ids:
+            continue
+        calculation_id = str(raw.get("calculation_id") or "calculation").strip()
+        value = raw.get("value")
+        unit = str(raw.get("unit") or "")
+        display_text = f"{calculation_id}: {value}{unit}"
+        content = _safe_json(raw, limit=3000)
+        digest = hashlib.sha256(
+            f"calculation.run:{content}".encode("utf-8")
+        ).hexdigest()[:20]
+        evidence.append(
+            Evidence(
+                evidence_id=f"main:{digest}",
+                task_id="main",
+                source_type="calculation.run",
+                provider="calculation",
+                title=calculation_id,
+                content=content,
+                observed_at=observed_at,
+                confidence=1.0,
+                metadata={
+                    "source_family": "calculation",
+                    "tool_id": "calculation.run",
+                    "calculation_id": calculation_id,
+                    "formula": formula,
+                    "input_evidence_ids": evidence_ids,
+                    "operand_refs": list(raw.get("operand_refs") or []),
+                    "display_text": display_text,
+                    "displayable": True,
+                    "data_time_valid": True,
+                    "facts": [],
+                },
+            )
         )
-        synthetic_payload: dict[str, Any] = {
-            "entity": entity_name,
-            "query": query,
-            "data": entity_data,
-        }
-        if period:
-            synthetic_payload["period"] = period
-        if synthetic_facts:
-            synthetic_payload["facts"] = synthetic_facts
-        item_evidence = _structured_tool_evidence("iwencai.compare_entities", synthetic_payload)
-        evidence.extend(item_evidence)
     return evidence
 
 
@@ -931,12 +1142,13 @@ def _evidence_from_payload(tool_id: str, data: Any) -> list[Evidence]:
 
     if tool_id in {
         "knowledge.faq.search",
-        "knowledge.pdf.catalog",
         "knowledge.pdf.search",
     }:
         return []
-    if tool_id == "iwencai.compare_entities" and isinstance(data, Mapping):
-        return _compare_entities_evidence(data)
+    if tool_id == "knowledge.pdf.catalog" and isinstance(data, Mapping):
+        return _pdf_catalog_evidence(data)
+    if tool_id == "calculation.run" and isinstance(data, Mapping):
+        return _calculation_evidence(data)
     if tool_id in _STRUCTURED_EVIDENCE_TOOL_IDS and isinstance(data, Mapping):
         return _structured_tool_evidence(tool_id, data)
 
@@ -986,6 +1198,10 @@ _COMPACT_EVIDENCE_METADATA_KEYS = (
     "displayable",
     "source_grade",
     "facts",
+    "calculation_id",
+    "formula",
+    "input_evidence_ids",
+    "operand_refs",
 )
 
 

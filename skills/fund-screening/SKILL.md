@@ -1,6 +1,6 @@
 ---
 name: fund-screening
-description: 按基金类型、业绩、基金经理、风险、持仓或资产配置条件筛选基金时使用。
+description: 根据基金类型、业绩、基金经理、风险、持仓、资产配置等维度筛选公募基金。返回符合条件的相关基金数据。当用户询问基金筛选问题时，必须使用此技能。
 required_tools:
   - iwencai.fund.screen
 ---

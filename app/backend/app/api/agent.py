@@ -14,6 +14,7 @@ from agents.runtime_context import AgentRuntimeContext
 from app.api.agent_progress import (
     VISIBLE_TASK_NODES,
     build_public_step_event,
+    build_step_event,
     build_todo_snapshot_event,
     extract_agent_todos_snapshot,
     map_node_to_public_step,
@@ -236,7 +237,7 @@ async def agent_query(
                         yield _sse({
                             "type": "step",
                             "id": "main-finalization",
-                            "label": "资料覆盖完成，正在整理答案",
+                            "label": "资料已就绪，正在整理答案…",
                             "status": "running",
                             "category": "answer",
                             "short_label": "整理答案",
@@ -250,8 +251,8 @@ async def agent_query(
                     family = str(data.get("source_family") or "tool")
                     labels = {
                         "weather": "天气数据",
-                        "market": "市场数据",
-                        "web": "联网搜索",
+                        "market": "问财数据",
+                        "web": "联网资料",
                         "research": "研报与公告",
                         "financial": "财务数据",
                         "knowledge": "知识库",
@@ -260,18 +261,25 @@ async def agent_query(
                     status = str(data.get("status") or "running")
                     if status in {"done", "error"}:
                         emitted_main_tool_steps.add(step_id)
-                    yield _sse({
-                        "type": "step",
-                        "id": step_id,
-                        "label": (
-                            f"正在查询{labels.get(family, '资料')}"
-                            if status == "running"
-                            else f"已完成{labels.get(family, '资料查询')}"
-                        ),
-                        "status": status,
-                        "category": family,
-                        "short_label": labels.get(family, "工具"),
-                    })
+                    family_label = labels.get(family, "资料")
+                    yield _sse(
+                        build_step_event(
+                            step_id=step_id,
+                            label=(
+                                f"正在查询{family_label}…"
+                                if status == "running"
+                                else (
+                                    f"查询{family_label}未取得有效结果"
+                                    if status == "error"
+                                    else f"已取得{family_label}"
+                                )
+                            ),
+                            status=status,
+                            category=family,
+                            short_label=family_label,
+                            detail=data.get("detail"),
+                        )
+                    )
                     continue
 
                 if mode == "tasks" and isinstance(data, dict):
@@ -337,20 +345,26 @@ async def agent_query(
                             family = str(entry.get("source_family") or "tool")
                             labels = {
                                 "weather": "天气数据",
-                                "market": "市场数据",
-                                "web": "联网搜索",
+                                "market": "问财数据",
+                                "web": "联网资料",
                                 "research": "研报与公告",
                                 "financial": "财务数据",
                                 "knowledge": "知识库",
                                 "calculation": "受限计算",
                             }
+                            family_label = labels.get(family, "资料")
+                            completed = entry.get("status") == "completed"
                             yield _sse({
                                 "type": "step",
                                 "id": step_id,
-                                "label": f"已完成{labels.get(family, '资料查询')}",
-                                "status": "done" if entry.get("status") == "completed" else "error",
+                                "label": (
+                                    f"已取得{family_label}"
+                                    if completed
+                                    else f"查询{family_label}未取得有效结果"
+                                ),
+                                "status": "done" if completed else "error",
                                 "category": family,
-                                "short_label": labels.get(family, "工具"),
+                                "short_label": family_label,
                             })
                     continue
 
@@ -622,6 +636,32 @@ async def agent_query(
                         run_id,
                     )
 
+            follow_ups = [
+                str(item).strip()[:120]
+                for item in list(values.get("answer_follow_ups") or [])
+                if str(item).strip()
+            ][:3]
+            charts = []
+            for raw_chart in list(values.get("answer_charts") or [])[:2]:
+                if not isinstance(raw_chart, dict):
+                    continue
+                categories = [
+                    str(item)[:40]
+                    for item in list(raw_chart.get("categories") or [])[:8]
+                    if str(item).strip()
+                ]
+                if len(categories) < 2:
+                    continue
+                charts.append(
+                    {
+                        "type": str(raw_chart.get("type") or "combo"),
+                        "title": str(raw_chart.get("title") or "")[:80],
+                        "categories": categories,
+                        "unit": str(raw_chart.get("unit") or "")[:20],
+                        "bars": list(raw_chart.get("bars") or [])[:2],
+                        "lines": list(raw_chart.get("lines") or [])[:2],
+                    }
+                )
             yield _sse({
                 "type": "done",
                 "run_id": run_id,
@@ -630,6 +670,8 @@ async def agent_query(
                 "content": final_response,
                 "citations": citations,
                 "route": values.get("execution_mode") or values.get("route"),
+                "follow_ups": follow_ups,
+                "charts": charts,
                 "compliance_action": values.get("compliance_action"),
                 "compliance_reason_code": values.get("compliance_reason_code"),
             })

@@ -57,12 +57,45 @@ _ADMIN_SUFFIXES: tuple[str, ...] = (
 )
 
 
-def _normalize_place_query(city: str) -> str:
-    normalized = "".join((city or "").split())
+def _admin_suffix(place: str) -> str | None:
+    """识别行政区划后缀；按长后缀优先匹配。"""
+    normalized = "".join((place or "").split())
     for suffix in _ADMIN_SUFFIXES:
         if normalized.endswith(suffix) and len(normalized) > len(suffix):
-            return normalized[: -len(suffix)]
+            return suffix
+    return None
+
+
+def _normalize_place_query(city: str) -> str:
+    normalized = "".join((city or "").split())
+    suffix = _admin_suffix(normalized)
+    if suffix:
+        return normalized[: -len(suffix)]
     return normalized
+
+
+def _admin_level_bonus(query: str, local_zh: str) -> float:
+    """按行政区划层级给分，避免「西安市」与「西安区」同分误判歧义。
+
+    - 用户未写区/县时：优先「…市」，弱化同名「…区/县」。
+    - 用户显式写了区/县：优先同级后缀命中。
+    """
+    hit_suffix = _admin_suffix(local_zh)
+    if not hit_suffix:
+        return 0.0
+    query_suffix = _admin_suffix(query)
+    if query_suffix in {"区", "县"}:
+        if hit_suffix == query_suffix:
+            return 1.25
+        if hit_suffix == "市":
+            return 0.2
+        return 0.3
+    if hit_suffix == "市":
+        return 1.0
+    if hit_suffix in {"区", "县"}:
+        return 0.0
+    # 州/盟/地区等其它正式后缀，略优于裸地名村镇。
+    return 0.5
 
 
 def _cjk_chars(text: str) -> str:
@@ -139,9 +172,8 @@ def _score_geocode_hit(query: str, hit: dict[str, Any]) -> float | None:
         normalized_local_zh = _cjk_chars(_normalize_place_query(local_zh))
         if local_zh and q_cjk == normalized_local_zh:
             score += 3.0
-            # 地理编码会把正式城市写成“上海市/深圳市”；该结构比同名村镇更可靠。
-            if normalized_local_zh != _cjk_chars(local_zh):
-                score += 0.75
+            # 「上海市」优于同名村镇；「西安市」优于同名「西安区」。
+            score += _admin_level_bonus(query, local_zh)
         elif q_cjk in blob_cjk:
             score += 2.0
         else:

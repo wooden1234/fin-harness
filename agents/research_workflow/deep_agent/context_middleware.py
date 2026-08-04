@@ -49,6 +49,18 @@ def _append_finalize_instruction(message: SystemMessage | None) -> SystemMessage
     return SystemMessage(content=f"{content}\n\n{_FINALIZE_INSTRUCTION}".strip())
 
 
+def _serialize_message_for_summary(message: Any) -> str:
+    """兼容 BaseMessage 与纯字符串（Summarization 偶发混入 str）。"""
+    if isinstance(message, str):
+        return f"message: {message}"
+    msg_type = str(getattr(message, "type", None) or "message")
+    content = getattr(message, "content", None)
+    if content is None:
+        return f"{msg_type}: {message}"
+    text = content if isinstance(content, str) else str(content)
+    return f"{msg_type}: {text}"
+
+
 def _recover_evidence_ids_from_text(serialized: str, *, limit: int = 64) -> list[str]:
     """从待压缩原文确定性回收 evidence_id，不依赖 LLM 复述。"""
     found: list[str] = []
@@ -257,7 +269,7 @@ class GovernedResearchSummarizationMiddleware(SummarizationMiddleware):
     async def _acreate_summary(self, messages_to_summarize: list[Any]) -> str:
         """用结构化 schema 生成摘要，校验失败时只修复一次。"""
         serialized = "\n".join(
-            f"{getattr(message, 'type', 'message')}: {str(message.content)}"
+            _serialize_message_for_summary(message)
             for message in messages_to_summarize
         )
         prompt = _RESEARCH_SUMMARY_PROMPT.format(messages=serialized)

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import math
 import time
+from collections import Counter
 from collections.abc import Mapping
 from typing import Any
 
@@ -27,6 +30,7 @@ from agents.main_deep_agent.tools.evidence_adapter import (
     _sanitize_tool_payload,
     web_evidence_from_payload,
 )
+from agents.main_deep_agent.tools.step_detail import build_public_tool_step_detail
 from agents.main_deep_agent.tools.executor import execute_registered_tool
 from agents.runtime_context import AgentRuntimeContext
 from app.core.config import settings
@@ -36,18 +40,187 @@ from tools import get_langchain_tool, get_tool_spec, load_all_tools
 
 _FALLBACK_TOOL_IDS = {
     "financial": (
+        "iwencai.finance.query",
         "iwencai.query",
         "iwencai.market.query",
         "web.search",
         "knowledge.pdf.catalog",
     ),
     "knowledge": (
+        "iwencai.finance.query",
         "iwencai.query",
         "iwencai.report.search",
         "iwencai.announcement.search",
         "web.search",
     ),
+    "market": (
+        "iwencai.announcement.search",
+        "iwencai.report.search",
+        "web.search",
+        "knowledge.pdf.catalog",
+    ),
 }
+
+_TIME_COMPARISON_OPERATIONS = frozenset({
+    "change_rate",
+    "drawdown",
+    "year_over_year",
+    "quarter_over_quarter",
+    "cagr",
+})
+
+
+def _as_mapping(value: object) -> Mapping[str, Any] | None:
+    """兼容 StructuredTool 将嵌套参数解析成 Pydantic 对象的情况。"""
+    if isinstance(value, Mapping):
+        return value
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        dumped = model_dump(mode="python")
+        return dumped if isinstance(dumped, Mapping) else None
+    return None
+
+
+def _fact_from_ref(
+    journal: MainAgentProgressJournal,
+    raw_ref: object,
+) -> tuple[dict[str, Any] | None, str]:
+    """解析 Evidence 事实引用；不从文本或相同数值中猜测来源。"""
+    ref = _as_mapping(raw_ref)
+    if ref is None:
+        return None, "calculation_fact_reference_invalid"
+    evidence_id = str(ref.get("evidence_id") or "").strip()
+    try:
+        fact_index = int(ref.get("fact_index"))
+    except (TypeError, ValueError):
+        return None, "calculation_fact_reference_invalid"
+    evidence = journal.evidence.get(evidence_id)
+    if evidence is None:
+        return None, "calculation_evidence_not_found"
+    facts = list(evidence.metadata.get("facts") or [])
+    if fact_index < 0 or fact_index >= len(facts):
+        return None, "calculation_fact_not_found"
+    fact = facts[fact_index]
+    if not isinstance(fact, Mapping):
+        return None, "calculation_fact_not_found"
+    try:
+        value = float(fact.get("value"))
+    except (TypeError, ValueError):
+        return None, "calculation_fact_value_invalid"
+    if not math.isfinite(value):
+        return None, "calculation_fact_value_invalid"
+    return {
+        **dict(fact),
+        "value": value,
+        "evidence_id": evidence_id,
+        "fact_index": fact_index,
+    }, ""
+
+
+def _calculation_scope_error(
+    operation: str,
+    current: Mapping[str, Any],
+    reference: Mapping[str, Any],
+) -> str:
+    """校验运算两端的实体和口径，避免跨对象误算。"""
+    current_entity = str(current.get("entity") or "").strip()
+    reference_entity = str(reference.get("entity") or "").strip()
+    current_currency = str(current.get("currency") or "").strip()
+    reference_currency = str(reference.get("currency") or "").strip()
+    if current_currency and reference_currency and current_currency != reference_currency:
+        return "calculation_currency_mismatch"
+    if operation in _TIME_COMPARISON_OPERATIONS:
+        if current_entity and reference_entity and current_entity != reference_entity:
+            return "calculation_entity_mismatch"
+        current_metric = str(current.get("metric") or "").strip()
+        reference_metric = str(reference.get("metric") or "").strip()
+        if current_metric and reference_metric and current_metric != reference_metric:
+            return "calculation_metric_mismatch"
+        current_unit = str(current.get("unit") or "").strip()
+        reference_unit = str(reference.get("unit") or "").strip()
+        if current_unit and reference_unit and current_unit != reference_unit:
+            return "calculation_unit_mismatch"
+    if operation == "difference":
+        current_metric = str(current.get("metric") or "").strip()
+        reference_metric = str(reference.get("metric") or "").strip()
+        if current_metric and reference_metric and current_metric != reference_metric:
+            return "calculation_metric_mismatch"
+        current_unit = str(current.get("unit") or "").strip()
+        reference_unit = str(reference.get("unit") or "").strip()
+        if current_unit and reference_unit and current_unit != reference_unit:
+            return "calculation_unit_mismatch"
+        current_period = str(current.get("fiscal_period") or "").strip()
+        reference_period = str(reference.get("fiscal_period") or "").strip()
+        if (
+            current_entity != reference_entity
+            and current_period
+            and reference_period
+            and current_period != reference_period
+        ):
+            return "calculation_period_mismatch"
+    if operation == "ratio":
+        if current_entity and reference_entity and current_entity != reference_entity:
+            return "calculation_entity_mismatch"
+        current_period = str(current.get("fiscal_period") or "").strip()
+        reference_period = str(reference.get("fiscal_period") or "").strip()
+        if current_period and reference_period and current_period != reference_period:
+            return "calculation_period_mismatch"
+    return ""
+
+
+def _resolve_calculation_arguments(
+    raw_arguments: Mapping[str, Any],
+    journal: MainAgentProgressJournal,
+) -> tuple[dict[str, Any] | None, str]:
+    """把批量事实引用解析成底层计算工具所需的受信数值。"""
+    calculations = list(raw_arguments.get("calculations") or [])
+    if not calculations or len(calculations) > 8:
+        return None, "invalid_calculation_batch_size"
+    resolved: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for raw_value in calculations:
+        raw = _as_mapping(raw_value)
+        if raw is None:
+            return None, "invalid_calculation_arguments"
+        calculation_id = str(raw.get("calculation_id") or "").strip()
+        operation = str(raw.get("operation") or "").strip()
+        if not calculation_id or calculation_id in seen_ids:
+            return None, "duplicate_calculation_id"
+        seen_ids.add(calculation_id)
+        current, error = _fact_from_ref(journal, raw.get("current"))
+        if error:
+            return None, error
+        reference, error = _fact_from_ref(journal, raw.get("reference"))
+        if error:
+            return None, error
+        assert current is not None and reference is not None
+        error = _calculation_scope_error(operation, current, reference)
+        if error:
+            return None, error
+        resolved.append(
+            {
+                "calculation_id": calculation_id,
+                "operation": operation,
+                "current_value": current["value"],
+                "reference_value": reference["value"],
+                "periods": raw.get("periods", 1.0),
+                "input_evidence_ids": list(dict.fromkeys([
+                    current["evidence_id"],
+                    reference["evidence_id"],
+                ])),
+                "operand_refs": [
+                    {
+                        "evidence_id": current["evidence_id"],
+                        "fact_index": current["fact_index"],
+                    },
+                    {
+                        "evidence_id": reference["evidence_id"],
+                        "fact_index": reference["fact_index"],
+                    },
+                ],
+            }
+        )
+    return {"calculations": resolved}, ""
 
 
 def _failure_payload(
@@ -66,6 +239,20 @@ def _failure_payload(
         "fact_query_scope_unsupported",
         "local_document_not_found",
         "local_document_evidence_not_found",
+        "calculation_fact_reference_invalid",
+        "calculation_evidence_not_found",
+        "calculation_fact_not_found",
+        "calculation_fact_value_invalid",
+        "calculation_entity_mismatch",
+        "calculation_currency_mismatch",
+        "calculation_metric_mismatch",
+        "calculation_unit_mismatch",
+        "calculation_period_mismatch",
+        "invalid_calculation_batch_size",
+        "invalid_calculation_arguments",
+        "duplicate_calculation_id",
+        "calculation_batch_failed",
+        "duplicate_tool_call",
         "narrow_finance_call_exhausted",
     }
     prerequisite_errors = {"pdf_doc_ids_required", "pdf_doc_ids_not_cataloged"}
@@ -110,19 +297,21 @@ def _emit_tool_progress(
     tool_id: str,
     family: str,
     status: str,
+    detail: dict[str, Any] | None = None,
 ) -> None:
-    """仅发送可观察状态，不发送参数、结果或模型推理。"""
+    """发送可观察状态；detail 仅含面向用户的展示子集。"""
     try:
         writer = get_stream_writer()
-        writer(
-            {
-                "kind": "main_tool_progress",
-                "step_id": step_id,
-                "tool_id": tool_id,
-                "source_family": family,
-                "status": status,
-            }
-        )
+        payload: dict[str, Any] = {
+            "kind": "main_tool_progress",
+            "step_id": step_id,
+            "tool_id": tool_id,
+            "source_family": family,
+            "status": status,
+        }
+        if detail:
+            payload["detail"] = detail
+        writer(payload)
     except (KeyError, RuntimeError):
         return
 
@@ -153,6 +342,9 @@ def _governed_tools(
     resolved_tool_ids = resolve_main_tool_ids(context)
     allowed = frozenset(resolved_tool_ids)
     cataloged_pdf_doc_ids: set[str] = set()
+    cataloged_pdf_by_category: dict[str, set[str]] = {}
+    seen_call_signatures: set[str] = set()
+    failure_counts: Counter[tuple[str, str]] = Counter()
     wrapped: list[BaseTool] = []
     for tool_id in resolved_tool_ids:
         base = get_langchain_tool(tool_id)
@@ -162,12 +354,42 @@ def _governed_tools(
             started = time.perf_counter()
             query = str(kwargs.get("query") or "").strip()
             entity = str(kwargs.get("entity") or "").strip()
-            if not entity and isinstance(kwargs.get("entities"), list):
-                entity = ",".join(str(item).strip() for item in kwargs["entities"] if str(item).strip())
+            target_entities = [
+                str(item).strip()
+                for item in list(kwargs.get("entities") or [])
+                if str(item).strip()
+            ]
+            if not entity and target_entities:
+                entity = ",".join(target_entities)
             purpose = str(kwargs.get("purpose") or "").strip()
             expected_fields = [
                 str(item) for item in list(kwargs.get("expected_fields") or [])
             ]
+            call_signature = json.dumps(
+                {"tool_id": _tool_id, "arguments": kwargs},
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+            if call_signature in seen_call_signatures:
+                error = "duplicate_tool_call"
+                journal.record(
+                    tool_id=_tool_id,
+                    source_family=family,
+                    status="rejected",
+                    duration_ms=0.0,
+                    evidence=[],
+                    error=error,
+                    entity=entity,
+                    purpose=purpose,
+                    expected_fields=expected_fields,
+                )
+                return _failure_payload(
+                    tool_id=_tool_id,
+                    error=error,
+                    allowed_tool_ids=allowed,
+                )
+            seen_call_signatures.add(call_signature)
             if not _permissions_allow(context, _tool_id):
                 error = "tool_not_authorized"
                 budget.request_finalization(error)
@@ -209,6 +431,20 @@ def _governed_tools(
                     for item in list(kwargs.get("doc_ids") or [])
                     if str(item).strip()
                 }
+                # 模型常漏传 doc_ids；本轮已 catalog 时按 categories 自动补齐。
+                if not requested_doc_ids and cataloged_pdf_doc_ids:
+                    categories = [
+                        str(item).strip()
+                        for item in list(kwargs.get("categories") or [])
+                        if str(item).strip()
+                    ]
+                    selected: set[str] = set()
+                    for category in categories:
+                        selected.update(cataloged_pdf_by_category.get(category, set()))
+                    if not selected:
+                        selected = set(cataloged_pdf_doc_ids)
+                    kwargs["doc_ids"] = sorted(selected)
+                    requested_doc_ids = set(kwargs["doc_ids"])
                 error = ""
                 if not requested_doc_ids:
                     error = "pdf_doc_ids_required"
@@ -234,6 +470,31 @@ def _governed_tools(
                     allowed_tool_ids=allowed,
                 )
 
+            if _tool_id == "calculation.run":
+                resolved_arguments, error = _resolve_calculation_arguments(
+                    kwargs,
+                    journal,
+                )
+                if error:
+                    journal.record(
+                        tool_id=_tool_id,
+                        source_family=family,
+                        status="rejected",
+                        duration_ms=0.0,
+                        evidence=[],
+                        error=error,
+                        entity=entity,
+                        purpose=purpose,
+                        expected_fields=expected_fields,
+                    )
+                    return _failure_payload(
+                        tool_id=_tool_id,
+                        error=error,
+                        allowed_tool_ids=allowed,
+                    )
+                assert resolved_arguments is not None
+                kwargs = resolved_arguments
+
             budget.register(_tool_id, entity=entity)
             step_id = f"main-tool-{budget.tool_calls}-{_tool_id}"
             _emit_tool_progress(
@@ -241,6 +502,13 @@ def _governed_tools(
                 tool_id=_tool_id,
                 family=family,
                 status="running",
+                detail=build_public_tool_step_detail(
+                    tool_id=_tool_id,
+                    source_family=family,
+                    query=query,
+                    entity=entity,
+                    status="running",
+                ),
             )
             if _tool_id in {"knowledge.faq.search", "knowledge.pdf.search"}:
                 kwargs["research_question_id"] = "main-question"
@@ -274,22 +542,41 @@ def _governed_tools(
                 ok = False
                 error = "tool_timeout"
             evidence = (
-                web_evidence_from_payload(data, entity=entity)
+                web_evidence_from_payload(
+                    data,
+                    entity=entity,
+                    entities=target_entities,
+                )
                 if ok and _tool_id == "web.search"
                 else _evidence_from_payload(_tool_id, data)
                 if ok
                 else []
             )
-            if ok and _tool_id == "web.search" and not evidence:
+            if ok and _tool_id == "web.search" and not any(
+                bool(item.metadata.get("displayable")) for item in evidence
+            ):
                 ok = False
-                error = "insufficient_tool_result"
+                error = "web_no_relevant_results"
+            if (
+                ok
+                and _tool_id in {"iwencai.query", "iwencai.finance.query"}
+                and not evidence
+            ):
+                ok = False
+                error = "iwencai_no_structured_data"
             if ok and _tool_id == "knowledge.pdf.catalog" and isinstance(data, Mapping):
                 documents = list(data.get("documents") or [])
-                discovered_doc_ids = {
-                    str(item.get("doc_id") or "").strip()
-                    for item in documents
-                    if isinstance(item, Mapping) and str(item.get("doc_id") or "").strip()
-                }
+                discovered_doc_ids: set[str] = set()
+                for item in documents:
+                    if not isinstance(item, Mapping):
+                        continue
+                    doc_id = str(item.get("doc_id") or "").strip()
+                    if not doc_id:
+                        continue
+                    discovered_doc_ids.add(doc_id)
+                    category = str(item.get("category") or "").strip()
+                    if category:
+                        cataloged_pdf_by_category.setdefault(category, set()).add(doc_id)
                 if discovered_doc_ids:
                     cataloged_pdf_doc_ids.update(discovered_doc_ids)
                 else:
@@ -310,18 +597,37 @@ def _governed_tools(
                 purpose=purpose,
                 expected_fields=expected_fields,
             )
+            done_status = "done" if ok else "error"
             _emit_tool_progress(
                 step_id=step_id,
                 tool_id=_tool_id,
                 family=family,
-                status="done" if ok else "error",
+                status=done_status,
+                detail=build_public_tool_step_detail(
+                    tool_id=_tool_id,
+                    source_family=family,
+                    query=query,
+                    entity=entity,
+                    evidence=evidence,
+                    status=done_status,
+                    error=error,
+                ),
             )
             if not ok:
+                failure_counts[(_tool_id, error or "tool_execution_failed")] += 1
                 failure = _failure_payload(
                     tool_id=_tool_id,
                     error=error or "tool_execution_failed",
                     allowed_tool_ids=allowed,
                 )
+                if failure_counts[(_tool_id, error or "tool_execution_failed")] >= 2:
+                    failure.update(
+                        {
+                            "retryable": False,
+                            "stop_same_tool": True,
+                            "repeated_failure": error or "tool_execution_failed",
+                        }
+                    )
                 if isinstance(data, Mapping):
                     for key in ("message", "route"):
                         if data.get(key):

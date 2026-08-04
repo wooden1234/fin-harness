@@ -4,18 +4,28 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
-# 默认金融白名单（allowlist 模式最多取前 5 个）。
+# 默认金融 + 政策/主流财经白名单（allowlist 按 max_domains 截断）。
 DEFAULT_WEB_SEARCH_DOMAINS: tuple[str, ...] = (
+    # 披露与监管
     "cninfo.com.cn",
     "sse.com.cn",
     "szse.cn",
     "sec.gov",
+    "gov.cn",
+    "nea.gov.cn",
+    # 行情与财经媒体
     "10jqka.com.cn",
     "eastmoney.com",
     "stcn.com",
     "cs.com.cn",
     "yicai.com",
     "cls.cn",
+    "caixin.com",
+    "jiemian.com",
+    "wallstreetcn.com",
+    "people.com.cn",
+    "xinhuanet.com",
+    # 国际
     "reuters.com",
     "bloomberg.com",
 )
@@ -47,11 +57,11 @@ def resolve_search_domains(
     *,
     scope: str = "allowlist",
     allowed_domains: str = "",
-    max_domains: int = 5,
+    max_domains: int = 20,
 ) -> list[str]:
     """解析搜索域名。
 
-    - allowlist: 默认金融白名单（或配置覆盖），最多 max_domains 个
+    - allowlist: 默认金融/政策白名单（或配置覆盖），最多 max_domains 个
     - open: 不限域名，返回空列表
     """
     mode = str(scope or "allowlist").strip().lower()

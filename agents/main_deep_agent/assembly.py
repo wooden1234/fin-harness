@@ -103,6 +103,7 @@ def build_main_deep_agent(
         middleware=(
             MainAgentFailureFinalizationMiddleware(
                 budget,
+                journal=journal,
                 business_tool_names={tool.name for tool in governed_tools},
             ),
             GovernedResearchSummarizationMiddleware(
@@ -194,6 +195,7 @@ async def run_main_deep_agent(
             budget.tool_calls,
             len(journal.entries),
         )
+        logger.opt(exception=exc).debug("main agent failure traceback")
 
     stale_quality_response = (
         journal.quality_revision_outcome == "no_new_structured_response"

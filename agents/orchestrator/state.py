@@ -48,6 +48,8 @@ class OrchestratorState(CoreState):
     main_quality_metrics: NotRequired[dict[str, object]]
     investment_action_sensitive: NotRequired[bool]
     execution_mode: NotRequired[str]
+    answer_follow_ups: NotRequired[list[str]]
+    answer_charts: NotRequired[list[dict[str, object]]]
 
     active_task_ids: NotRequired[list[str]]
     replan_count: NotRequired[int]

@@ -6,13 +6,16 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from tools.calculation import CalculationOperation
+
 
 MAIN_TOOL_IDS = (
     "weather.get",
     "web.search",
     "iwencai.query",
+    "iwencai.finance.query",
     "iwencai.screen",
-    "iwencai.compare_entities",
+    "iwencai.usstock.screen",
     "iwencai.market.query",
     "iwencai.industry.query",
     "iwencai.index.query",
@@ -55,24 +58,51 @@ class MainPdfSearchArgs(BaseModel):
 
 
 class MainWebSearchArgs(BaseModel):
-    """Web 调用只传问句；域名范围由 tools.web_search 配置决定。"""
+    """Web 调用必须声明目标主体；域名范围由工具配置决定。"""
 
-    query: str
+    query: str = Field(
+        min_length=2,
+        max_length=120,
+        description=(
+            "已润色的检索问句：主体+事件+时间/年份；"
+            "一槽位一句，勿塞买卖动作话术，勿把多主题糊成超长句。"
+        ),
+    )
+    entities: list[str] = Field(
+        min_length=1,
+        max_length=6,
+        description="查询目标主体（公司/主题），用于结果相关性过滤。",
+    )
 
 
-class MainCompareEntitiesArgs(BaseModel):
-    """多实体并发对比参数；实体数量在此处硬约束，避免模型传入单实体或过多实体。"""
+class MainEvidenceFactRef(BaseModel):
+    """指向 Journal 中某条 Evidence 的规范化事实。"""
 
-    entities: list[str] = Field(min_length=2, max_length=6)
-    query: str
-    limit: int = Field(default=10, ge=1, le=20)
+    evidence_id: str = Field(min_length=1, max_length=120)
+    fact_index: int = Field(ge=0)
+
+
+class MainCalculationItem(BaseModel):
+    """模型只声明运算和事实引用，不直接提供数值。"""
+
+    calculation_id: str = Field(min_length=1, max_length=80)
+    operation: CalculationOperation
+    current: MainEvidenceFactRef
+    reference: MainEvidenceFactRef
+    periods: float = Field(default=1.0, gt=0)
+
+
+class MainCalculationBatchArgs(BaseModel):
+    """单次最多提交八项计算，避免并发调用消耗工具轮次。"""
+
+    calculations: list[MainCalculationItem] = Field(min_length=1, max_length=8)
 
 
 MAIN_TOOL_ARGS_SCHEMAS = {
     "web.search": MainWebSearchArgs,
     "knowledge.faq.search": MainFaqSearchArgs,
     "knowledge.pdf.search": MainPdfSearchArgs,
-    "iwencai.compare_entities": MainCompareEntitiesArgs,
+    "calculation.run": MainCalculationBatchArgs,
 }
 
 

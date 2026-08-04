@@ -22,7 +22,9 @@ class RunSoftDeadlineExceeded(TimeoutError):
 _DEFAULT_USER_READ_ONLY_TOOLS = (
     "weather.get",
     "iwencai.query",
+    "iwencai.finance.query",
     "iwencai.screen",
+    "iwencai.usstock.screen",
     "iwencai.market.query",
     "iwencai.industry.query",
     "iwencai.index.query",

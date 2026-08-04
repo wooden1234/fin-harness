@@ -47,8 +47,9 @@ _CHECKPOINT_ALLOWED_MSGPACK_MODULES = (
     ("agents.orchestrator.contracts", "TaskSpec"),
     # Main DeepAgent 结构化响应写入 state 后需可从 checkpoint 还原。
     ("agents.main_deep_agent.contracts", "MainAgentResponse"),
-    ("agents.main_deep_agent.contracts", "MainAgentSection"),
     ("agents.main_deep_agent.contracts", "MainAgentStatement"),
+    ("agents.main_deep_agent.contracts", "MainAgentTable"),
+    ("agents.main_deep_agent.contracts", "MainAgentTableRow"),
 )
 
 # 兼容旧环境变量；未显式登记的类型在 strict 模式下会被拒绝。

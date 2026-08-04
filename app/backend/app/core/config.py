@@ -177,10 +177,12 @@ class Settings(BaseSettings):
     TAVILY_API_KEY: str = ""
     TAVILY_SEARCH_URL: str = "https://api.tavily.com/search"
     WEB_SEARCH_MAX_RESULTS: int = 4
-    # 保守起步：中文金融查询 score 分布未知，过严会触发重试风暴。
-    WEB_SEARCH_MIN_SCORE: float = 0.2
-    # 非空时覆盖默认金融白名单（逗号分隔）；模型 search_web 固定 allowlist。
-    WEB_SEARCH_ALLOWED_DOMAINS: str = ""
+    # 低于阈值的结果一律丢弃（不保底）；中文金融检索建议 0.35 起。
+    WEB_SEARCH_MIN_SCORE: float = 0.35
+    # A 股常规收盘（上海时区），用于「今日」→最近已结束交易日近似；无节假日日历。
+    A_SHARE_SESSION_CLOSE_HOUR: int = 15
+    A_SHARE_SESSION_CLOSE_MINUTE: int = 0
+    A_SHARE_TZ: str = "Asia/Shanghai"
 
     # 天气（OpenWeatherMap）。配置 OPENWEATHER_API_KEY 后启用。
     OPENWEATHER_API_KEY: str = ""

@@ -1,6 +1,6 @@
 ---
 name: research-report-search
-description: 查询券商和研究机构研报，获取标题、摘要、发布时间、机构、评级、目标价及报告链接时使用。
+description: 收录了主流投研机构发布的研究报告，帮你快速获取专业、深度的分析逻辑、投资评级、目标价等重要投研决策信息。
 required_tools:
   - iwencai.report.search
 ---

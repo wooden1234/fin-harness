@@ -1,15 +1,86 @@
 ---
 name: financial-research
 description: 基于官方、行情、研究和知识库来源完成金融主题研究。用于行业前景、公司基本面、周期位置、风险和投资价值分析。
-allowed-tools: query_iwencai compare_entities_with_iwencai query_iwencai_industry query_iwencai_market query_iwencai_rating search_iwencai_report search_web catalog_pdf_knowledge_tool search_pdf_knowledge_tool search_faq_knowledge_tool run_calculation
+allowed-tools: query_iwencai_finance query_iwencai query_iwencai_industry query_iwencai_market query_iwencai_rating screen_iwencai_usstock search_iwencai_report search_web catalog_pdf_knowledge_tool search_pdf_knowledge_tool search_faq_knowledge_tool run_calculation
 ---
 
-# 金融研究
+# 金融研究 使用指南
 
-1. 把问题拆成事实、计算、推断和反方证据待办项。
-2. 财务事实优先用 `query_iwencai`（单实体）或 `compare_entities_with_iwencai`（2 个以上实体同指标，一次并发查询）；行情用 `query_iwencai_market`/`query_iwencai_industry`；本地已收录 PDF/FAQ 用 `catalog_pdf_knowledge_tool`/`search_pdf_knowledge_tool`/`search_faq_knowledge_tool`。
-3. 开放判断至少取得两个独立来源族，`run_calculation` 不算独立来源。
-4. 区分已披露事实、机构预期（`query_iwencai_rating`/`search_iwencai_report`）和分析推断，不用模型记忆补数值。
-5. 证据不足时保留已核验事实，并明确缺失来源和未决问题。
-6. 投资动作问题只讨论条件、风险和观察指标，不给个性化交易指令。
+## 技能概述
 
+本技能用于单主体或主题类研究，支持：
+
+- **公司基本面**：财务事实（`query_iwencai_finance`）、行情（`query_iwencai_market`）
+- **行业研究**：行业估值、盈利、板块排名（`query_iwencai_industry`）
+- **机构观点**：研报评级、一致预期、ESG（`query_iwencai_rating`、`search_iwencai_report`）
+- **美股筛选**：自然语言美股条件（`screen_iwencai_usstock`）
+- **本地知识**：已收录 PDF 与 FAQ（`catalog_pdf_knowledge_tool`、`search_faq_knowledge_tool`）
+
+问财类工具共享 market 预算（约 4 次/任务），多指标/同口径多实体查询必须合并。简单问题不必走完整研究流程。
+
+## 核心处理流程
+
+### 步骤 0: 规划 todos（复杂题、调工具前）
+
+主题研究、周期/投资价值判断：先写 3–5 条 todos（题意、事实槽位、工具顺序、反方证据、停条件），再检索。简单单点事实可跳过。禁止空泛「做个研究」。
+
+盘前/周末回答「今日大涨/领涨」时，todos 须写明：**改写为最近已结束交易日日期**，主工具 `query_iwencai_industry`，勿 market 同义双开。
+
+### 步骤 1: 拆分问题
+
+按问题需要拆成事实类（已披露数值）、计算类（衍生指标）、推断类（趋势/周期判断）、反方证据（风险与质疑）四类，简单事实性问题直接查证即可，不必全部展开。
+
+### 步骤 2: Query 改写与工具选择
+
+**工具边界（勿混用）：**
+
+| 用户意图 | 工具 | 不要做 |
+|---------|------|--------|
+| 板块领涨 / 行业涨跌幅排名 / 板块涨幅榜 | `query_iwencai_industry` | 不要用 market 再问一遍板块；不要用选股回答板块 |
+| 个股/ETF/指数点位、资金、验证大盘涨跌 | `query_iwencai_market`（或指数 Skill） | 不要查「领涨板块」 |
+| 按条件筛股票 | `screen_iwencai` | 不要用来回答「哪些板块领涨」 |
+
+**A 股「今日」日期改写：**
+
+- 上海时区未收盘（收盘时刻见配置/系统提示）或周末：用户说「今天/今日」→ query 写成**最近已结束交易日**的明确日期（取系统提示注入值，模板 `{{最近已结束交易日}}A股板块涨幅排名`），正文说明口径是最近交易日，勿把盘前当成已成交。
+- 已收盘：可用当日日期。
+- 空结果：优先改为更早一个工作日再查 1 次（`call_type=retry`）；禁止换同义「今日…」换工具重打。
+
+**其他改写规则：**
+
+- 财务事实用 `query_iwencai_finance`，写明公司名、指标、期间；**期间只认指标字段名 `[YYYYMMDD]`**，`报告期截止日` 可忽略、不得因其异常而否定已有营收/净利字段；不要用通用 `query_iwencai` 替代
+- 美股筛选用 `screen_iwencai_usstock`；A 股筛选仍走选股工作流/`screen_iwencai`
+- 一致预期/评级/研报用 `query_iwencai_rating` / `search_iwencai_report`
+- 本地资料（PDF/FAQ）仅在相关且已收录时使用；先用 `catalog_pdf_knowledge_tool` 定位再检索正文
+- Web 补查须先润色 query（主体+事件+年份，一槽位一句），并声明 entities；禁止把用户原话「能不能买/上车」直接当搜索词；空结果至多放宽 1 次
+
+**常用查询改写示例：**
+
+| 用户意图 | 改写后查询 |
+|---------|-----------|
+| 今天A股大涨，哪些板块领涨？（盘前/未收盘） | `{{最近已结束交易日}}A股板块涨幅排名`（只用 industry；日期用提示词注入的最近交易日，禁止写死日历日） |
+| 这家公司现在估值贵不贵 | 公司名 市盈率 市净率 行业估值对比 |
+| 行业最近怎么样 | 行业名 估值 盈利 板块排名 |
+| 机构怎么看这只股票 | 公司名 研报评级 一致预期 |
+| 上证今天涨多少（验证大盘） | `上证指数 {{最近已结束交易日}}涨跌幅`（market/指数，可选） |
+
+### 步骤 3: 核对证据
+
+仅采用能明确对应目标实体、指标、期间与数值的结果；零命中、只有行情字段、或实体不匹配时换查询方式或来源，不强行套用。财务数值已齐但币种或期间未披露时，不按上市地点或交易代码（如 `.HK`/`.N`）推断币种，保留缺口并说明；已核验的目标期间数字直接入结论，官方来源未命中写缺口，不改用其他年份或期间冒充。
+
+### 步骤 4: 开放判断与反方证据
+
+对重要的开放性研判（如趋势、周期位置、投资价值），优先补充独立来源和反方证据，并清楚区分：
+
+- **已披露事实**：财报、公告中的确定数值
+- **机构预期**：研报、评级中的预测性观点
+- **分析推断**：基于以上事实和预期做出的判断
+
+三者不得混同表达，尤其不能把机构预期当作既成事实陈述。
+
+## 注意事项
+
+- 同一主体同一意图连续空结果后不近义改写连打；写明缺口后基于已核验内容作答。
+- 证据不足时先回答已核验部分，不为凑齐结论而扩大检索范围。
+- 衍生计算合并调用 `run_calculation` 并引用 Evidence facts；计算不可用时保留原始事实和缺口。
+- 涉及投资价值或周期判断的表达保持条件化和风险导向，不给出确定性买卖结论。

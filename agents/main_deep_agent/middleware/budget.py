@@ -7,7 +7,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field
 
-from agents.main_deep_agent.entities import normalize_entity
+from agents.main_deep_agent.middleware.authorization import normalize_entity
 from app.core.config import settings
 
 
@@ -15,8 +15,9 @@ TOOL_SOURCE_FAMILY = {
     "weather.get": "weather",
     "web.search": "web",
     "iwencai.query": "market",
+    "iwencai.finance.query": "market",
     "iwencai.screen": "market",
-    "iwencai.compare_entities": "market",
+    "iwencai.usstock.screen": "market",
     "iwencai.market.query": "market",
     "iwencai.industry.query": "market",
     "iwencai.index.query": "market",
@@ -33,13 +34,17 @@ TOOL_SOURCE_FAMILY = {
 
 FAMILY_LIMITS = {
     "web": 6,
-    "market": 3,
+    # 多实体财报对比：同口径合查 + 异年结单查 + 1 次纠错。
+    "market": 4,
     "research": 3,
     "knowledge": 2,
     "financial": 3,
     "weather": 1,
     "calculation": 3,
 }
+
+# 同族预算耗尽后连续拒调达到该次数，强制进入无工具收尾，避免空转轮次。
+FAMILY_BUDGET_REJECT_FINALIZE_AFTER = 2
 
 
 @dataclass(slots=True)
@@ -60,6 +65,8 @@ class MainAgentBudgetController:
     web_entity_counts: Counter[str] = field(default_factory=Counter)
     finalization_reason: str = ""
     finalization_started_at: float | None = None
+    family_budget_reject_family: str = ""
+    family_budget_reject_streak: int = 0
 
     def attach(self, timeout_scope: asyncio.Timeout) -> None:
         self.timeout_scope = timeout_scope
@@ -129,6 +136,13 @@ class MainAgentBudgetController:
         family_limit = self.web_limit if family == "web" else FAMILY_LIMITS.get(family, 1)
         if self.tool_counts[family] >= family_limit:
             reason = f"tool_family_budget_exhausted:{family}"
+            if self.family_budget_reject_family == family:
+                self.family_budget_reject_streak += 1
+            else:
+                self.family_budget_reject_family = family
+                self.family_budget_reject_streak = 1
+            if self.family_budget_reject_streak >= FAMILY_BUDGET_REJECT_FINALIZE_AFTER:
+                self.request_finalization(reason)
             return False, reason
         if tool_id == "knowledge.fact.lookup" and self.tool_id_counts[tool_id] >= 2:
             return False, "narrow_finance_call_exhausted"
@@ -137,6 +151,8 @@ class MainAgentBudgetController:
     def register(self, tool_id: str, *, entity: str = "") -> None:
         """登记一次已授权调用，并在首次、第二来源族时升级预算。"""
         family = TOOL_SOURCE_FAMILY.get(tool_id, "unknown")
+        self.family_budget_reject_family = ""
+        self.family_budget_reject_streak = 0
         self.tool_calls += 1
         self.tool_counts[family] += 1
         self.tool_id_counts[tool_id] += 1

@@ -26,7 +26,13 @@ _SUPPORTED_SKILLS = {
     "hithink-astock-selector": _InstalledSkillSpec(
         "scripts/cli.py", "query_flags", "1.0.0"
     ),
+    "hithink-usstock-selector": _InstalledSkillSpec(
+        "scripts/cli.py", "query_flags", "1.0.0"
+    ),
     "hithink-fund-selector": _InstalledSkillSpec(
+        "scripts/cli.py", "query_flags", "1.0.0"
+    ),
+    "hithink-finance-query": _InstalledSkillSpec(
         "scripts/cli.py", "query_flags", "1.0.0"
     ),
     "hithink-industry-query": _InstalledSkillSpec(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage
@@ -66,6 +67,17 @@ _EXTERNAL_FACT_REQUEST_MARKERS = (
     "原因",
     "分析",
 )
+# 系统日志/堆栈特征：时间戳 + 日志级别，或典型异常回溯行。
+# 命中即视为非用户问题，与最近对话是否为金融话题无关，直接短路为 general。
+_LOG_TIMESTAMP_LEVEL_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}.{0,40}?\b"
+    r"(DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL|FATAL)\b",
+)
+_TRACEBACK_MARKERS = (
+    "Traceback (most recent call last)",
+    "exception_type=",
+    "main agent failed",
+)
 
 
 def latest_user_query(state: dict[str, Any]) -> str:
@@ -98,6 +110,21 @@ def _is_concept_explanation(query: str) -> bool:
     return not any(marker in query for marker in _EXTERNAL_FACT_REQUEST_MARKERS)
 
 
+def _looks_like_system_log(query: str) -> bool:
+    """识别系统日志/报错堆栈等非用户提问输入。
+
+    这类输入本身不携带金融语义，也不是对历史话题的追问，不应因为
+    最近对话是金融话题就被 LLM 顺势归为 deep（会导致误把日志当成
+    上一个问题的延续去重新作答）。命中直接短路为 general，交给
+    general_agent 诚实说明「这看起来不是一个问题」。
+    """
+    if _LOG_TIMESTAMP_LEVEL_RE.search(query):
+        return True
+    if any(marker in query for marker in _TRACEBACK_MARKERS):
+        return True
+    return False
+
+
 def _is_explicit_general(query: str) -> bool:
     normalized = "".join(query.split()).strip("？?！!。. ")
     if not normalized:
@@ -124,6 +151,8 @@ def classify_execution_lane(query: str) -> ExecutionLane:
     if not text:
         return "general"
     if parse_weather_request(text) is not None:
+        return "general"
+    if _looks_like_system_log(text):
         return "general"
     if _is_concept_explanation(text):
         return "general"

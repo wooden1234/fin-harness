@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Literal
 
 from langchain_core.tools import tool
+from pydantic import BaseModel, ConfigDict, Field
 
 from tools.core.base import ToolSpec
 from tools.core.registry import register_tool
@@ -20,26 +21,26 @@ CalculationOperation = Literal[
 ]
 
 
-@tool(parse_docstring=True)
-async def run_calculation(
-    operation: CalculationOperation,
-    current_value: float,
-    reference_value: float,
-    periods: float = 1.0,
-    input_evidence_ids: list[str] | None = None,
-) -> dict:
-    """执行白名单金融计算，禁止传入任意表达式。
+class ResolvedCalculation(BaseModel):
+    """已由受治理调用层从 Evidence 解析出的计算任务。"""
 
-    Args:
-        operation: 计算类型。
-        current_value: 当前值或期末值。
-        reference_value: 基准值、期初值或分母。
-        periods: CAGR 的期数，其他计算传 1。
-        input_evidence_ids: 计算输入对应的 Evidence ID。
-    """
-    evidence_ids = list(dict.fromkeys(input_evidence_ids or []))
-    if not evidence_ids:
-        return {"ok": False, "error": "input_evidence_required"}
+    model_config = ConfigDict(extra="forbid")
+
+    calculation_id: str = Field(min_length=1, max_length=80)
+    operation: CalculationOperation
+    current_value: float
+    reference_value: float
+    periods: float = Field(default=1.0, gt=0)
+    input_evidence_ids: list[str] = Field(min_length=1, max_length=2)
+    operand_refs: list[dict[str, int | str]] = Field(min_length=2, max_length=2)
+
+
+def _calculate(item: ResolvedCalculation) -> dict:
+    """执行单项白名单计算；输入值只能来自上游 Evidence 解析结果。"""
+    operation = item.operation
+    current_value = item.current_value
+    reference_value = item.reference_value
+    periods = item.periods
     if operation in {
         "change_rate",
         "drawdown",
@@ -47,9 +48,12 @@ async def run_calculation(
         "quarter_over_quarter",
         "ratio",
     } and reference_value == 0:
-        return {"ok": False, "error": "division_by_zero"}
+        return {
+            "ok": False,
+            "calculation_id": item.calculation_id,
+            "error": "division_by_zero",
+        }
 
-    formula = ""
     if operation in {"change_rate", "year_over_year", "quarter_over_quarter"}:
         value = (current_value - reference_value) / abs(reference_value) * 100
         formula = "(current_value-reference_value)/abs(reference_value)*100"
@@ -67,14 +71,19 @@ async def run_calculation(
         formula = "current_value-reference_value"
         unit = ""
     else:
-        if current_value < 0 or reference_value <= 0 or periods <= 0:
-            return {"ok": False, "error": "invalid_cagr_input"}
+        if current_value < 0 or reference_value <= 0:
+            return {
+                "ok": False,
+                "calculation_id": item.calculation_id,
+                "error": "invalid_cagr_input",
+            }
         value = ((current_value / reference_value) ** (1 / periods) - 1) * 100
         formula = "((current_value/reference_value)^(1/periods)-1)*100"
         unit = "%"
 
     return {
         "ok": True,
+        "calculation_id": item.calculation_id,
         "operation": operation,
         "value": round(value, 6),
         "unit": unit,
@@ -84,15 +93,41 @@ async def run_calculation(
             "reference_value": reference_value,
             "periods": periods,
         },
-        "input_evidence_ids": evidence_ids,
+        "input_evidence_ids": list(dict.fromkeys(item.input_evidence_ids)),
+        "operand_refs": item.operand_refs,
     }
+
+
+@tool(parse_docstring=True)
+async def run_calculation(
+    calculations: list[ResolvedCalculation],
+) -> dict:
+    """批量执行已由服务端从 Evidence 解析的白名单金融计算。
+
+    Args:
+        calculations: 1-8 项已解析计算；MainAgent 不直接填写其中的数值。
+    """
+    if not calculations or len(calculations) > 8:
+        return {"ok": False, "error": "invalid_calculation_batch_size"}
+    results = [_calculate(item) for item in calculations]
+    failures = [item for item in results if not item.get("ok")]
+    if failures:
+        return {
+            "ok": False,
+            "error": "calculation_batch_failed",
+            "failed_calculations": failures,
+        }
+    return {"ok": True, "calculations": results}
 
 
 register_tool(
     ToolSpec(
         tool_id="calculation.run",
         name="run_calculation",
-        description="使用白名单公式计算涨跌幅、回撤、同比、环比、比率、差值或 CAGR",
+        description=(
+            "一次批量计算最多八项；MainAgent 只提交 Evidence ID 与 facts 下标，"
+            "输入数值由服务端解析，禁止手算或按数值猜来源"
+        ),
         read_only=True,
         timeout_seconds=2.0,
     ),
@@ -100,4 +135,4 @@ register_tool(
 )
 
 
-__all__ = ["run_calculation"]
+__all__ = ["CalculationOperation", "ResolvedCalculation", "run_calculation"]

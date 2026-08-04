@@ -31,6 +31,35 @@ async def test_screen_iwencai_uses_cached_skill_not_runner(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_finance_and_usstock_tools_use_cached_skill(monkeypatch) -> None:
+    reset_cache_metrics()
+    seen: list[str] = []
+
+    async def fake_cached(skill_id, *args, **kwargs):
+        seen.append(skill_id)
+        return {
+            "ok": True,
+            "cache_status": "miss",
+            "data": {
+                "query": "测试",
+                "datas": [{"股票简称": "示例", "营业收入[20251231]": "1亿"}],
+            },
+        }
+
+    monkeypatch.setattr(iwencai_tools, "_run_cached_skill", fake_cached)
+    finance = await iwencai_tools.query_iwencai_finance.ainvoke(
+        {"query": "示例营业收入", "page": 1, "limit": 5, "call_type": "normal"}
+    )
+    usstock = await iwencai_tools.screen_iwencai_usstock.ainvoke(
+        {"query": "美股市值前十", "page": 1, "limit": 5, "call_type": "normal"}
+    )
+    assert seen == ["hithink-finance-query", "hithink-usstock-selector"]
+    assert finance["ok"] is True
+    assert finance["data"]["facts"]
+    assert usstock["ok"] is True
+
+
+@pytest.mark.asyncio
 async def test_retry_bypasses_cache(monkeypatch) -> None:
     reset_cache_metrics()
     monkeypatch.setattr(iwencai_tools.settings, "IWENCAI_CACHE_ENABLED", True)
