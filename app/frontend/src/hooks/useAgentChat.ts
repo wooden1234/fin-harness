@@ -4,6 +4,7 @@ import { createConversation } from '@/services/api/conversations'
 import { getToken } from '@/services/api/client'
 import { useChatStore } from '@/stores/useChatStore'
 import type { AgentSSEEvent } from '@/types/events'
+import { DEFAULT_IMAGE_QUERY } from '@/components/chat/ChatInput'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? ''
 const PERSISTED_CONVERSATION_ID_RE = /^\d+$/
@@ -208,9 +209,12 @@ export function useAgentChat() {
     clientRef.current = null
   }
 
-  const sendQuery = async (query: string) => {
+  const sendQuery = async (query: string, options?: { attachmentId?: string; imagePreviewUrl?: string }) => {
     const trimmed = query.trim()
-    if (!trimmed) return
+    const attachmentId = options?.attachmentId?.trim() || ''
+    if (!trimmed && !attachmentId) return
+    const effectiveQuery = trimmed || DEFAULT_IMAGE_QUERY
+
 
     try {
       const conversationId = await ensureConversationId()
@@ -218,7 +222,11 @@ export function useAgentChat() {
       addMessage({
         id: `user-${Date.now()}`,
         role: 'user',
-        content: trimmed,
+        content: effectiveQuery,
+        ...(options?.imagePreviewUrl
+          ? { imagePreviewUrl: options.imagePreviewUrl }
+          : {}),
+        ...(attachmentId ? { attachmentId } : {}),
         timestamp: Date.now(),
       })
 
@@ -228,8 +236,11 @@ export function useAgentChat() {
       closeSources()
 
       const fields: Record<string, string> = {
-        query: trimmed,
+        query: effectiveQuery,
         conversation_id: conversationId,
+      }
+      if (attachmentId) {
+        fields.attachment_id = attachmentId
       }
 
       await runStream('/api/agent/query', fields)

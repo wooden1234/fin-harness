@@ -12,6 +12,7 @@ from agents.context_compressor.prompts import (
     SUMMARY_PROMPT,
 )
 from agents.final_answer.node import final_answer_node
+from agents.image_query_protocol import IMAGE_CLUE_HEADER, USER_INTENT_HEADER
 from agents.orchestrator.execution_lane import (
     classify_execution_lane,
     classify_execution_lane_node,
@@ -51,10 +52,37 @@ from agents.orchestrator.execution_lane_resolver import (
             "general",
         ),
         ("Traceback (most recent call last):\n  File \"a.py\", line 1", "general"),
+        (
+            f"{USER_INTENT_HEADER}\n帮我看看图里写了什么\n\n{IMAGE_CLUE_HEADER}\n"
+            "- 类型：股票行情截图\n- 摘要：贵州茅台股价1328.36，跌2.25%\n"
+            "- 可见数值：涨跌幅: -2.25% (未核验)；成交量: 661 (未核验)",
+            "general",
+        ),
+        (
+            f"{USER_INTENT_HEADER}\n总结截图要点\n\n{IMAGE_CLUE_HEADER}\n"
+            "- 类型：财报截图\n- 摘要：营业总收入834亿，净利润416亿",
+            "general",
+        ),
+        (
+            f"{USER_INTENT_HEADER}\n贵州茅台最新股价多少\n\n{IMAGE_CLUE_HEADER}\n"
+            "- 类型：截图\n- 摘要：个股页面",
+            "deep",
+        ),
     ],
 )
 def test_classify_execution_lane_rules(query: str, expected: str) -> None:
     assert classify_execution_lane(query) == expected
+
+
+def test_routing_query_strips_image_clues() -> None:
+    from agents.image_query_protocol import IMAGE_CLUE_HEADER, USER_INTENT_HEADER
+    from agents.orchestrator.execution_lane import routing_query_from_message
+
+    full = (
+        f"{USER_INTENT_HEADER}\n总结截图要点\n\n{IMAGE_CLUE_HEADER}\n"
+        "- 摘要：贵州茅台股价下跌"
+    )
+    assert routing_query_from_message(full) == "总结截图要点"
 
 
 @pytest.mark.asyncio

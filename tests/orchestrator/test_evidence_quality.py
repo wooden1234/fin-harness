@@ -173,7 +173,7 @@ async def test_claim_extraction_json_mode_prompt_contains_json_contract(
     )
     result = AgentResult(
         task_id="research",
-        agent_id="research_workflow",
+        agent_id="finance_agent",
         status="completed",
         answer="示例公司营收增长。",
         evidence=[

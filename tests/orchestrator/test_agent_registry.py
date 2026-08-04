@@ -4,20 +4,13 @@ from agents.orchestrator.agent_registry import _dependency_payload, get_agent_sp
 from agents.orchestrator.contracts import AgentResult, CandidateSet
 
 
-def test_v2_specialized_handlers_are_registered() -> None:
-    market_spec = get_agent_spec("market_acquisition_workflow")
-    research_spec = get_agent_spec("research_retrieval_workflow")
-    screening_spec = get_agent_spec("stock_screening_agent")
-    compute_spec = get_agent_spec("market.compute")
-    research_workflow_spec = get_agent_spec("research_workflow")
+def test_registered_handlers() -> None:
+    general_spec = get_agent_spec("general_agent")
+    finance_spec = get_agent_spec("finance_agent")
 
-    assert market_spec.kind == "workflow"
-    assert "iwencai.report.search" in research_spec.capabilities
-    assert research_spec.kind == "workflow"
-    assert screening_spec.capabilities == ("iwencai.screen",)
-    assert compute_spec.kind == "deterministic"
-    assert research_workflow_spec.kind == "workflow"
-    assert research_workflow_spec.capabilities == ("deep.research",)
+    assert general_spec.capabilities == ()
+    assert "faq" in finance_spec.capabilities
+    assert finance_spec.evidence_policy.required is True
 
 
 def test_dependency_payload_preserves_structured_data() -> None:
@@ -29,8 +22,8 @@ def test_dependency_payload_preserves_structured_data() -> None:
         rows=[{"code": "300750", "name": "宁德时代"}],
     )
     source = AgentResult(
-        task_id="screen",
-        agent_id="stock_screening_agent",
+        task_id="finance",
+        agent_id="finance_agent",
         status="completed",
         answer="共筛选出 1 只候选股",
         structured_data=candidates.model_dump(),

@@ -9,7 +9,7 @@ from agents.orchestrator.contracts import AgentResult, Evidence, TaskPlan, TaskS
 def test_v2_citations_accept_research_tool_sources() -> None:
     result = AgentResult(
         task_id="research",
-        agent_id="research_workflow",
+        agent_id="finance_agent",
         status="completed",
         evidence=[
             Evidence(
@@ -37,7 +37,7 @@ def test_v2_citations_accept_research_tool_sources() -> None:
                     TaskSpec(
                         task_id="research",
                         objective="研究公司",
-                        agent_id="research_workflow",
+                        agent_id="finance_agent",
                     )
                 ],
             ),
@@ -56,7 +56,7 @@ def test_v2_citations_drop_unknown_source_without_provenance() -> None:
             "agent_results": [
                 AgentResult(
                     task_id="research",
-                    agent_id="research_workflow",
+                    agent_id="finance_agent",
                     status="completed",
                 )
             ]

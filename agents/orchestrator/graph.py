@@ -137,11 +137,6 @@ async def build_plan(
         scope=_task_scope(runtime),
     )
     planning_status = str(plan.metadata.get("planning_status") or "")
-    prior_results = (
-        list(state.get("agent_results") or [])
-        if profile.execution.mode == "market_compute"
-        else []
-    )
     return {
         "task_plan": plan,
         "execution_status": planning_status or "running",
@@ -149,8 +144,7 @@ async def build_plan(
         "route": "plan",
         "replan_count": 0,
         "agent_results": Overwrite([]),
-        # 跨轮继续过滤时，只把上一轮结果作为确定性计算输入，不拼入问题文本。
-        "prior_agent_results": prior_results,
+        "prior_agent_results": [],
         "evidence": Overwrite([]),
         "citations": Overwrite([]),
         "claims": [],
@@ -285,8 +279,6 @@ def dispatch_wave(state: OrchestratorState) -> list[Send]:
             for item in results
             if item.task_id in set(task.depends_on)
         ]
-        if task.agent_id == "market.compute" and not dependencies:
-            dependencies = list(state.get("prior_agent_results") or [])
         sends.append(
             Send(
                 "execute_task",

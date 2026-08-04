@@ -134,19 +134,17 @@ def test_document_hit_set_can_be_serialized() -> None:
 async def test_invoke_agent_passes_complete_dependency_state(monkeypatch) -> None:
     captured: dict = {}
 
-    async def fake_stock_agent(state, *, query, config=None, runtime=None):
-        captured["state"] = state
-        captured["query"] = query
-        return AgentResult(
-            task_id="screen",
-            agent_id="stock_screening_agent",
-            status="completed",
-        )
+    class FakeFinanceAgent:
+        async def ainvoke(self, state, config=None):
+            del config
+            captured["state"] = state
+            captured["query"] = state["messages"][0].content
+            return {"summary": "ok"}
 
-    monkeypatch.setattr(
-        "agents.stock_screening_agent.run_stock_screening_agent",
-        fake_stock_agent,
-    )
+    import importlib
+
+    finance_module = importlib.import_module("agents.finance_agent")
+    monkeypatch.setattr(finance_module, "finance_agent", FakeFinanceAgent())
     candidates = CandidateSet(
         dataset_id="candidate-1",
         universe="A股",
@@ -156,7 +154,7 @@ async def test_invoke_agent_passes_complete_dependency_state(monkeypatch) -> Non
     )
     dependency = AgentResult(
         task_id="upstream",
-        agent_id="stock_screening_agent",
+        agent_id="finance_agent",
         status="completed",
         answer="候选股票",
         structured_data=candidates.model_dump(),
@@ -165,16 +163,16 @@ async def test_invoke_agent_passes_complete_dependency_state(monkeypatch) -> Non
 
     await invoke_agent(
         TaskSpec(
-            task_id="screen-next",
-            objective="继续过滤候选股票",
-            agent_id="stock_screening_agent",
+            task_id="finance-next",
+            objective="继续研究候选股票",
+            agent_id="finance_agent",
             input_data={"top_k": 5},
         ),
         dependency_results=[dependency],
         memory_context={"default_market": "US"},
     )
 
-    assert captured["query"] == "继续过滤候选股票"
+    assert captured["query"] == "继续研究候选股票"
     forwarded = captured["state"]["dependency_results"][0]
     assert forwarded.structured_data["dataset_id"] == "candidate-1"
     assert forwarded.evidence[0].evidence_id == "e-1"

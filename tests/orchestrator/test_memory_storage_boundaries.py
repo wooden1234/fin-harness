@@ -38,11 +38,7 @@ def test_business_agents_do_not_import_memory_storage_directly():
     business_roots = (
         project_root / "agents" / "finance_agent",
         project_root / "agents" / "general_agent",
-        project_root / "agents" / "market_acquisition_workflow",
-        project_root / "agents" / "market_compute",
-        project_root / "agents" / "research_retrieval_workflow",
-        project_root / "agents" / "research_workflow",
-        project_root / "agents" / "stock_screening_agent",
+        project_root / "agents" / "main_deep_agent",
     )
     violations: list[str] = []
 

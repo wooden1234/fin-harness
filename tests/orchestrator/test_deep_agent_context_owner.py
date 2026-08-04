@@ -4,16 +4,14 @@ import pytest
 from deepagents.middleware.summarization import SummarizationMiddleware
 from langchain_core.messages import AIMessage, HumanMessage
 
-from agents.main_deep_agent.state import MainAgentProgressJournal
-from agents.orchestrator.contracts import Evidence
-from agents.research_workflow.contracts import ResearchContextSummary
-from agents.research_workflow.deep_agent.context_middleware import (
+from agents.deep_agent_support import assert_single_summary_middleware
+from agents.main_deep_agent.contracts import ResearchContextSummary
+from agents.main_deep_agent.middleware.summarization import (
     GovernedResearchSummarizationMiddleware,
     _serialize_message_for_summary,
 )
-from agents.research_workflow.deep_agent.runtime import (
-    _assert_single_summary_middleware,
-)
+from agents.main_deep_agent.state import MainAgentProgressJournal
+from agents.orchestrator.contracts import Evidence
 
 
 def test_serialize_message_for_summary_accepts_plain_strings() -> None:
@@ -56,12 +54,12 @@ async def test_acreate_summary_tolerates_string_messages_in_batch() -> None:
 def test_deep_agent_requires_exactly_one_summary_middleware() -> None:
     middleware = object.__new__(GovernedResearchSummarizationMiddleware)
 
-    _assert_single_summary_middleware([middleware])
+    assert_single_summary_middleware([middleware])
 
     with pytest.raises(RuntimeError, match="count=0"):
-        _assert_single_summary_middleware([])
+        assert_single_summary_middleware([])
     with pytest.raises(RuntimeError, match="count=2"):
-        _assert_single_summary_middleware([middleware, middleware])
+        assert_single_summary_middleware([middleware, middleware])
 
 
 def test_governed_middleware_is_the_framework_summary_owner() -> None:

@@ -149,8 +149,88 @@ def build_governed_tools(
     return governed_tools
 
 
+_DATA_SOURCE_SKILLS: dict[str, frozenset[str]] = {
+    "market": frozenset(
+        {
+            "stock-screening",
+            "market-quotes",
+            "industry-data",
+            "index-data",
+        }
+    ),
+    "research": frozenset(
+        {
+            "announcement-search",
+            "research-report-search",
+            "institution-rating",
+        }
+    ),
+    "finance_rag": frozenset({"dependency-analysis"}),
+    "local_documents": frozenset({"pdf-knowledge"}),
+    "stable_rules": frozenset({"faq-knowledge"}),
+}
+_SKILL_ORDER = (
+    "dependency-analysis",
+    "stock-screening",
+    "market-quotes",
+    "industry-data",
+    "index-data",
+    "announcement-search",
+    "research-report-search",
+    "institution-rating",
+    "faq-knowledge",
+    "pdf-knowledge",
+)
+
+
+def skills_for_data_sources(data_sources: Sequence[str]) -> tuple[str, ...]:
+    """将语义来源确定性映射为最小 Skill 集。"""
+    sources = set(data_sources)
+    allowed = {"dependency-analysis"}
+    for source in sources:
+        allowed.update(_DATA_SOURCE_SKILLS.get(source, set()))
+    return tuple(skill for skill in _SKILL_ORDER if skill in allowed)
+
+
+def evidence_from_tool_collector(collector: Sequence[dict[str, Any]]) -> list[Any]:
+    """只接收工具返回的真实 Evidence，过滤隔离/拒绝条目。"""
+    from agents.orchestrator.contracts import Evidence
+
+    evidence: list[Evidence] = []
+    seen: set[str] = set()
+    for item in collector:
+        if not item.get("ok"):
+            continue
+        data = item.get("data")
+        if not isinstance(data, dict):
+            continue
+        for raw in list(data.get("evidence") or []):
+            try:
+                parsed = raw if isinstance(raw, Evidence) else Evidence.model_validate(raw)
+            except ValueError:
+                continue
+            if parsed.metadata.get("quality_status") in {"quarantined", "rejected"}:
+                continue
+            if parsed.evidence_id not in seen:
+                seen.add(parsed.evidence_id)
+                evidence.append(parsed)
+    return evidence
+
+
+def assert_single_summary_middleware(middleware: Sequence[Any]) -> None:
+    """启动时确保项目只注入一个摘要 owner。"""
+    from deepagents.middleware.summarization import SummarizationMiddleware
+
+    count = sum(isinstance(item, SummarizationMiddleware) for item in middleware)
+    if count != 1:
+        raise RuntimeError(f"deep_agent_summary_middleware_count={count}")
+
+
 __all__ = [
+    "assert_single_summary_middleware",
     "build_governed_tools",
     "ensure_financial_deep_agent_profile",
+    "evidence_from_tool_collector",
     "run_context_from_runtime",
+    "skills_for_data_sources",
 ]

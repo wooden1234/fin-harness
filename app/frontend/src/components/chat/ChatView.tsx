@@ -1,11 +1,12 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
 import { Flame, LineChart, Sparkles } from 'lucide-react'
 import { ChatMessage } from './ChatMessage'
-import { ChatInput } from './ChatInput'
+import { ChatInput, type PendingImage, DEFAULT_IMAGE_QUERY } from './ChatInput'
 import { HitlBanner } from './HitlBanner'
 import { AgentStepsPanel } from './AgentStepsPanel'
 import { useChatStore } from '@/stores/useChatStore'
 import { useAgentChat } from '@/hooks/useAgentChat'
+import { uploadChatImage } from '@/services/api/attachments'
 import {
   fetchHotBoard,
   type HotBoardPanel,
@@ -63,11 +64,60 @@ export function ChatView() {
   const { messages, isGenerating, hitlPending, hitlMessage, agentSteps, agentTodos } = useChatStore()
   const { sendQuery, resumeAgent, cancelStream } = useAgentChat()
   const [input, setInput] = useState('')
+  const [pendingImage, setPendingImage] = useState<PendingImage | null>(null)
   const [panels, setPanels] = useState<HotBoardPanel[]>(FALLBACK_PANELS)
   const [hotAsOf, setHotAsOf] = useState('')
   const [hotLoading, setHotLoading] = useState(false)
   const [hotRefreshing, setHotRefreshing] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const imageUploadSeq = useRef(0)
+
+  const clearPendingImage = () => {
+    imageUploadSeq.current += 1
+    setPendingImage((current) => {
+      if (current?.previewUrl) URL.revokeObjectURL(current.previewUrl)
+      return null
+    })
+  }
+
+  const beginImageUpload = (file: File) => {
+    clearPendingImage()
+    const seq = imageUploadSeq.current
+    const previewUrl = URL.createObjectURL(file)
+    setPendingImage({
+      file,
+      previewUrl,
+      uploadStatus: 'uploading',
+    })
+    void uploadChatImage(file)
+      .then((uploaded) => {
+        if (imageUploadSeq.current !== seq) return
+        setPendingImage((current) =>
+          current && current.previewUrl === previewUrl
+            ? {
+                ...current,
+                uploadStatus: 'ready',
+                attachmentId: uploaded.attachment_id,
+                errorMessage: undefined,
+              }
+            : current,
+        )
+      })
+      .catch((error: unknown) => {
+        if (imageUploadSeq.current !== seq) return
+        setPendingImage((current) =>
+          current && current.previewUrl === previewUrl
+            ? {
+                ...current,
+                uploadStatus: 'error',
+                attachmentId: undefined,
+                errorMessage:
+                  error instanceof Error ? error.message : '图片上传失败',
+              }
+            : current,
+        )
+      })
+  }
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -117,23 +167,53 @@ export function ChatView() {
     }
   }, [messages.length])
 
-  const handleSend = () => {
-    const text = input.trim()
-    if (!text || isGenerating) return
+  const handleSend = (overrideText?: string) => {
+    const text = (overrideText ?? input).trim()
+    const image = pendingImage
+    const imageReady =
+      Boolean(image?.attachmentId) && image?.uploadStatus === 'ready'
+    if ((!text && !imageReady) || isGenerating) return
+    if (image && image.uploadStatus !== 'ready') return
+    const queryText = text || (imageReady ? DEFAULT_IMAGE_QUERY : '')
+    if (!queryText) return
+    const attachmentId = imageReady ? image?.attachmentId : undefined
+    const imagePreviewUrl = imageReady ? image?.previewUrl : undefined
     setInput('')
-    void sendQuery(text)
+    setPendingImage(null)
+    void sendQuery(queryText, {
+      attachmentId,
+      imagePreviewUrl,
+    }).catch((error: unknown) => {
+      useChatStore.getState().addMessage({
+        id: `assistant-error-${Date.now()}`,
+        role: 'assistant',
+        content: error instanceof Error ? error.message : '发送失败',
+        timestamp: Date.now(),
+      })
+    })
   }
 
-  const handleFollowUp = (text: string) => {
+  const handleFollowUp = (
+    text: string,
+    options?: { attachmentId?: string; imagePreviewUrl?: string },
+  ) => {
     const query = text.trim()
     if (!query || isGenerating || hitlPending) return
     setInput('')
-    void sendQuery(query)
+    clearPendingImage()
+    void sendQuery(query, {
+      attachmentId: options?.attachmentId,
+      imagePreviewUrl: options?.imagePreviewUrl,
+    })
   }
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      <div className="flex-1 overflow-y-auto">
+      <div
+        className={`flex-1 min-h-0 ${
+          messages.length === 0 ? 'overflow-hidden' : 'overflow-y-auto'
+        }`}
+      >
         {messages.length === 0 ? (
           <div className="relative h-full overflow-hidden">
             <div
@@ -145,7 +225,7 @@ export function ChatView() {
               className="pointer-events-none absolute -top-16 left-1/2 h-56 w-56 -translate-x-1/2 rounded-full bg-brand-gold/15 blur-3xl animate-soft-pulse"
             />
 
-            <div className="relative h-full flex flex-col items-center justify-center px-6 py-12">
+            <div className="relative h-full flex flex-col items-center justify-center px-6 py-6">
               <div className="animate-fade-up flex flex-col items-center text-center">
                 <img
                   src={caiceLogo}
@@ -160,7 +240,7 @@ export function ChatView() {
                 </p>
               </div>
 
-              <div className="animate-fade-up-delay mt-10 w-full max-w-4xl">
+              <div className="animate-fade-up-delay mt-6 w-full max-w-5xl">
                 <div className="mb-3 flex items-center justify-between px-1">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-semibold text-slate-800 dark:text-slate-100">
@@ -280,10 +360,15 @@ export function ChatView() {
         onCancel={cancelStream}
         disabled={hitlPending}
         isGenerating={isGenerating}
+        pendingImage={pendingImage}
+        onSelectImage={beginImageUpload}
+        onClearImage={clearPendingImage}
         placeholder={
           hitlPending
             ? '请使用上方人工恢复面板输入补充说明'
-            : '有问题，尽管问…'
+            : pendingImage?.uploadStatus === 'uploading'
+              ? '图片上传中，完成后即可发送…'
+              : '有问题，尽管问…'
         }
       />
     </div>

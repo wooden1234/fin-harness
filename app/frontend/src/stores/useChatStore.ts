@@ -6,6 +6,8 @@ export interface Message {
   id: string
   role: 'user' | 'assistant' | 'system'
   content: string
+  imagePreviewUrl?: string
+  attachmentId?: string
   citations?: Citation[]
   route?: AgentRoute
   interrupted?: boolean

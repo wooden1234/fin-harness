@@ -26,7 +26,7 @@ from agents.main_deep_agent.middleware.quality import MainEvidenceQualityMiddlew
 from agents.main_deep_agent.prompts import build_main_system_prompt
 from agents.main_deep_agent.state import MainAgentProgressJournal
 from agents.main_deep_agent.tools.factory import build_main_tools
-from agents.research_workflow.deep_agent.context_middleware import (
+from agents.main_deep_agent.middleware.summarization import (
     GovernedResearchSummarizationMiddleware,
 )
 from agents.runtime_context import AgentRuntimeContext

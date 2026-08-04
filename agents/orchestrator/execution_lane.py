@@ -8,6 +8,10 @@ from typing import Any, Literal
 from langchain_core.messages import HumanMessage
 
 from agents.general_agent.weather_direct import parse_weather_request
+from agents.image_query_protocol import (
+    extract_user_intent,
+    has_image_clue_block,
+)
 
 ExecutionLane = Literal["general", "deep", "uncertain"]
 RuleLaneRoute = Literal["resolved", "uncertain"]
@@ -90,6 +94,11 @@ def latest_user_query(state: dict[str, Any]) -> str:
     return ""
 
 
+def routing_query_from_message(query: str) -> str:
+    """路由只用用户意图，剥离图像理解附属块，避免图中金融词劫持档位。"""
+    return extract_user_intent(query)
+
+
 def _has_finance_signal(query: str) -> bool:
     lowered = query.lower()
     if any(marker.lower() in lowered for marker in _FINANCE_MARKERS):
@@ -146,10 +155,30 @@ def _is_explicit_general(query: str) -> bool:
 
 
 def classify_execution_lane(query: str) -> ExecutionLane:
-    """规则定档：只返回高置信结果，无法确定时返回 uncertain。"""
-    text = str(query or "").strip()
-    if not text:
+    """规则定档：只返回高置信结果，无法确定时返回 uncertain。
+
+    含图像线索时，路由只看【用户意图】本身的金融信号，不扫描图像块；
+    意图无金融强信号则 general（读图/提取类），有则 deep——不依赖提示词文案白名单。
+    """
+    full = str(query or "").strip()
+    if not full:
         return "general"
+    intent = routing_query_from_message(full)
+    if has_image_clue_block(full):
+        text = intent or ""
+        if not text:
+            return "general"
+        if parse_weather_request(text) is not None:
+            return "general"
+        if _looks_like_system_log(text):
+            return "general"
+        if _is_concept_explanation(text):
+            return "general"
+        if _has_finance_signal(text):
+            return "deep"
+        # 附带图像且意图本身无金融强信号 → general（不硬编码芯片文案）
+        return "general"
+    text = full
     if parse_weather_request(text) is not None:
         return "general"
     if _looks_like_system_log(text):
@@ -170,10 +199,11 @@ async def classify_execution_lane_node(state: dict[str, Any]) -> dict[str, Any]:
     logger = get_logger(service="execution_lane")
     query = latest_user_query(state)
     lane = classify_execution_lane(query)
+    routing = routing_query_from_message(query)
     logger.info(
         "execution_lane={} query={}",
         lane,
-        " ".join(query.split())[:120],
+        " ".join((routing or query).split())[:120],
     )
     update: dict[str, Any] = {
         "execution_lane": lane,
@@ -206,6 +236,7 @@ __all__ = [
     "classify_execution_lane",
     "classify_execution_lane_node",
     "latest_user_query",
+    "routing_query_from_message",
     "route_after_execution_lane",
     "route_after_rule_lane",
 ]

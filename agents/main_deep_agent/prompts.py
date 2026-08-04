@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from app.core.config import settings
+from agents.image_query_protocol import IMAGE_CLUE_HEADER, IMAGE_CLUE_HEADER_LEGACY
 
 
 def _cn_tz() -> ZoneInfo:
@@ -87,6 +88,7 @@ def build_main_system_prompt(
 - 多实体财务比较按此填扁平 MainAgentResponse：heading=「结论」或空；statements 里先写 1 句盈亏/格局（fact/inference，不复述表内金额），口径差异单独用 statement_type=caveat；tables 放一张对比表。渲染顺序是结论→表→caveat，因此 caveat 不要写成普通 fact。
 - 表格 title 用自然名（如「最近一个完整财年财务对比」），不要写「主表：」、不要「A vs B」第二标题，也不要再写与 title 重复的 heading。
 - 单点事实集中在根级 statements，避免重复表达同一结论；不使用口号式总结。
+- 若用户消息含「{IMAGE_CLUE_HEADER}」或「{IMAGE_CLUE_HEADER_LEGACY}」段落：视为图像识别线索，其中的数值与结论不得直接当已核验事实写入 statements/tables；须先用工具或权威来源复核，并在 caveat 中说明图像来源限制。
 - 主表放各公司「最近完整财年」已核验结构化数值，表内带上各自截止日与币种（未知则写未知）；禁止用中期或其他未结束期间填主表。币种保持证据原文、不换算统一；财年窗口不同时不做未换算的金额高低排序，并在 caveat 说明。官方补充与缺口写入 gaps，正文少提。
 - 追问只写入 follow_ups，不在正文追加“需要我继续”等邀请。
 - 用户当前要求优先于本轮要求和长期偏好；按 response_language=zh-CN/en-US、response_detail_level=brief/standard/detailed 和 preferred_output_format=table/markdown/plain_text 调整表达。table 时将适合比较的内容写入根级 tables。

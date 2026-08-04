@@ -52,83 +52,23 @@ def build_plan_from_profile(profile: RequestProfile) -> TaskPlan:
     if profile.missing_fields or execution.mode == "clarify":
         return TaskPlan(plan_id=plan_id, query=query, tasks=[])
 
-    if execution.mode == "market_acquire":
-        market_tool_id = str(execution.tool_id or "").strip()
-        acquire = TaskSpec(
-            task_id="market_acquire",
-            objective=query,
-            agent_id="market_acquisition_workflow",
-            required_capabilities=[market_tool_id] if market_tool_id else [],
-            input_data={"market_tool_id": market_tool_id} if market_tool_id else {},
-        )
-        plan = TaskPlan(plan_id=plan_id, query=query, tasks=[acquire])
-        assert_plan_capabilities(plan)
-        return plan
-
-    if execution.mode == "research_retrieve":
-        research_tool_id = str(execution.tool_id or "").strip()
-        research = TaskSpec(
-            task_id="research",
-            objective=query,
-            agent_id="research_retrieval_workflow",
-            required_capabilities=[research_tool_id] if research_tool_id else [],
-            input_data=(
-                {"research_tool_id": research_tool_id}
-                if research_tool_id
-                else {}
-            ),
-        )
-        plan = TaskPlan(plan_id=plan_id, query=query, tasks=[research])
-        assert_plan_capabilities(plan)
-        return plan
-
-    if execution.mode == "stock_screen":
-        screening = TaskSpec(
-            task_id="stock_screening",
-            objective=query,
-            agent_id="stock_screening_agent",
-            required_capabilities=["iwencai.screen"],
-        )
-        plan = TaskPlan(plan_id=plan_id, query=query, tasks=[screening])
-        assert_plan_capabilities(plan)
-        return plan
-
-    if execution.mode == "market_compute":
-        query_plan = profile.constraints.get("market_query_plan")
-        compute = TaskSpec(
-            task_id="market_compute",
-            objective=query,
-            agent_id="market.compute",
-            required_capabilities=["market.compute"],
-            input_data=(
-                {"market_query_plan": query_plan}
-                if query_plan is not None
-                else {}
-            ),
-        )
-        plan = TaskPlan(plan_id=plan_id, query=query, tasks=[compute])
-        assert_plan_capabilities(plan)
-        return plan
-
-    if execution.mode == "deep_research":
-        research = TaskSpec(
-            task_id="research",
-            objective=query,
-            agent_id="research_workflow",
-            required_capabilities=["deep.research"],
-            semantic_history=semantic_history,
-            input_data={
-                "data_sources": list(execution.data_sources),
-                "entities": list(profile.entities),
-            },
-        )
-        plan = TaskPlan(
+    if execution.mode in {
+        "market_acquire",
+        "research_retrieve",
+        "stock_screen",
+        "market_compute",
+        "deep_research",
+    }:
+        # 独立研究工作流已下线；主路径由 execution_lane → main_deep_agent 承接。
+        return TaskPlan(
             plan_id=plan_id,
             query=query,
-            tasks=[research],
+            tasks=[],
+            metadata={
+                "planning_status": "uncovered",
+                "reason": "legacy_research_workflow_retired",
+            },
         )
-        assert_plan_capabilities(plan)
-        return plan
 
     if execution.mode == "general_answer":
         plan = TaskPlan(

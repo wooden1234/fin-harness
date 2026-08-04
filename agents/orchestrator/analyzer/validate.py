@@ -5,10 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from agents.orchestrator.agent_registry import get_agent_spec
-from agents.orchestrator.analyzer.heuristic import (
-    market_tool_for_query,
-    research_tool_for_query,
-)
 from agents.orchestrator.analyzer.schema import AnalyzerOutput
 from agents.orchestrator.contracts import (
     ExecutionDecision,
@@ -64,41 +60,30 @@ def _execution_decision(
         return ExecutionDecision(
             mode="deep_research",
             budget_tier="research",
-            allowed_capabilities=["deep.research"],
+            allowed_capabilities=[],
             data_sources=sources,
             knowledge_scope=knowledge_scope,
         )
-    if "candidate_compute" in intent_set:
+    # 选股 / 行情 / 研报检索：主路径由 Main DeepAgent 承接，V2 计划不再挂任务。
+    if intent_set & {
+        "candidate_compute",
+        "stock_screening",
+        "research_search",
+        "market_query",
+    }:
+        sources = ["market", "research"]
+        if "stock_screening" in intent_set or "market_query" in intent_set:
+            sources = ["market"]
+        if "research_search" in intent_set:
+            sources = ["research"]
+        if "candidate_compute" in intent_set:
+            sources = ["market"]
         return ExecutionDecision(
-            mode="market_compute",
-            budget_tier="standard",
-            allowed_capabilities=["market.compute"],
-            data_sources=["upstream_data"],
-        )
-    if "stock_screening" in intent_set:
-        return ExecutionDecision(
-            mode="stock_screen",
-            budget_tier="standard",
-            allowed_capabilities=["iwencai.screen"],
-            data_sources=["market"],
-        )
-    if "research_search" in intent_set:
-        tool_id = research_tool_for_query(query)
-        return ExecutionDecision(
-            mode="research_retrieve",
-            budget_tier="standard",
-            allowed_capabilities=[tool_id] if tool_id else [],
-            data_sources=["research"],
-            tool_id=tool_id,
-        )
-    if "market_query" in intent_set:
-        tool_id = market_tool_for_query(query)
-        return ExecutionDecision(
-            mode="market_acquire",
-            budget_tier="standard",
-            allowed_capabilities=[tool_id] if tool_id else [],
-            data_sources=["market"],
-            tool_id=tool_id,
+            mode="deep_research",
+            budget_tier="research",
+            allowed_capabilities=[],
+            data_sources=sources,
+            knowledge_scope=["approved:pdf"],
         )
     if "general_chat" in intent_set:
         return ExecutionDecision(mode="general_answer", budget_tier="light")
@@ -163,13 +148,6 @@ def validate_and_normalize(
         missing_fields=missing_fields,
         constraints=constraints,
     )
-    if execution.mode == "market_compute" and not (
-        constraints.get("candidate_set_id") or constraints.get("market_query_plan")
-    ):
-        hard_issues.append("candidate_compute_requires_artifact_or_plan")
-    if execution.mode in {"market_acquire", "research_retrieve"} and not execution.tool_id:
-        hard_issues.append(f"{execution.mode}_tool_unresolved")
-
     profile = RequestProfile(
         original_query=original_query,
         normalized_query=query or original_query,

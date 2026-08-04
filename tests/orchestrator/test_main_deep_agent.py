@@ -2246,8 +2246,8 @@ def test_empty_local_retrieval_does_not_fabricate_evidence(tool_id, payload) -> 
 
 @pytest.mark.asyncio
 async def test_summary_rejects_empty_findings_when_evidence_present() -> None:
-    from agents.research_workflow.contracts import ResearchContextSummary
-    from agents.research_workflow.deep_agent.context_middleware import (
+    from agents.main_deep_agent.contracts import ResearchContextSummary
+    from agents.main_deep_agent.middleware.summarization import (
         GovernedResearchSummarizationMiddleware,
     )
 

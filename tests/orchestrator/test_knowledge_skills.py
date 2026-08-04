@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from agents.deep_agent_support import build_governed_tools
-from agents.orchestrator.contracts import Evidence
-from agents.research_workflow.deep_agent.runtime import (
-    _evidence_from_collector,
+from agents.deep_agent_support import (
+    build_governed_tools,
+    evidence_from_tool_collector as _evidence_from_collector,
     skills_for_data_sources,
 )
+from agents.orchestrator.contracts import Evidence
 from harness.context import RunContext
 from retrieval import RetrievalHit
 from retrieval.services.knowledge import (

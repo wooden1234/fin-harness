@@ -25,11 +25,11 @@ def _task(task_id: str, *, depends_on: list[str] | None = None) -> TaskSpec:
 def test_request_profile_defaults_are_stable() -> None:
     profile = RequestProfile(
         original_query="筛选新能源股票",
-        execution=ExecutionDecision(mode="stock_screen", budget_tier="standard"),
+        execution=ExecutionDecision(mode="deep_research", budget_tier="research"),
     )
 
     assert profile.domain == "finance"
-    assert profile.execution.budget_tier == "standard"
+    assert profile.execution.budget_tier == "research"
     assert profile.constraints == {}
 
 
@@ -70,8 +70,8 @@ def test_evidence_validates_confidence_range() -> None:
 
 def test_agent_result_keeps_structured_data_and_suggested_tasks() -> None:
     result = AgentResult(
-        task_id="screen",
-        agent_id="stock_screening_agent",
+        task_id="finance",
+        agent_id="finance_agent",
         status="completed",
         structured_data={"count": 3},
         suggested_tasks=[_task("research", depends_on=["screen"])],

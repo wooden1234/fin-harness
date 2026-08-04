@@ -1,4 +1,5 @@
-import { Bot, Globe } from 'lucide-react'
+import { Bot, Globe, X } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { Message } from '@/stores/useChatStore'
@@ -61,7 +62,10 @@ export function ChatMessage({
   followUpDisabled,
 }: {
   message: Message
-  onFollowUp?: (text: string) => void
+  onFollowUp?: (
+    text: string,
+    options?: { attachmentId?: string; imagePreviewUrl?: string },
+  ) => void
   followUpDisabled?: boolean
 }) {
   const isUser = message.role === 'user'
@@ -71,6 +75,7 @@ export function ChatMessage({
   const steps = message.agentSteps ?? []
   const followUps = message.followUps ?? []
   const charts = message.charts ?? []
+  const [lightboxOpen, setLightboxOpen] = useState(false)
   const dataSourceCount = steps.filter(
     (step) => step.category !== undefined && DATA_SOURCE_CATEGORIES.has(step.category),
   ).length
@@ -94,6 +99,15 @@ export function ChatMessage({
   const hasAnalysisDetails = timelineItems.length > 0
   const analysisSummary =
     dataSourceCount > 0 ? `${dataSourceCount} 条资料` : timelineItems.length > 0 ? '快速推理' : ''
+
+  useEffect(() => {
+    if (!lightboxOpen) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setLightboxOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [lightboxOpen])
 
   return (
     <div className={`flex w-full ${isUser ? 'justify-end' : 'justify-start'} mb-6`}>
@@ -139,6 +153,21 @@ export function ChatMessage({
           </button>
         )}
 
+        {isUser && message.imagePreviewUrl ? (
+          <button
+            type="button"
+            onClick={() => setLightboxOpen(true)}
+            className="mb-2 block overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm hover:opacity-95 transition-opacity"
+            title="点击查看大图"
+          >
+            <img
+              src={message.imagePreviewUrl}
+              alt="用户上传"
+              className="h-20 w-20 object-cover"
+            />
+          </button>
+        ) : null}
+
         <div
           className={`text-[15px] leading-relaxed ${
             isUser
@@ -147,7 +176,9 @@ export function ChatMessage({
           }`}
         >
           {isUser ? (
-            message.content
+            message.content ? (
+              <div className="whitespace-pre-wrap">{message.content}</div>
+            ) : null
           ) : (
             <ReactMarkdown remarkPlugins={[remarkGfm]}>
               {displayAssistantContent(message.content)}
@@ -163,11 +194,36 @@ export function ChatMessage({
         {!isUser && onFollowUp && followUps.length > 0 && (
           <FollowUpChips
             items={followUps}
-            onSelect={onFollowUp}
+            onSelect={(text) => onFollowUp(text)}
             disabled={followUpDisabled}
           />
         )}
       </div>
+
+      {lightboxOpen && message.imagePreviewUrl ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onClick={() => setLightboxOpen(false)}
+          role="dialog"
+          aria-modal="true"
+          aria-label="查看图片"
+        >
+          <button
+            type="button"
+            className="absolute right-4 top-4 rounded-full bg-black/50 p-2 text-white hover:bg-black/70"
+            onClick={() => setLightboxOpen(false)}
+            title="关闭"
+          >
+            <X size={20} />
+          </button>
+          <img
+            src={message.imagePreviewUrl}
+            alt="用户上传大图"
+            className="max-h-[90vh] max-w-[90vw] rounded-lg object-contain shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          />
+        </div>
+      ) : null}
     </div>
   )
 }

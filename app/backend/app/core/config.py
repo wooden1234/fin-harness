@@ -160,6 +160,24 @@ class Settings(BaseSettings):
     QWEN_API_KEY: str = ""
     DASHSCOPE_API_KEY: str = ""
     QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+    # 阿里云 OSS（聊天图片上传；密钥仅后端使用）
+    OSS_ACCESS_KEY_ID: str = ""
+    OSS_ACCESS_KEY_SECRET: str = ""
+    OSS_ENDPOINT: str = ""
+    OSS_BUCKET: str = ""
+    OSS_PREFIX: str = "chat-images/"
+    OSS_PUBLIC_BASE_URL: str = ""
+    OSS_SIGN_URL_EXPIRES_SEC: int = 3600
+    ATTACHMENT_MAX_BYTES: int = 5_242_880  # 5MB
+    ATTACHMENT_TTL_SEC: int = 86_400
+
+    # Vision（看图预处理；与 Embedding 的 QWEN_* 用途分离）
+    VISION_MODEL: str = "qwen3.8-max"
+    VISION_BASE_URL: str = ""
+    VISION_API_KEY: str = ""
+    VISION_TIMEOUT_SEC: float = 120.0
+
     RERANK_ENABLED: bool = False
     RERANK_PROVIDER: str = "dashscope"
     RERANK_API_KEY: str = ""

@@ -23,6 +23,7 @@ email-validator>=2.0.0
 redis>=5.0.0
 
 httpx>=0.27.0
+oss2>=2.18.0
 jieba>=0.42.1
 rank-bm25>=0.2.2
 elasticsearch>=8.0.0,<9.0.0

@@ -118,6 +118,7 @@ async def agent_query(
     query: str = Form(...),
     conversation_id: Optional[str] = Form(None),
     client_message_id: Optional[str] = Form(None),
+    attachment_id: Optional[str] = Form(None),
     current_user: AuthUser = Depends(get_current_user)):
     secret_decision = check_secrets(query)
     if not secret_decision.should_continue:
@@ -139,6 +140,38 @@ async def agent_query(
         )
         if conversation is None:
             raise HTTPException(status_code=404, detail="会话不存在或无权访问")
+
+    attachment_id_value = str(attachment_id or "").strip() or None
+    effective_query = query
+    if attachment_id_value:
+        from app.services.attachments.attachment_service import (
+            download_attachment_bytes,
+            require_owned_attachment,
+        )
+        from app.services.vision.image_understanding import (
+            compose_effective_query,
+            understand_image,
+        )
+
+        meta = await require_owned_attachment(
+            attachment_id_value,
+            user_id=current_user.id,
+            tenant_id=current_user.tenant_id,
+        )
+        understanding = None
+        try:
+            image_bytes = download_attachment_bytes(meta)
+            understanding = await understand_image(
+                image_bytes=image_bytes,
+                content_type=meta.content_type,
+                user_text=query,
+            )
+        except Exception:
+            logger.exception(
+                "vision understand failed attachment_id={}",
+                attachment_id_value,
+            )
+        effective_query = compose_effective_query(query, understanding)
 
     conversation_key = conversation_pk if conversation_pk is not None else uuid.uuid4()
     lock_token: str | None = None
@@ -173,6 +206,7 @@ async def agent_query(
                 content=query,
                 run_id=run_id,
                 client_message_id=client_message_id,
+                message_type="image" if attachment_id_value else "text",
             )
         memory_action = parse_memory_rule_action(query)
     except Exception as start_err:
@@ -189,7 +223,7 @@ async def agent_query(
         if conversation_pk is not None and lock_token is not None:
             await ConversationLockService.release(conversation_pk, lock_token)
         raise
-    input_payload = {"messages": [HumanMessage(content=query)]}
+    input_payload = {"messages": [HumanMessage(content=effective_query)]}
     runtime_context = AgentRuntimeContext.from_user(
         current_user,
         conversation_id=conversation_key,

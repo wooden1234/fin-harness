@@ -19,6 +19,7 @@ class ConversationService:
         run_id: str,
         client_message_id: str,
         tenant_id: str = "default",
+        message_type: str = "text",
     ) -> Message:
         """在 Agent 开始执行前写入用户消息，确保请求事实先落档。"""
         async with AsyncSessionLocal() as db:
@@ -53,6 +54,7 @@ class ConversationService:
                 conversation_id=conversation_id,
                 sender="user",
                 content=content,
+                message_type=(message_type or "text")[:20],
                 run_id=run_id,
                 sequence_no=(max_sequence or 0) + 1,
                 client_message_id=client_message_id,
