@@ -183,6 +183,9 @@ _CLARIFICATION_CANCEL_QUERIES = frozenset(
     {"算了", "取消", "不用了", "不问了", "换个问题"}
 )
 _PENDING_MAX_TURNS = 2
+_CLARIFICATION_EXPIRED_MESSAGE = (
+    "澄清已过期，请重新完整描述您的问题，我再继续帮你查。"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -409,12 +412,14 @@ def build_pending_clarification(
     asked_question: str = "请补充缺失信息后重新提交。",
     revision: int = 1,
     remaining_turns: int = _PENDING_MAX_TURNS,
+    target_lane: str = "",
 ) -> dict[str, object]:
     """构造跨轮最小澄清状态；不保存消息历史或执行现场。"""
     digest = hashlib.sha256(
         f"{original_query}|{revision}".encode("utf-8")
     ).hexdigest()[:16]
-    return {
+    lane = str(target_lane or "").strip()
+    payload: dict[str, object] = {
         "schema_version": "1.0",
         "clarification_id": f"query-{digest}",
         "kind": "query_rewrite",
@@ -425,6 +430,9 @@ def build_pending_clarification(
         "revision": max(1, revision),
         "remaining_turns": max(0, min(remaining_turns, _PENDING_MAX_TURNS)),
     }
+    if lane in {"general", "deep"}:
+        payload["target_lane"] = lane
+    return payload
 
 
 def _rewrite_resolution(
@@ -591,7 +599,7 @@ async def query_rewrite_node(
             "rewrite_reason_codes": ["clarification_expired"],
             "rewrite_failure_kind": "semantic",
             "rewrite_resolution": {},
-            "rewrite_clarification_message": "",
+            "rewrite_clarification_message": _CLARIFICATION_EXPIRED_MESSAGE,
             "pending_query_clarification": {},
             "steps": ["query_rewrite:uncertain:clarification_expired"],
         }
@@ -773,6 +781,21 @@ async def query_rewrite_node(
         query[:80],
         rewritten[:80],
     )
+    if pending_reply:
+        # 延迟销单：续办成功后保留工单，并把原问题升级为完整改写句；
+        # 下游 Agent 失败时仍可按 target_lane 续跑，成功终答再清空。
+        resumed_pending = {
+            **pending,
+            "original_query": rewritten[:1000],
+            "candidate_entities": list(candidates)[:8],
+            "remaining_turns": pending_turns,
+        }
+        target = str(pending.get("target_lane") or "").strip()
+        if target in {"general", "deep"}:
+            resumed_pending["target_lane"] = target
+        pending_update: dict[str, object] = resumed_pending
+    else:
+        pending_update = {}
     return {
         "rewritten_query": rewritten,
         "rewrite_status": "rewrite" if rewritten != query else "passthrough",
@@ -780,6 +803,6 @@ async def query_rewrite_node(
         "rewrite_failure_kind": "",
         "rewrite_resolution": resolution,
         "rewrite_clarification_message": "",
-        "pending_query_clarification": {},
+        "pending_query_clarification": pending_update,
         "steps": ["query_rewrite"],
     }

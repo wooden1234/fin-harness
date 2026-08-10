@@ -32,7 +32,9 @@ from agents.orchestrator.contracts import (
     Evidence,
     QualityReport,
 )
+from agents.orchestrator.analyzer import latest_query
 from agents.orchestrator.state import OrchestratorState
+from agents.query_rewrite import build_pending_clarification
 
 _ACTION_OUTPUT_MARKERS = (
     "买入", "卖出", "加仓", "减仓", "仓位", "买点", "卖点", "止损",
@@ -714,6 +716,16 @@ async def main_evidence_quality_gate(state: OrchestratorState) -> dict[str, Any]
     response = evaluation.response
     conflicts = list(evaluation.conflicts)
     if response is not None and response.mode == "clarify":
+        original_query = latest_query(state)
+        pending = (
+            build_pending_clarification(
+                original_query,
+                asked_question=str(response.clarification or "").strip(),
+                target_lane="deep",
+            )
+            if original_query
+            else {}
+        )
         return {
             "summary": response.clarification,
             "execution_mode": "clarify",
@@ -722,6 +734,7 @@ async def main_evidence_quality_gate(state: OrchestratorState) -> dict[str, Any]
             "answer_charts": [],
             "quality_report": evaluation.quality_report,
             "main_quality_metrics": _quality_metrics(conflicts, "", False),
+            "pending_query_clarification": pending,
             "steps": ["main_deep_agent:evidence_quality_gate"],
         }
     if evaluation.sanitized_response is not None and response and response.mode == "direct":

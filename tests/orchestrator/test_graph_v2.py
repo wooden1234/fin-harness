@@ -1,6 +1,9 @@
-"""根 Orchestrator 图结构和当前执行路径测试。"""
+"""根 Orchestrator 图结构与多轮澄清路径测试。"""
 
-from agents.orchestrator.graph import build_orchestrator_graph
+from agents.orchestrator.graph import (
+    build_orchestrator_graph,
+    route_after_query_rewrite,
+)
 
 
 def test_graph_compiles_with_current_root_path():
@@ -12,6 +15,7 @@ def test_graph_compiles_with_current_root_path():
         "guardrails",
         "memory_action",
         "memory_recall",
+        "query_rewrite",
         "classify_execution_lane",
         "resolve_execution_lane",
         "context_compressor",
@@ -27,7 +31,9 @@ def test_graph_compiles_with_current_root_path():
     assert ("init_turn", "guardrails") in edges
     assert ("guardrails", "memory_action") in edges
     assert ("memory_action", "memory_recall") in edges
-    assert ("memory_recall", "classify_execution_lane") in edges
+    assert ("memory_recall", "query_rewrite") in edges
+    assert ("query_rewrite", "classify_execution_lane") in edges
+    assert ("query_rewrite", "final_answer") in edges
     assert ("classify_execution_lane", "context_compressor") in edges
     assert ("classify_execution_lane", "resolve_execution_lane") in edges
     assert ("resolve_execution_lane", "context_compressor") in edges
@@ -38,3 +44,14 @@ def test_graph_compiles_with_current_root_path():
     assert ("evidence_quality_gate", "final_answer") in edges
     assert ("final_answer", "post_turn_memory") in edges
     assert ("post_turn_memory", "__end__") in edges
+
+
+def test_route_after_query_rewrite_short_circuits_uncertain():
+    assert route_after_query_rewrite({"rewrite_status": "rewrite"}) == (
+        "classify_execution_lane"
+    )
+    assert route_after_query_rewrite({"rewrite_status": "passthrough"}) == (
+        "classify_execution_lane"
+    )
+    assert route_after_query_rewrite({"rewrite_status": "uncertain"}) == "final_answer"
+    assert route_after_query_rewrite({}) == "final_answer"

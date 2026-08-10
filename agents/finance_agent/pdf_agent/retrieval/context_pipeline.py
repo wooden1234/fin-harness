@@ -10,10 +10,10 @@ import re
 from typing import Any
 
 from retrieval import RetrievalHit, get_pdf_retriever
-from retrieval.retrievers.retriever import _auto_merge_parent_hits, _rrf_fuse_hits
 
 from ..state import PdfAgentState
 from ..trace import append_trace
+from .multi_query_fuse import fuse_original_and_rewrite_hits
 
 
 def _doc_key(hit: RetrievalHit) -> str:
@@ -132,15 +132,16 @@ async def context_pipeline_node(
     finally:
         retriever.rerank_enabled = rerank_enabled
 
-    lists = [("original", original_hits)]
-    if rewrite_hits:
-        lists.append(("rewrite", rewrite_hits))
-    fused = _rrf_fuse_hits(lists, top_k=max(candidate_top_k, top_k * 2))
-    reranked = await retriever._arerank_hits(
-        query, fused, top_k=max(candidate_top_k, top_k * 2)
+    fuse_result = await fuse_original_and_rewrite_hits(
+        original_query=query,
+        original_hits=original_hits,
+        rewrite_hits=rewrite_hits,
+        retriever=retriever,
+        top_k=max(candidate_top_k, top_k * 2),
     )
-    merged = _auto_merge_parent_hits(reranked, top_k=max(candidate_top_k, top_k * 2))
-    diversified = select_diverse_hits(merged, top_k=top_k, max_per_doc=max_per_doc)
+    diversified = select_diverse_hits(
+        fuse_result.hits, top_k=top_k, max_per_doc=max_per_doc
+    )
     context, packed_hits = pack_context(diversified, token_budget=token_budget)
 
     trace_update = append_trace(
@@ -149,13 +150,14 @@ async def context_pipeline_node(
         status="ok" if packed_hits else "empty",
         original_hits=len(original_hits),
         rewrite_hits=len(rewrite_hits),
-        fused_hits=len(fused),
-        reranked_hits=len(reranked),
-        merged_hits=len(merged),
+        fused_hits=fuse_result.fused_count,
+        reranked_hits=fuse_result.reranked_count,
+        merged_hits=fuse_result.merged_count,
         diversified_hits=len(diversified),
         packed_hits=len(packed_hits),
         token_budget=token_budget,
         rerank_enabled=rerank_enabled,
+        fusion_mode=fuse_result.fusion_mode,
     )
     return {
         "hits": packed_hits,
@@ -165,12 +167,13 @@ async def context_pipeline_node(
         "context_pipeline_trace": {
             "original_hits": len(original_hits),
             "rewrite_hits": len(rewrite_hits),
-            "fused_hits": len(fused),
-            "reranked_hits": len(reranked),
-            "merged_hits": len(merged),
+            "fused_hits": fuse_result.fused_count,
+            "reranked_hits": fuse_result.reranked_count,
+            "merged_hits": fuse_result.merged_count,
             "diversified_hits": len(diversified),
             "packed_hits": len(packed_hits),
             "token_budget": token_budget,
+            "fusion_mode": fuse_result.fusion_mode,
         },
         **trace_update,
     }

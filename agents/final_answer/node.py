@@ -35,6 +35,9 @@ COMPLIANCE_REVIEW_ERROR_ANSWER = (
     "抱歉，当前回答未能通过合规审查，请稍后重试或联系人工服务。"
 )
 COMPLIANCE_ESCALATED_ANSWER = "该问题需要人工进一步审核，请联系人工服务。"
+CLARIFICATION_EXPIRED_ANSWER = (
+    "澄清已过期，请重新完整描述您的问题，我再继续帮你查。"
+)
 GUARDRAIL_RESPONSES = {
     "prompt_injection_detected": (
         "无法执行修改系统规则、披露内部指令或绕过安全限制的请求。"
@@ -206,21 +209,37 @@ async def final_answer_node(
     state: FinAgentState,
     config: RunnableConfig = None,
 ) -> dict:
-    """统一格式化最终回答，附加引用来源"""
+    """统一格式化最终回答，附加引用来源。"""
 
     force_empty_citations = False
     passthrough_message_id: str | None = None
     guardrail_response = _guardrail_response(state)
+    rewrite_status = str(state.get("rewrite_status") or "").strip()
+    rewrite_reasons = {
+        str(item) for item in list(state.get("rewrite_reason_codes") or [])
+    }
+    execution_status = str(state.get("execution_status") or "").strip()
+    execution_lane = str(state.get("execution_lane") or "").strip()
+    is_rewrite_uncertain = rewrite_status == "uncertain"
+    is_deep_clarify = execution_status == "clarify"
+    is_memory_early = bool(state.get("memory_action_handled"))
+    is_context_rejected = bool(state.get("context_admission_rejected"))
 
     if guardrail_response is not None:
         answer = guardrail_response
         force_empty_citations = True
+    elif is_rewrite_uncertain:
+        answer = str(state.get("rewrite_clarification_message") or "").strip()
+        if not answer and "clarification_expired" in rewrite_reasons:
+            answer = CLARIFICATION_EXPIRED_ANSWER
+        if not answer:
+            answer = "请补充更明确的对象或目标后，我再继续帮你查。"
+        force_empty_citations = True
     else:
         route = state.get("route", "general")
-        execution_lane = str(state.get("execution_lane") or "").strip()
         answer = ""
 
-        if route == "general" or execution_lane == "general":
+        if route == "general" or execution_lane == "general" or is_memory_early:
             for msg in reversed(list(state.get("messages") or [])):
                 if isinstance(msg, AIMessage):
                     answer = (
@@ -246,16 +265,37 @@ async def final_answer_node(
     if not answer:
         answer = "抱歉，我暂时无法回答您的问题，请稍后重试。"
 
-    # 普通档只做提示词约束 + 透传输出，不做金融合规答案审查。
+    # 普通档、改写澄清、Deep 澄清只做透传，不做金融合规答案审查。
     is_general_lane = (
-        str(state.get("execution_lane") or "").strip() == "general"
+        execution_lane == "general"
         or state.get("route") == "general"
     )
-    if is_general_lane and guardrail_response is None:
+    skip_compliance = (
+        is_general_lane
+        or is_rewrite_uncertain
+        or is_deep_clarify
+        or is_memory_early
+    )
+    if skip_compliance and guardrail_response is None:
+        reason_code = (
+            "rewrite_uncertain_passthrough"
+            if is_rewrite_uncertain
+            else "deep_clarify_passthrough"
+            if is_deep_clarify
+            else "memory_action_passthrough"
+            if is_memory_early
+            else "general_lane_passthrough"
+        )
         compliance_decision = ComplianceDecision(
             action="pass",
-            reason_code="general_lane_passthrough",
-            reason="普通档跳过金融答案质量与合规审查",
+            reason_code=reason_code,
+            reason="澄清或普通档跳过金融答案质量与合规审查",
+        )
+    elif guardrail_response is not None:
+        compliance_decision = ComplianceDecision(
+            action="pass",
+            reason_code="guardrail_response",
+            reason="护栏已拦截，跳过金融答案合规审查",
         )
     else:
         answer, compliance_decision = _review_final_answer(answer)
@@ -283,7 +323,7 @@ async def final_answer_node(
         compliance_decision.reason_code,
     )
 
-    return {
+    update: dict = {
         "messages": [AIMessage(content=answer, id=passthrough_message_id)],
         "citations": Overwrite(deduped),
         # summary：本轮候选答案，收口后清空。
@@ -301,3 +341,28 @@ async def final_answer_node(
         "compliance_reason_code": compliance_decision.reason_code,
         "compliance_reason": compliance_decision.reason,
     }
+
+    # 三态销单：仅 general/deep 成功终答显式清空；失败/早退/澄清省略字段以保留工单。
+    walked_agent = execution_lane in {"general", "deep"} or state.get("route") in {
+        "general",
+        "main",
+    }
+    agent_failed = execution_status in {
+        "failed",
+        "partial",
+        "structured_output_failed",
+        "clarify",
+        "clarify_required",
+    }
+    should_clear_pending = (
+        walked_agent
+        and not is_deep_clarify
+        and not is_rewrite_uncertain
+        and guardrail_response is None
+        and not is_memory_early
+        and not is_context_rejected
+        and not agent_failed
+    )
+    if should_clear_pending:
+        update["pending_query_clarification"] = {}
+    return update

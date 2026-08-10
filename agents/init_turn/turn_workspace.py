@@ -4,6 +4,9 @@
 - messages
 - conversation_summary
 - conversation_summary_until
+- conversation_summary_v2
+- pending_query_clarification
+- pending_memory_action
 
 带 reducer（``add``）的字段必须用 ``Overwrite`` 清空，否则会跨轮无限增长；
 ``steps`` 即为此类字段。

@@ -200,3 +200,4 @@ async def test_final_answer_passthrough_for_general_lane() -> None:
     assert len(merged) == 1
     assert update["compliance_reason_code"] == "general_lane_passthrough"
     assert update["compliance_action"] == "pass"
+    assert update["pending_query_clarification"] == {}

@@ -133,6 +133,16 @@ class Settings(BaseSettings):
     PDF_QUERY_FILTER_MIN_CONFIDENCE: float = 0.85
     PDF_KB_UNSUPPORTED_MIN_CONFIDENCE: float = 0.90
     AGENT_FAQ_TEMPERATURE: float = 0.3
+    # DeepAgent 主推理 / 结构化成稿：本地金融微调（OpenAI 兼容，如 vLLM）
+    FINANCE_LLM_API_KEY: str = "EMPTY"
+    FINANCE_LLM_BASE_URL: str = ""
+    FINANCE_LLM_MODEL: str = ""
+    FINANCE_LLM_TEMPERATURE: float = 0.0
+    FINANCE_LLM_TIMEOUT_SEC: float = 120.0
+    FINANCE_LLM_ENABLE_THINKING: bool = False
+    # vLLM 探活超时；不可达时 get_finance_llm 回退 DeepSeek
+    FINANCE_LLM_PROBE_TIMEOUT_SEC: float = 2.0
+    FINANCE_LLM_PROBE_TTL_SEC: float = 30.0
     FAQ_MIN_RELEVANCE_SCORE: float = 0.35
     PDF_MIN_RELEVANCE_SCORE: float = 0.35
     PDF_RETRIEVAL_TOP_K: int = 10

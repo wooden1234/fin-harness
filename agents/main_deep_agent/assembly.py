@@ -15,7 +15,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 
 from agents.deep_agent_support import ensure_financial_deep_agent_profile
-from agents.llm import get_faq_llm
+from agents.llm import get_finance_llm
 from agents.main_deep_agent.config import MAIN_SKILL_SOURCES, build_main_backend
 from agents.main_deep_agent.contracts import MainAgentResponse
 from agents.main_deep_agent.middleware.budget import MainAgentBudgetController
@@ -88,7 +88,7 @@ def build_main_deep_agent(
 ):
     """按声明式 Assembly 创建无 Shell、无写入、无子代理的 Main DeepAgent。"""
     ensure_financial_deep_agent_profile()
-    active_llm = llm or get_faq_llm()
+    active_llm = llm or get_finance_llm()
     governed_tools = build_main_tools(
         context=context,
         budget=budget,

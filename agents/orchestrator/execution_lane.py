@@ -198,7 +198,15 @@ async def classify_execution_lane_node(state: dict[str, Any]) -> dict[str, Any]:
 
     logger = get_logger(service="execution_lane")
     query = latest_user_query(state)
-    lane = classify_execution_lane(query)
+    pending_raw = state.get("pending_query_clarification")
+    pending = pending_raw if isinstance(pending_raw, dict) else {}
+    target_lane = str(pending.get("target_lane") or "").strip()
+    rewrite_reasons = {str(item) for item in list(state.get("rewrite_reason_codes") or [])}
+    # 续办工单带目标档时，跳过规则/灰区猜测，直接落地。
+    if target_lane in {"general", "deep"} and "clarification_reply" in rewrite_reasons:
+        lane: ExecutionLane = target_lane  # type: ignore[assignment]
+    else:
+        lane = classify_execution_lane(query)
     routing = routing_query_from_message(query)
     logger.info(
         "execution_lane={} query={}",

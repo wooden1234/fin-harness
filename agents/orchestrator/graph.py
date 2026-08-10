@@ -100,11 +100,11 @@ def _task_scope(runtime: Runtime[AgentRuntimeContext] | None) -> str:
 
 
 def route_after_query_rewrite(state: OrchestratorState) -> str:
-    """改写成功后进入 Analyzer；无法可靠补全时直接结束并说明。"""
+    """改写成功后进入执行档；无法可靠补全时短路终答并保留澄清工单。"""
     rewrite_status = str(state.get("rewrite_status") or "")
     if rewrite_status in {"rewrite", "passthrough"}:
-        return "analyze_request"
-    return "clarify"
+        return "classify_execution_lane"
+    return "final_answer"
 
 
 def route_after_analyze_request(state: OrchestratorState) -> str:
@@ -1131,6 +1131,7 @@ def build_orchestrator_graph() -> StateGraph:
     builder.add_node("guardrails", guardrails_node)
     builder.add_node("memory_action", memory_action_node)
     builder.add_node("memory_recall", memory_recall_node)
+    builder.add_node("query_rewrite", query_rewrite_node)
     builder.add_node("classify_execution_lane", classify_execution_lane_node)
     builder.add_node("resolve_execution_lane", resolve_execution_lane_node)
     builder.add_node("context_compressor", compress_context)
@@ -1155,7 +1156,15 @@ def build_orchestrator_graph() -> StateGraph:
             "final_answer": "final_answer",
         },
     )
-    builder.add_edge("memory_recall", "classify_execution_lane")
+    builder.add_edge("memory_recall", "query_rewrite")
+    builder.add_conditional_edges(
+        "query_rewrite",
+        route_after_query_rewrite,
+        {
+            "classify_execution_lane": "classify_execution_lane",
+            "final_answer": "final_answer",
+        },
+    )
     builder.add_conditional_edges(
         "classify_execution_lane",
         route_after_rule_lane,
