@@ -11,36 +11,30 @@ from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from agents.main_deep_agent.assembly import MainDeepAgentAssembly, run_main_deep_agent
-from agents.main_deep_agent.node import main_deep_agent_node
-from agents.main_deep_agent.prompts import build_main_system_prompt
-from tools.web_domains import DEFAULT_WEB_SEARCH_DOMAINS, resolve_search_domains
-from agents.main_deep_agent.middleware.budget import MainAgentBudgetController
-from agents.main_deep_agent.middleware.finalization import (
-    MainAgentFailureFinalizationMiddleware,
-)
-from agents.main_deep_agent.middleware.quality import MainEvidenceQualityMiddleware
 from agents.main_deep_agent.contracts import (
     MainAgentResponse,
     MainAgentStatement,
     MainAgentTable,
     MainAgentTableRow,
 )
-from agents.main_deep_agent.tools.evidence_adapter import (
-    detect_fact_conflicts,
-    web_evidence_from_payload,
+from agents.main_deep_agent.middleware.budget import MainAgentBudgetController
+from agents.main_deep_agent.middleware.finalization import (
+    MainAgentFailureFinalizationMiddleware,
 )
-from agents.main_deep_agent.quality import (
-    evaluate_main_response,
-    main_evidence_quality_gate,
+from agents.main_deep_agent.middleware.quality import MainEvidenceQualityMiddleware
+from agents.main_deep_agent.node import main_deep_agent_node
+from agents.main_deep_agent.prompts import build_main_system_prompt
+from agents.main_deep_agent.query_profile import (
+    classify_main_query_profile,
+    required_financial_metrics,
+    resolve_output_format_preference,
+    rewrite_fast_finance_query,
 )
-from agents.main_deep_agent.state import MainAgentProgressJournal
-from agents.main_deep_agent.tools.catalog import (
-    MAIN_TOOL_ARGS_SCHEMAS,
-    MAIN_TOOL_IDS,
-)
-from agents.main_deep_agent.tools.factory import build_main_tools, resolve_main_tool_ids
-from agents.orchestrator.contracts import Evidence
-from agents.runtime_context import AgentRuntimeContext
+from tools.web_domains import DEFAULT_WEB_SEARCH_DOMAINS, resolve_search_domains
+
+
+async def _async_identity(response):
+    return response
 from app.api.agent_progress import (
     build_step_event,
     build_todo_snapshot_event,
@@ -48,15 +42,40 @@ from app.api.agent_progress import (
     label_for_public_step,
     sanitize_step_detail,
 )
-from agents.main_deep_agent.tools.step_detail import build_public_tool_step_detail
+
+from agents.main_deep_agent.quality import (
+    evaluate_main_response,
+    main_evidence_quality_gate,
+)
 from agents.main_deep_agent.quality.enrichments import (
     build_answer_charts,
     sanitize_follow_ups,
 )
+from agents.main_deep_agent.quality.validator import (
+    constrain_response_for_query_profile,
+)
+from agents.main_deep_agent.state import MainAgentProgressJournal
+from agents.main_deep_agent.tools.catalog import (
+    MAIN_TOOL_ARGS_SCHEMAS,
+    MAIN_TOOL_IDS,
+)
+from agents.main_deep_agent.tools.evidence_adapter import (
+    _evidence_from_payload,
+    detect_fact_conflicts,
+    web_evidence_from_payload,
+)
+from agents.main_deep_agent.tools.factory import (
+    _finance_evidence_covers_required_metrics,
+    build_main_tools,
+    resolve_main_tool_ids,
+)
+from agents.main_deep_agent.tools.step_detail import build_public_tool_step_detail
+from agents.orchestrator.contracts import Evidence
+from agents.runtime_context import AgentRuntimeContext
 from tools.calculation import run_calculation
+from tools.core.base import ToolResult
 from tools.finance import fetch_financial_fact, lookup_financial_fact
 from tools.knowledge import lookup_knowledge_fact
-from tools.core.base import ToolResult
 
 
 def _evidence(evidence_id: str, family: str) -> Evidence:
@@ -175,6 +194,302 @@ def test_main_prompt_maps_dynamic_memory_preferences_to_output_contract() -> Non
     assert "follow_ups" in prompt
 
 
+def test_finance_query_profiles_distinguish_fact_and_light_analysis() -> None:
+    assert classify_main_query_profile(
+        "海昌智能2026年上半年净利润预计增长多少？"
+    ) == "simple_finance"
+    assert classify_main_query_profile(
+        "海昌智能2026年上半年业绩预告里，净利润预计增幅的中枢、上下限分别是多少？"
+        "结合已披露口径，简要说明驱动因素与需关注的不确定性。"
+    ) == "light_finance_analysis"
+    assert classify_main_query_profile(
+        "对比海昌智能和同行的盈利持续性与投资价值"
+    ) == "full_research"
+
+
+def test_fast_finance_prompts_only_load_relevant_rules() -> None:
+    simple = build_main_system_prompt(
+        investment_action_sensitive=False,
+        query_profile="simple_finance",
+    )
+    light = build_main_system_prompt(
+        investment_action_sensitive=False,
+        query_profile="light_finance_analysis",
+    )
+
+    assert "只调用一次 `query_iwencai_finance`" in simple
+    assert "search_web" not in simple
+    assert "板块领涨" not in simple
+    assert "最多调用一次 `query_iwencai_finance` 和一次 `run_calculation`" in light
+    assert "2–3 条简洁 statements" in light
+    assert "生成一张紧凑 tables 表格" in light
+    assert "follow_ups" in light
+
+
+def test_output_format_preference_obeys_current_turn_priority() -> None:
+    memory = {"preferred_output_format": "table"}
+    assert resolve_output_format_preference(
+        "海昌智能净利润增长多少？",
+        memory_context=memory,
+    ) == "table"
+    assert resolve_output_format_preference(
+        "这次不要表格，直接说明海昌智能净利润增长多少？",
+        memory_context=memory,
+    ) == "plain_text"
+    assert resolve_output_format_preference(
+        "海昌智能净利润增长多少？",
+        memory_context=memory,
+        turn_preferences={"preferred_output_format": "markdown"},
+    ) == "markdown"
+
+
+def test_simple_finance_prompt_uses_effective_table_preference() -> None:
+    prompt = build_main_system_prompt(
+        investment_action_sensitive=False,
+        query_profile="simple_finance",
+        preferred_output_format="table",
+    )
+
+    assert "有效输出偏好为 table" in prompt
+    assert "生成一张单行紧凑 tables 表格" in prompt
+    assert "不生成表格" not in prompt
+
+
+def test_fast_finance_query_rewrite_and_metric_coverage_reject_market_rows() -> None:
+    query = "海昌智能2026年上半年净利润预计增长多少？"
+    rewritten = rewrite_fast_finance_query(query)
+    required = required_financial_metrics(query)
+    assert "业绩预告净利润增长率下限 上限" in rewritten
+    assert required == ("net_profit",)
+
+    market_evidence = _evidence_from_payload(
+        "iwencai.finance.query",
+        {
+            "ok": True,
+            "provider": "iwencai",
+            "query": rewritten,
+            "data": {
+                "datas": [{
+                    "股票代码": "920156.BJ",
+                    "股票简称": "海昌智能",
+                    "最新价": 39.99,
+                    "最新涨跌幅": -2.177104,
+                }],
+            },
+        },
+    )
+    assert market_evidence
+    assert not _finance_evidence_covers_required_metrics(market_evidence, required)
+
+    preview_evidence = _evidence_from_payload(
+        "iwencai.finance.query",
+        {
+            "ok": True,
+            "provider": "iwencai",
+            "query": rewritten,
+            "data": {
+                "datas": [{
+                    "股票代码": "920156.BJ",
+                    "股票简称": "海昌智能",
+                    "净利润增长率下限[20260630](%)": 97.26,
+                    "净利润增长率上限[20260630](%)": 130.14,
+                }],
+            },
+        },
+    )
+    assert _finance_evidence_covers_required_metrics(preview_evidence, required)
+
+
+@pytest.mark.asyncio
+async def test_fast_finance_tool_rejects_market_only_result(monkeypatch) -> None:
+    captured_query = ""
+
+    async def fake_execute_registered_tool(**kwargs):
+        nonlocal captured_query
+        captured_query = str(kwargs["arguments"].get("query") or "")
+        return ToolResult(
+            tool_id=kwargs["tool_id"],
+            ok=True,
+            data={
+                "ok": True,
+                "provider": "iwencai",
+                "query": captured_query,
+                "data": {
+                    "datas": [{
+                        "股票代码": "920156.BJ",
+                        "股票简称": "海昌智能",
+                        "最新价": 39.99,
+                        "最新涨跌幅": -2.177104,
+                    }],
+                },
+            },
+        )
+
+    monkeypatch.setattr(
+        "agents.main_deep_agent.tools.factory.execute_registered_tool",
+        fake_execute_registered_tool,
+    )
+    query = "海昌智能2026年上半年净利润预计增长多少？"
+    budget = MainAgentBudgetController(
+        started_monotonic=time.monotonic(),
+        query_profile="simple_finance",
+        user_query=query,
+    )
+    journal = MainAgentProgressJournal()
+    tools = build_main_tools(
+        context=AgentRuntimeContext(permissions=("iwencai.finance.query",)),
+        budget=budget,
+        journal=journal,
+        query_profile="simple_finance",
+    )
+    finance = {item.name: item for item in tools}["query_iwencai_finance"]
+
+    result = await finance.ainvoke({"query": query})
+
+    assert "业绩预告净利润增长率下限 上限" in captured_query
+    assert result["error"] == "iwencai_metric_mismatch"
+    assert result["retryable"] is False
+    assert result["stop_same_tool"] is True
+    assert journal.evidence == {}
+    assert journal.entries[-1].status == "failed"
+
+
+def test_fast_finance_tool_directory_and_budget_are_bounded() -> None:
+    context = AgentRuntimeContext(permissions=("*",))
+    assert resolve_main_tool_ids(
+        context,
+        query_profile="simple_finance",
+    ) == ("iwencai.finance.query",)
+    assert resolve_main_tool_ids(
+        context,
+        query_profile="light_finance_analysis",
+    ) == ("iwencai.finance.query", "calculation.run")
+
+    budget = MainAgentBudgetController(
+        started_monotonic=time.monotonic(),
+        query_profile="light_finance_analysis",
+    )
+    assert budget.authorize("iwencai.finance.query")[0] is True
+    budget.register("iwencai.finance.query")
+    assert budget.authorize("iwencai.finance.query") == (
+        False,
+        "query_profile_tool_budget_exhausted",
+    )
+    assert budget.authorize("calculation.run")[0] is True
+    budget.register("calculation.run")
+    assert budget.authorize("calculation.run") == (
+        False,
+        "query_profile_tool_budget_exhausted",
+    )
+    assert budget.authorize("web.search") == (
+        False,
+        "query_profile_tool_not_allowed",
+    )
+
+
+def test_light_finance_response_is_limited_to_compact_shape() -> None:
+    response = MainAgentResponse(
+        mode="grounded",
+        heading="业绩预告分析",
+        statements=[
+            MainAgentStatement(text=f"结论{i}", evidence_ids=["e1"])
+            for i in range(4)
+        ],
+        tables=[
+            MainAgentTable(
+                title=f"表{i}",
+                columns=["指标", "数值"],
+                rows=[MainAgentTableRow(cells=["增幅", "100%"], evidence_ids=["e1"])],
+            )
+            for i in range(2)
+        ],
+        follow_ups=["追问1", "追问2", "追问3"],
+    )
+
+    constrained = constrain_response_for_query_profile(
+        response,
+        "light_finance_analysis",
+    )
+
+    assert isinstance(constrained, MainAgentResponse)
+    assert len(constrained.statements) == 3
+    assert len(constrained.tables) == 1
+    assert len(constrained.follow_ups) == 2
+    plain_text = constrain_response_for_query_profile(
+        response,
+        "light_finance_analysis",
+        "plain_text",
+    )
+    assert isinstance(plain_text, MainAgentResponse)
+    assert plain_text.tables == []
+
+
+def test_simple_finance_keeps_table_when_memory_prefers_table() -> None:
+    response = MainAgentResponse(
+        mode="grounded",
+        statements=[MainAgentStatement(text="预计增长97.26%至130.14%。", evidence_ids=["e1"])],
+        tables=[MainAgentTable(
+            title="预计增幅",
+            columns=["下限", "上限"],
+            rows=[MainAgentTableRow(cells=["97.26%", "130.14%"], evidence_ids=["e1"])],
+        )],
+    )
+
+    with_table = constrain_response_for_query_profile(
+        response,
+        "simple_finance",
+        "table",
+    )
+    without_table = constrain_response_for_query_profile(
+        response,
+        "simple_finance",
+    )
+
+    assert isinstance(with_table, MainAgentResponse)
+    assert len(with_table.tables) == 1
+    assert isinstance(without_table, MainAgentResponse)
+    assert without_table.tables == []
+
+
+@pytest.mark.asyncio
+async def test_quality_gate_builds_table_from_evidence_for_table_preference() -> None:
+    evidence = _evidence("e-table-memory", "financial")
+    evidence.metadata["preview_table"] = {
+        "columns": ["净利润增长率下限", "净利润增长率上限"],
+        "rows": [["97.26%", "130.14%"]],
+    }
+    response = MainAgentResponse(
+        mode="grounded",
+        statements=[MainAgentStatement(
+            text="预计净利润同比增长97.26%至130.14%。",
+            evidence_ids=[evidence.evidence_id],
+        )],
+    )
+
+    update = await main_evidence_quality_gate({
+        "messages": [HumanMessage(content="海昌智能净利润预计增长多少？")],
+        "main_agent_response": response,
+        "main_query_profile": "simple_finance",
+        "main_preferred_output_format": "table",
+        "evidence": [evidence],
+    })
+
+    assert "| 净利润增长率下限 | 净利润增长率上限 |" in update["summary"]
+    assert "| 97.26% | 130.14% |" in update["summary"]
+
+
+def test_fast_finance_rejects_unverified_direct_answer() -> None:
+    response = MainAgentResponse(
+        mode="direct",
+        direct_answer="海昌智能净利润预计增长100%。",
+    )
+
+    assert constrain_response_for_query_profile(
+        response,
+        "simple_finance",
+    ) is None
+
+
 def test_cn_equity_session_context_before_close_uses_previous_weekday() -> None:
     from zoneinfo import ZoneInfo
 
@@ -233,9 +548,11 @@ async def test_brief_grounded_renders_prose_without_heading_or_bullets() -> None
 @pytest.mark.asyncio
 async def test_main_node_injects_current_memory_preferences(monkeypatch) -> None:
     captured_messages: list[list[object]] = []
+    captured_formats: list[str] = []
 
-    async def fake_run_main_deep_agent(*, messages, context, **_kwargs):
+    async def fake_run_main_deep_agent(*, messages, context, **kwargs):
         captured_messages.append(list(messages))
+        captured_formats.append(str(kwargs.get("preferred_output_format") or ""))
         return (
         MainAgentResponse(mode="direct", direct_answer="测试回答"),
         MainAgentProgressJournal(),
@@ -276,6 +593,7 @@ async def test_main_node_injects_current_memory_preferences(monkeypatch) -> None
     assert "preferred_output_format=markdown" in markdown_context
     assert "preferred_output_format=table" not in markdown_context
     assert "preferred_output_format" not in cleared_context
+    assert captured_formats == ["table", "markdown", ""]
 
 
 def test_main_table_requires_consistent_column_count() -> None:
@@ -305,6 +623,10 @@ def test_journal_normalizes_agent_todos_for_observability() -> None:
 
 @pytest.mark.asyncio
 async def test_run_main_deep_agent_captures_final_todos(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "agents.main_deep_agent.assembly.refine_main_response_with_finance_llm",
+        lambda response, journal, **_kwargs: _async_identity(response),
+    )
     class FakeAgent:
         async def ainvoke(self, _input, *, config):
             assert config["recursion_limit"] > 0
@@ -341,6 +663,11 @@ async def test_run_main_deep_agent_captures_final_todos(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_run_main_deep_agent_discards_stale_quality_response(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "agents.main_deep_agent.assembly.refine_main_response_with_finance_llm",
+        lambda response, journal, **_kwargs: _async_identity(response),
+    )
+
     class FakeAgent:
         def __init__(self, journal: MainAgentProgressJournal) -> None:
             self.journal = journal
@@ -1676,8 +2003,7 @@ async def test_apple_amazon_comparison_keeps_evidence_backed_facts() -> None:
     }, entity="Amazon")[0]
     response = MainAgentResponse(
         mode="grounded",
-        gaps=["当前资料不足以判断是否买入。"],
-        
+        gaps=["当前资料不足以给出投资建议。"],
         heading="业务亮点",
         statements=[
             MainAgentStatement(
@@ -1860,8 +2186,7 @@ async def test_tavily_applies_tool_side_domain_allowlist(monkeypatch) -> None:
             return FakeResponse()
 
     monkeypatch.setattr(web_search_tool.settings, "TAVILY_API_KEY", "test-key")
-    monkeypatch.setattr(web_search_tool.settings, "WEB_SEARCH_ALLOWED_DOMAINS", "")
-    monkeypatch.setattr(web_search_tool.settings, "WEB_SEARCH_MAX_DOMAINS", 20)
+    # Settings 未声明 WEB_SEARCH_ALLOWED_DOMAINS / MAX_DOMAINS；生产侧用 getattr 默认值。
     monkeypatch.setattr(web_search_tool.httpx, "AsyncClient", FakeClient)
 
     await web_search_tool.search_web.ainvoke({"query": "今日 A 股热点有哪些"})
@@ -2378,6 +2703,43 @@ def test_iwencai_multi_entity_rows_become_separate_evidence() -> None:
     assert first_preview["rows"][0][date_index] == "20251231"
 
 
+def test_iwencai_narrative_field_preserves_qualitative_driver_text() -> None:
+    from agents.main_deep_agent.tools.evidence_adapter import _evidence_from_payload
+
+    evidence = _evidence_from_payload(
+        "iwencai.finance.query",
+        {
+            "ok": True,
+            "provider": "iwencai",
+            "query": "海昌智能2026年上半年业绩预告净利润预计增幅中枢上下限",
+            "data": {
+                "datas": [{
+                    "股票代码": "920156.BJ",
+                    "股票简称": "海昌智能",
+                    "净利润增长率上限[20260630](%)": 130.14,
+                    "净利润增长率下限[20260630](%)": 97.26,
+                    "报告期[20260630]": "2026年中报",
+                    "变动类型[20260630]": "大幅上升",
+                    "变动原因[20260630]": (
+                        "（一）市场拓展成效显现，营业收入快速增长。报告期内，"
+                        "公司持续推进国内外市场开拓，国外市场取得重要突破，"
+                        "客户订单保持增长。（二）产品结构持续优化，盈利能力进一步提升。"
+                    ),
+                    "预告净利润下限[20260630](元)": "1.20亿",
+                    "预告净利润上限[20260630](元)": "1.40亿",
+                }],
+            },
+        },
+    )
+    assert len(evidence) == 1
+    narrative = evidence[0].metadata.get("narrative", "")
+    assert "变动原因" in narrative
+    assert "国外市场取得重要突破" in narrative
+    # 数值字段不应重复混入 narrative（已由 facts/display_text 承担）。
+    assert "股票代码：" not in narrative
+    assert "净利润增长率上限" not in narrative
+
+
 def test_preview_article_is_not_official_earnings() -> None:
     evidence = web_evidence_from_payload(
         {
@@ -2562,4 +2924,3 @@ def test_tool_error_is_visible_in_step_detail() -> None:
     cleaned = sanitize_step_detail(detail)
     assert cleaned is not None
     assert cleaned["error"] == "iwencai_timeout"
-

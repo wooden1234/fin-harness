@@ -4,21 +4,25 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.core.config import settings
 from langchain_core.runnables import RunnableConfig
 from langgraph.runtime import Runtime
 from langgraph.types import Overwrite
 
 from agents.context import conversation_messages
-from agents.main_deep_agent.contracts import MainAgentResponse
 from agents.main_deep_agent.assembly import run_main_deep_agent
+from agents.main_deep_agent.contracts import MainAgentResponse
 from agents.main_deep_agent.middleware.compliance import (
     is_investment_action_sensitive,
+)
+from agents.main_deep_agent.query_profile import (
+    classify_main_query_profile,
+    resolve_output_format_preference,
 )
 from agents.orchestrator.analyzer import latest_query
 from agents.orchestrator.contracts import AgentResult
 from agents.orchestrator.state import OrchestratorState
 from agents.runtime_context import AgentRuntimeContext
-from app.core.config import settings
 
 
 async def main_deep_agent_node(
@@ -29,12 +33,20 @@ async def main_deep_agent_node(
     """直接处理当前问题，不执行 Analyzer 或领域 Planner。"""
     context = runtime.context if runtime is not None else AgentRuntimeContext()
     query = latest_query(state)
+    query_profile = classify_main_query_profile(query)
+    preferred_output_format = resolve_output_format_preference(
+        query,
+        memory_context=state.get("memory_context"),
+        turn_preferences=state.get("turn_preferences"),
+    )
     sensitive = is_investment_action_sensitive(query)
     response, journal, budget, status, detail = await run_main_deep_agent(
         messages=conversation_messages(state),
         context=context,
         config=config,
         investment_action_sensitive=sensitive,
+        query_profile=query_profile,
+        preferred_output_format=preferred_output_format,
     )
     if response is None and not journal.entries and detail and status == "completed":
         response = MainAgentResponse(mode="direct", direct_answer=detail)
@@ -90,6 +102,8 @@ async def main_deep_agent_node(
         "main_agent_response": response,
         "main_agent_journal": journal_snapshot,
         "investment_action_sensitive": sensitive,
+        "main_query_profile": query_profile,
+        "main_preferred_output_format": preferred_output_format,
         "agent_results": Overwrite([result]),
         "evidence": Overwrite(evidence),
         "citations": Overwrite([]),

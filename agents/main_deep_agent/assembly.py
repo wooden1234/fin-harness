@@ -7,31 +7,37 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.core.config import settings
+from app.core.logger import get_logger
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 
 from agents.deep_agent_support import ensure_financial_deep_agent_profile
-from agents.llm import get_finance_llm
+from agents.llm import get_faq_llm
 from agents.main_deep_agent.config import MAIN_SKILL_SOURCES, build_main_backend
 from agents.main_deep_agent.contracts import MainAgentResponse
+from agents.main_deep_agent.drafting import refine_main_response_with_finance_llm
 from agents.main_deep_agent.middleware.budget import MainAgentBudgetController
 from agents.main_deep_agent.middleware.finalization import (
     MainAgentFailureFinalizationMiddleware,
 )
 from agents.main_deep_agent.middleware.quality import MainEvidenceQualityMiddleware
-from agents.main_deep_agent.prompts import build_main_system_prompt
-from agents.main_deep_agent.state import MainAgentProgressJournal
-from agents.main_deep_agent.tools.factory import build_main_tools
 from agents.main_deep_agent.middleware.summarization import (
     GovernedResearchSummarizationMiddleware,
 )
+from agents.main_deep_agent.prompts import build_main_system_prompt
+from agents.main_deep_agent.query_profile import (
+    MainQueryProfile,
+    PreferredOutputFormat,
+    classify_main_query_profile,
+)
+from agents.main_deep_agent.state import MainAgentProgressJournal
+from agents.main_deep_agent.tools.factory import build_main_tools
 from agents.runtime_context import AgentRuntimeContext
-from app.core.config import settings
-from app.core.logger import get_logger
 
 logger = get_logger(service="main_deep_agent")
 
@@ -84,21 +90,28 @@ def build_main_deep_agent(
     budget: MainAgentBudgetController,
     journal: MainAgentProgressJournal,
     investment_action_sensitive: bool,
+    query_profile: MainQueryProfile = "full_research",
+    preferred_output_format: PreferredOutputFormat = "",
     llm: BaseChatModel | None = None,
 ):
     """按声明式 Assembly 创建无 Shell、无写入、无子代理的 Main DeepAgent。"""
     ensure_financial_deep_agent_profile()
-    active_llm = llm or get_finance_llm()
+    # 工具规划 / MainAgentResponse 工具调用：DeepSeek。finalign 只在成稿后处理。
+    active_llm = llm or get_faq_llm()
     governed_tools = build_main_tools(
         context=context,
         budget=budget,
         journal=journal,
+        query_profile=query_profile,
     )
+    use_full_research_context = query_profile == "full_research"
     assembly = MainDeepAgentAssembly(
         model=active_llm,
         tools=tuple(governed_tools),
         system_prompt=build_main_system_prompt(
             investment_action_sensitive=investment_action_sensitive,
+            query_profile=query_profile,
+            preferred_output_format=preferred_output_format,
         ),
         middleware=(
             MainAgentFailureFinalizationMiddleware(
@@ -119,8 +132,8 @@ def build_main_deep_agent(
                 investment_action_sensitive=investment_action_sensitive,
             ),
         ),
-        skills=MAIN_SKILL_SOURCES,
-        backend=build_main_backend(),
+        skills=MAIN_SKILL_SOURCES if use_full_research_context else (),
+        backend=build_main_backend() if use_full_research_context else None,
     )
     return assembly.create()
 
@@ -134,25 +147,43 @@ def _last_text(messages: Sequence[Any]) -> str:
     return ""
 
 
+def _latest_user_query(messages: Sequence[Any]) -> str:
+    for message in reversed(list(messages)):
+        if isinstance(message, HumanMessage):
+            text = message.content if isinstance(message.content, str) else str(message.content)
+            if text.strip():
+                return text.strip()
+    return ""
+
+
 async def run_main_deep_agent(
     *,
     messages: Sequence[Any],
     context: AgentRuntimeContext,
     config: RunnableConfig = None,
     investment_action_sensitive: bool,
+    query_profile: MainQueryProfile | None = None,
+    preferred_output_format: PreferredOutputFormat = "",
     llm: BaseChatModel | None = None,
 ) -> tuple[MainAgentResponse | None, MainAgentProgressJournal, MainAgentBudgetController, str, str]:
     """执行 Main DeepAgent，并保留结构化失败和硬超时状态。"""
+    resolved_profile = query_profile or classify_main_query_profile(
+        _latest_user_query(messages)
+    )
     journal = MainAgentProgressJournal()
     budget = MainAgentBudgetController(
         started_monotonic=context.started_monotonic,
         hard_seconds=float(settings.MAIN_AGENT_DIRECT_HARD_DEADLINE_SEC),
+        query_profile=resolved_profile,
+        user_query=_latest_user_query(messages),
     )
     agent = build_main_deep_agent(
         context=context,
         budget=budget,
         journal=journal,
         investment_action_sensitive=investment_action_sensitive,
+        query_profile=resolved_profile,
+        preferred_output_format=preferred_output_format,
         llm=llm,
     )
     deadline = context.started_monotonic + float(
@@ -226,6 +257,24 @@ async def run_main_deep_agent(
         response = MainAgentResponse(mode="direct", direct_answer=fallback_text)
         status = "completed"
         error = ""
+
+    if (
+        status in {"completed", "structured_output_failed"}
+        and not stale_quality_response
+        and (resolved_profile == "full_research" or response is None)
+    ):
+        # finalign：对照用户问题 + journal 证据成稿；失败则保留原响应。
+        refined = await refine_main_response_with_finance_llm(
+            response,
+            journal,
+            query=_latest_user_query(messages),
+        )
+        if refined is not None:
+            response = refined
+            if status == "structured_output_failed" and response is not None:
+                status = "completed"
+                error = ""
+
     return response, journal, budget, status, error
 
 

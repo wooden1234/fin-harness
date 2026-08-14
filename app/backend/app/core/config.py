@@ -143,6 +143,10 @@ class Settings(BaseSettings):
     # vLLM 探活超时；不可达时 get_finance_llm 回退 DeepSeek
     FINANCE_LLM_PROBE_TIMEOUT_SEC: float = 2.0
     FINANCE_LLM_PROBE_TTL_SEC: float = 30.0
+    # DeepAgent：DeepSeek 跑工具；finalign 仅在成稿阶段调用
+    FINANCE_LLM_DRAFT_ENABLED: bool = True
+    # 仅当把 finance LLM 当 Agent 主模型时才需要 tool-call 探活
+    FINANCE_LLM_REQUIRE_TOOL_CALLS: bool = False
     FAQ_MIN_RELEVANCE_SCORE: float = 0.35
     PDF_MIN_RELEVANCE_SCORE: float = 0.35
     PDF_RETRIEVAL_TOP_K: int = 10

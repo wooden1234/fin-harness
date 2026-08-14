@@ -9,6 +9,7 @@ from collections import Counter
 from collections.abc import Mapping
 from typing import Any
 
+from app.core.config import settings
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_stream_writer
 
@@ -18,6 +19,11 @@ from agents.main_deep_agent.middleware.authorization import (
 from agents.main_deep_agent.middleware.budget import (
     TOOL_SOURCE_FAMILY,
     MainAgentBudgetController,
+)
+from agents.main_deep_agent.query_profile import (
+    MainQueryProfile,
+    required_financial_metrics,
+    rewrite_fast_finance_query,
 )
 from agents.main_deep_agent.state import MainAgentProgressJournal
 from agents.main_deep_agent.tools.catalog import (
@@ -30,13 +36,11 @@ from agents.main_deep_agent.tools.evidence_adapter import (
     _sanitize_tool_payload,
     web_evidence_from_payload,
 )
-from agents.main_deep_agent.tools.step_detail import build_public_tool_step_detail
 from agents.main_deep_agent.tools.executor import execute_registered_tool
+from agents.main_deep_agent.tools.step_detail import build_public_tool_step_detail
 from agents.runtime_context import AgentRuntimeContext
-from app.core.config import settings
 from harness.context import build_run_context
 from tools import get_langchain_tool, get_tool_spec, load_all_tools
-
 
 _FALLBACK_TOOL_IDS = {
     "financial": (
@@ -68,6 +72,41 @@ _TIME_COMPARISON_OPERATIONS = frozenset({
     "quarter_over_quarter",
     "cagr",
 })
+
+_EVIDENCE_METRIC_MARKERS = {
+    "net_profit": ("归母净利润", "扣非净利润", "净利润", "净利", "net_income"),
+    "revenue": ("营业收入", "营收", "收入", "revenue"),
+    "roe": ("roe", "净资产收益率"),
+    "cash_flow": ("现金流", "经营活动现金", "cash_flow"),
+    "debt_ratio": ("负债率", "资产负债率", "debt_ratio"),
+    "gross_margin": ("毛利率", "gross_margin"),
+    "net_margin": ("净利率", "net_margin"),
+}
+
+
+def _finance_evidence_covers_required_metrics(
+    evidence: list[Any],
+    required_metrics: tuple[str, ...],
+) -> bool:
+    """仅检查返回字段与事实，不使用可能包含原问题的查询文本。"""
+    if not required_metrics:
+        return True
+    pieces: list[str] = []
+    for item in evidence:
+        metadata = item.metadata if isinstance(item.metadata, Mapping) else {}
+        preview = metadata.get("preview_table")
+        if isinstance(preview, Mapping):
+            pieces.extend(str(column) for column in list(preview.get("columns") or []))
+        for fact in list(metadata.get("facts") or []):
+            if not isinstance(fact, Mapping):
+                continue
+            pieces.extend((str(fact.get("metric") or ""), str(fact.get("text") or "")))
+        pieces.append(str(metadata.get("narrative") or ""))
+    haystack = " ".join(pieces).lower()
+    return all(
+        any(marker.lower() in haystack for marker in _EVIDENCE_METRIC_MARKERS[metric])
+        for metric in required_metrics
+    )
 
 
 def _as_mapping(value: object) -> Mapping[str, Any] | None:
@@ -254,6 +293,7 @@ def _failure_payload(
         "calculation_batch_failed",
         "duplicate_tool_call",
         "narrow_finance_call_exhausted",
+        "iwencai_metric_mismatch",
     }
     prerequisite_errors = {"pdf_doc_ids_required", "pdf_doc_ids_not_cataloged"}
     payload: dict[str, Any] = {
@@ -316,12 +356,24 @@ def _emit_tool_progress(
         return
 
 
-def resolve_main_tool_ids(context: AgentRuntimeContext) -> tuple[str, ...]:
+def resolve_main_tool_ids(
+    context: AgentRuntimeContext,
+    *,
+    query_profile: MainQueryProfile = "full_research",
+) -> tuple[str, ...]:
     """根据运行时主体权限生成稳定工具目录，后续可直接接入租户能力表。"""
+    profile_tool_ids = {
+        "simple_finance": frozenset({"iwencai.finance.query"}),
+        "light_finance_analysis": frozenset({
+            "iwencai.finance.query",
+            "calculation.run",
+        }),
+    }.get(query_profile)
     return tuple(
         tool_id
         for tool_id in MAIN_TOOL_IDS
         if _permissions_allow(context, tool_id)
+        and (profile_tool_ids is None or tool_id in profile_tool_ids)
     )
 
 
@@ -330,6 +382,7 @@ def _governed_tools(
     context: AgentRuntimeContext,
     budget: MainAgentBudgetController,
     journal: MainAgentProgressJournal,
+    query_profile: MainQueryProfile = "full_research",
 ) -> list[BaseTool]:
     load_all_tools()
     run_context = build_run_context(
@@ -339,7 +392,10 @@ def _governed_tools(
         permissions=context.permissions,
         metadata={"agent": "main_deep_agent", "run_id": context.run_id},
     )
-    resolved_tool_ids = resolve_main_tool_ids(context)
+    resolved_tool_ids = resolve_main_tool_ids(
+        context,
+        query_profile=query_profile,
+    )
     allowed = frozenset(resolved_tool_ids)
     cataloged_pdf_doc_ids: set[str] = set()
     cataloged_pdf_by_category: dict[str, set[str]] = {}
@@ -352,6 +408,13 @@ def _governed_tools(
         async def _ainvoke(_tool_id: str = tool_id, **kwargs: Any) -> dict[str, Any]:
             family = TOOL_SOURCE_FAMILY.get(_tool_id, "unknown")
             started = time.perf_counter()
+            if (
+                _tool_id == "iwencai.finance.query"
+                and budget.query_profile in {"simple_finance", "light_finance_analysis"}
+            ):
+                kwargs["query"] = rewrite_fast_finance_query(
+                    budget.user_query or str(kwargs.get("query") or "")
+                )
             query = str(kwargs.get("query") or "").strip()
             entity = str(kwargs.get("entity") or "").strip()
             target_entities = [
@@ -564,6 +627,19 @@ def _governed_tools(
             ):
                 ok = False
                 error = "iwencai_no_structured_data"
+            if (
+                ok
+                and _tool_id == "iwencai.finance.query"
+                and budget.query_profile in {"simple_finance", "light_finance_analysis"}
+                and not _finance_evidence_covers_required_metrics(
+                    evidence,
+                    required_financial_metrics(budget.user_query or query),
+                )
+            ):
+                ok = False
+                error = "iwencai_metric_mismatch"
+                evidence = []
+                budget.request_finalization(error)
             if ok and _tool_id == "knowledge.pdf.catalog" and isinstance(data, Mapping):
                 documents = list(data.get("documents") or [])
                 discovered_doc_ids: set[str] = set()

@@ -76,7 +76,8 @@ export function ChatMessage({
   const followUps = message.followUps ?? []
   const charts = message.charts ?? []
   const [lightboxOpen, setLightboxOpen] = useState(false)
-  const dataSourceCount = steps.filter(
+  const visibleSteps = steps.filter((step) => step.status !== 'error')
+  const dataSourceCount = visibleSteps.filter(
     (step) => step.category !== undefined && DATA_SOURCE_CATEGORIES.has(step.category),
   ).length
   // 与过程面板一致：短题不摊开 todos，只保留步骤时间线。
@@ -90,7 +91,7 @@ export function ChatMessage({
     ...(showTodosInDetails
       ? todos.map((todo) => ({ id: todo.id, label: todo.content }))
       : []),
-    ...steps.map((step) => ({
+    ...visibleSteps.map((step) => ({
       id: step.id,
       label: step.label,
       detail: step.detail,

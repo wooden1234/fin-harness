@@ -148,8 +148,76 @@ def _build_openai_compatible_llm(
     return ChatOpenAI(**kwargs)
 
 
-def _finance_llm_reachable(*, base_url: str, api_key: str) -> bool:
-    """探活本地 vLLM（GET /models）；带短 TTL，避免每次装配都打满探活。"""
+def _finance_llm_supports_required_tools(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    timeout: float,
+) -> bool:
+    """DeepAgent 依赖 tool_choice=required；vLLM 未开 --tool-call-parser 时会 400。"""
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": "ping"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "probe_ok",
+                    "description": "connectivity probe",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        ],
+        "tool_choice": "required",
+        "max_tokens": 1,
+        "temperature": 0,
+        "chat_template_kwargs": {
+            "enable_thinking": bool(settings.FINANCE_LLM_ENABLE_THINKING),
+        },
+    }
+    try:
+        response = httpx.post(
+            f"{base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=timeout,
+        )
+    except Exception as exc:
+        logger.warning(
+            "finance llm tool probe failed, fallback to deepseek: base_url={} error={}",
+            base_url,
+            type(exc).__name__,
+        )
+        return False
+
+    if response.status_code < 400:
+        return True
+
+    detail = ""
+    try:
+        detail = str((response.json().get("error") or {}).get("message") or "")
+    except Exception:
+        detail = (response.text or "")[:300]
+    logger.warning(
+        "finance llm tool-call unsupported, fallback to deepseek: "
+        "base_url={} status={} detail={}",
+        base_url,
+        response.status_code,
+        detail[:200],
+    )
+    return False
+
+
+def _finance_llm_reachable(*, base_url: str, api_key: str, model: str = "") -> bool:
+    """探活本地 vLLM：默认只检查 /models；可选再验 tool_choice=required。"""
     global _finance_probe_cache
     now = monotonic()
     ttl = max(0.0, float(settings.FINANCE_LLM_PROBE_TTL_SEC or 30.0))
@@ -160,6 +228,7 @@ def _finance_llm_reachable(*, base_url: str, api_key: str) -> bool:
 
     normalized = _normalize_api_base(base_url)
     probe_timeout = max(0.2, float(settings.FINANCE_LLM_PROBE_TIMEOUT_SEC or 2.0))
+    tool_timeout = max(probe_timeout, min(8.0, probe_timeout * 2))
     reachable = False
     try:
         response = httpx.get(
@@ -181,8 +250,28 @@ def _finance_llm_reachable(*, base_url: str, api_key: str) -> bool:
                 normalized,
                 response.status_code,
             )
+        elif model and bool(settings.FINANCE_LLM_REQUIRE_TOOL_CALLS):
+            reachable = _finance_llm_supports_required_tools(
+                base_url=normalized,
+                api_key=api_key,
+                model=model,
+                timeout=tool_timeout,
+            )
     _finance_probe_cache = (now, reachable)
     return reachable
+
+
+def is_finance_llm_available() -> bool:
+    """本地金融微调是否可用于成稿（已配置且 /models 探活成功）。
+
+    成稿只走普通 chat/completions，不探 tool_choice=required。
+    """
+    base_url = str(settings.FINANCE_LLM_BASE_URL or "").strip()
+    model = str(settings.FINANCE_LLM_MODEL or "").strip()
+    if not base_url or not model:
+        return False
+    api_key = str(settings.FINANCE_LLM_API_KEY or "").strip() or "EMPTY"
+    return _finance_llm_reachable(base_url=base_url, api_key=api_key)
 
 
 def reset_finance_llm_probe_cache() -> None:
@@ -225,17 +314,12 @@ def _get_finance_llm_client() -> BaseChatModel:
 
 
 def get_finance_llm() -> BaseChatModel:
-    """DeepAgent 主推理 + 结构化成稿：本地金融微调（OpenAI 兼容）。
+    """金融成稿模型：本地微调（OpenAI 兼容）。
 
-    未配置或 vLLM 探活失败时回退 get_faq_llm()（DeepSeek）。
+    DeepAgent 工具规划请用 get_faq_llm()；本函数仅用于基于材料的成稿/汇总。
+    未配置或 vLLM 不可达时回退 get_faq_llm()（DeepSeek）。
     """
-    base_url = str(settings.FINANCE_LLM_BASE_URL or "").strip()
-    model = str(settings.FINANCE_LLM_MODEL or "").strip()
-    if not base_url or not model:
-        return get_faq_llm()
-
-    api_key = str(settings.FINANCE_LLM_API_KEY or "").strip() or "EMPTY"
-    if not _finance_llm_reachable(base_url=base_url, api_key=api_key):
+    if not is_finance_llm_available():
         return get_faq_llm()
     return _get_finance_llm_client()
 
@@ -276,5 +360,6 @@ __all__ = [
     "get_qwen_llm",
     "get_router_llm",
     "get_vision_llm",
+    "is_finance_llm_available",
     "reset_finance_llm_probe_cache",
 ]

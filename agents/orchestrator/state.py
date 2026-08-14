@@ -46,6 +46,8 @@ class OrchestratorState(CoreState):
     main_agent_response: NotRequired[object]
     main_agent_journal: NotRequired[dict[str, object]]
     main_quality_metrics: NotRequired[dict[str, object]]
+    main_query_profile: NotRequired[str]
+    main_preferred_output_format: NotRequired[str]
     investment_action_sensitive: NotRequired[bool]
     execution_mode: NotRequired[str]
     answer_follow_ups: NotRequired[list[str]]

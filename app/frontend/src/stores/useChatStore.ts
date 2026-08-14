@@ -82,6 +82,13 @@ export const useChatStore = create<ChatState>((set) => ({
   upsertAgentStep: (step) =>
     set((state) => {
       const existingIndex = state.agentSteps.findIndex((item) => item.id === step.id)
+      // 失败/无结果步骤不进入过程面板与历史快照
+      if (step.status === 'error') {
+        if (existingIndex < 0) return state
+        return {
+          agentSteps: state.agentSteps.filter((item) => item.id !== step.id),
+        }
+      }
       if (existingIndex >= 0) {
         const agentSteps = [...state.agentSteps]
         const previous = agentSteps[existingIndex]

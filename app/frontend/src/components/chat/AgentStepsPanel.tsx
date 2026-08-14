@@ -22,10 +22,7 @@ function StatusIcon({ status }: { status: AgentStep['status'] }) {
   if (status === 'done') {
     return <CheckCircle2 size={13} className="text-emerald-500 shrink-0" />
   }
-  if (status === 'pending') {
-    return <Circle size={13} className="text-slate-300 dark:text-slate-600 shrink-0" />
-  }
-  return <span className="w-[13px] h-[13px] rounded-full bg-red-400 shrink-0" />
+  return <Circle size={13} className="text-slate-300 dark:text-slate-600 shrink-0" />
 }
 
 function hasExpandableDetail(detail?: AgentStepDetail): boolean {
@@ -54,7 +51,6 @@ function StepLine({
   const [open, setOpen] = useState(Boolean(defaultOpen && expandable))
   const isRunning = status === 'running'
   const isDone = status === 'done'
-  const isPending = status === 'pending'
 
   useEffect(() => {
     if (defaultOpen && expandable) {
@@ -66,9 +62,7 @@ function StepLine({
     ? 'text-slate-800 dark:text-slate-100'
     : isDone
       ? 'text-slate-600 dark:text-slate-300'
-      : isPending
-        ? 'text-slate-400 dark:text-slate-500'
-        : 'text-red-600 dark:text-red-400'
+      : 'text-slate-400 dark:text-slate-500'
 
   return (
     <div className={animate ? 'animate-step-in' : undefined}>
@@ -104,7 +98,10 @@ function shouldShowTodos(steps: AgentStep[], todos: AgentTodo[]): boolean {
   if (todos.length === 0) return false
   if (todos.length > SHORT_QUESTION_TODO_HIDE_THRESHOLD) return true
   const dataSourceCount = steps.filter(
-    (step) => step.category !== undefined && DATA_SOURCE_CATEGORIES.has(step.category),
+    (step) =>
+      step.status !== 'error' &&
+      step.category !== undefined &&
+      DATA_SOURCE_CATEGORIES.has(step.category),
   ).length
   return dataSourceCount > SHORT_QUESTION_TODO_HIDE_THRESHOLD
 }
@@ -166,6 +163,8 @@ export function AgentStepsPanel({
   }
 
   steps.forEach((step) => {
+    // 无结果/失败步骤不展示，避免打断研究过程观感
+    if (step.status === 'error') return
     const isNew = !seenStepIds.current.has(step.id)
     displayLines.push({
       id: step.id,
@@ -190,7 +189,10 @@ export function AgentStepsPanel({
   )
 
   const dataSourceCount = steps.filter(
-    (step) => step.category !== undefined && DATA_SOURCE_CATEGORIES.has(step.category),
+    (step) =>
+      step.status !== 'error' &&
+      step.category !== undefined &&
+      DATA_SOURCE_CATEGORIES.has(step.category),
   ).length
   const headerHint =
     !isGenerating && (steps.length > 0 || showTodos)

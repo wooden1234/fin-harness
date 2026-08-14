@@ -7,9 +7,10 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field
 
-from agents.main_deep_agent.middleware.authorization import normalize_entity
 from app.core.config import settings
 
+from agents.main_deep_agent.middleware.authorization import normalize_entity
+from agents.main_deep_agent.query_profile import MainQueryProfile
 
 TOOL_SOURCE_FAMILY = {
     "weather.get": "weather",
@@ -52,6 +53,8 @@ class MainAgentBudgetController:
     """根据实际工具行为升级预算，不承担语义路由。"""
 
     started_monotonic: float
+    query_profile: MainQueryProfile = "full_research"
+    user_query: str = ""
     timeout_scope: asyncio.Timeout | None = None
     tool_calls: int = 0
     tool_counts: Counter[str] = field(default_factory=Counter)
@@ -123,6 +126,19 @@ class MainAgentBudgetController:
         if self.soft_expired():
             self.request_finalization("soft_deadline_no_new_tools")
             return False, "soft_deadline_no_new_tools"
+        profile_limits = {
+            "simple_finance": {"iwencai.finance.query": 1},
+            "light_finance_analysis": {
+                "iwencai.finance.query": 1,
+                "calculation.run": 1,
+            },
+        }
+        if self.query_profile in profile_limits:
+            limits = profile_limits[self.query_profile]
+            if tool_id not in limits:
+                return False, "query_profile_tool_not_allowed"
+            if self.tool_id_counts[tool_id] >= limits[tool_id]:
+                return False, "query_profile_tool_budget_exhausted"
         if (
             self.budget_tier == "deep_research"
             and self.elapsed() >= float(settings.MAIN_AGENT_RESEARCH_TOOL_CUTOFF_SEC)

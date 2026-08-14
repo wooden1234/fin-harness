@@ -7,10 +7,13 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from langchain_core.messages import HumanMessage
+
 from agents.main_deep_agent.contracts import (
     MainAgentResponse,
     MainAgentStatement,
     MainAgentTable,
+    MainAgentTableRow,
 )
 from agents.main_deep_agent.middleware.authorization import normalize_entity
 from agents.main_deep_agent.quality.enrichments import (
@@ -22,8 +25,9 @@ from agents.main_deep_agent.quality.renderer import (
     render_markdown_table,
 )
 from agents.main_deep_agent.quality.salvage import _render_salvage
-from langchain_core.messages import HumanMessage
+from agents.main_deep_agent.query_profile import MainQueryProfile, PreferredOutputFormat
 from agents.main_deep_agent.tools.evidence_adapter import detect_fact_conflicts
+from agents.orchestrator.analyzer import latest_query
 from agents.orchestrator.contracts import (
     AnswerStatement,
     Claim,
@@ -32,7 +36,6 @@ from agents.orchestrator.contracts import (
     Evidence,
     QualityReport,
 )
-from agents.orchestrator.analyzer import latest_query
 from agents.orchestrator.state import OrchestratorState
 from agents.query_rewrite import build_pending_clarification
 
@@ -640,6 +643,102 @@ def _render_brief_grounded(
     return [body]
 
 
+def constrain_response_for_query_profile(
+    response: MainAgentResponse | Any | None,
+    query_profile: MainQueryProfile,
+    preferred_output_format: PreferredOutputFormat = "",
+) -> MainAgentResponse | Any | None:
+    """在发布前落实快速通道的输出上限，避免提示词漂移放大答案。"""
+    normalized = _normalize_response(response)
+    if normalized is None:
+        return response
+    if (
+        query_profile in {"simple_finance", "light_finance_analysis"}
+        and normalized.mode == "direct"
+    ):
+        return None
+    if normalized.mode != "grounded":
+        return normalized
+    if preferred_output_format == "plain_text":
+        normalized = normalized.model_copy(update={"tables": []})
+    if query_profile == "simple_finance":
+        return normalized.model_copy(update={
+            "heading": "",
+            "statements": list(normalized.statements)[:2],
+            "tables": (
+                list(normalized.tables)[:1]
+                if preferred_output_format == "table"
+                else []
+            ),
+            "follow_ups": [],
+        })
+    if query_profile == "light_finance_analysis":
+        return normalized.model_copy(update={
+            "statements": list(normalized.statements)[:3],
+            "tables": (
+                []
+                if preferred_output_format == "plain_text"
+                else list(normalized.tables)[:1]
+            ),
+            "follow_ups": list(normalized.follow_ups)[:2],
+        })
+    return normalized
+
+
+def _table_from_evidence_preview(evidence: list[Evidence]) -> MainAgentTable | None:
+    """模型漏表时，只用已核验结构化预览确定性生成紧凑表格。"""
+    for item in evidence:
+        metadata = item.metadata if isinstance(item.metadata, dict) else {}
+        preview = metadata.get("preview_table")
+        if not isinstance(preview, dict):
+            continue
+        columns = [
+            str(column).strip()
+            for column in list(preview.get("columns") or [])[:12]
+            if str(column).strip()
+        ]
+        if len(columns) < 2:
+            continue
+        rows: list[MainAgentTableRow] = []
+        for raw_row in list(preview.get("rows") or [])[:5]:
+            if not isinstance(raw_row, list):
+                continue
+            cells = [str(cell).strip() for cell in raw_row[:len(columns)]]
+            if len(cells) != len(columns) or not all(cells):
+                continue
+            rows.append(MainAgentTableRow(
+                cells=cells,
+                evidence_ids=[item.evidence_id],
+            ))
+        if rows:
+            return MainAgentTable(
+                title="财务数据",
+                columns=columns,
+                rows=rows,
+            )
+    return None
+
+
+def _ensure_preferred_table(
+    response: MainAgentResponse | Any | None,
+    evidence: list[Evidence],
+    *,
+    query_profile: MainQueryProfile,
+    preferred_output_format: PreferredOutputFormat,
+) -> MainAgentResponse | Any | None:
+    normalized = _normalize_response(response)
+    if normalized is None or normalized.mode != "grounded" or normalized.tables:
+        return response
+    requires_table = preferred_output_format == "table" or (
+        query_profile == "light_finance_analysis"
+        and preferred_output_format != "plain_text"
+    )
+    if not requires_table:
+        return normalized
+    table = _table_from_evidence_preview(evidence)
+    return normalized.model_copy(update={"tables": [table]}) if table else normalized
+
+
 def _render_accepted_response(
     evaluation: _MainValidationResult,
 ) -> list[str]:
@@ -708,8 +807,23 @@ async def main_evidence_quality_gate(state: OrchestratorState) -> dict[str, Any]
     """按统一评价结果渲染答案，并在失败时安全降级。"""
     evidence = list(state.get("evidence") or [])
     sensitive = bool(state.get("investment_action_sensitive"))
-    evaluation = evaluate_main_response(
+    query_profile = str(state.get("main_query_profile") or "full_research")
+    preferred_output_format = str(
+        state.get("main_preferred_output_format") or ""
+    )
+    constrained_response = constrain_response_for_query_profile(
         state.get("main_agent_response"),
+        query_profile,  # type: ignore[arg-type]
+        preferred_output_format,  # type: ignore[arg-type]
+    )
+    constrained_response = _ensure_preferred_table(
+        constrained_response,
+        evidence,
+        query_profile=query_profile,  # type: ignore[arg-type]
+        preferred_output_format=preferred_output_format,  # type: ignore[arg-type]
+    )
+    evaluation = evaluate_main_response(
+        constrained_response,
         evidence,
         sensitive=sensitive,
     )
@@ -765,7 +879,11 @@ async def main_evidence_quality_gate(state: OrchestratorState) -> dict[str, Any]
     if rendered_sections:
         gaps: list[str] = []
         if response and response.gaps:
-            gaps.append("部分补充资料未完成核验，不影响上述已引用事实。")
+            # 透传成稿 gaps（如驱动因素未披露），不要只留笼统一句
+            for item in response.gaps:
+                text = str(item or "").strip()
+                if text:
+                    gaps.append(text)
         if evaluation.rejected_items:
             gaps.append("部分候选陈述因证据、期间或冲突校验未通过，已从答案中移除。")
         if any(not item["resolved"] for item in conflicts):

@@ -6,7 +6,9 @@ from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from app.core.config import settings
+
 from agents.image_query_protocol import IMAGE_CLUE_HEADER, IMAGE_CLUE_HEADER_LEGACY
+from agents.main_deep_agent.query_profile import MainQueryProfile, PreferredOutputFormat
 
 
 def _cn_tz() -> ZoneInfo:
@@ -62,6 +64,8 @@ def resolve_cn_equity_session_context(
 def build_main_system_prompt(
     *,
     investment_action_sensitive: bool,
+    query_profile: MainQueryProfile = "full_research",
+    preferred_output_format: PreferredOutputFormat = "",
 ) -> str:
     """组装研究、表达与证据约束；工具由模型依据自身描述选择。"""
     sensitivity = (
@@ -81,7 +85,49 @@ def build_main_system_prompt(
         else as_of_date.year - 1
     )
     cn = resolve_cn_equity_session_context()
+    if query_profile == "simple_finance":
+        simple_format_rule = (
+            "- 有效输出偏好为 table：生成一张单行紧凑 tables 表格；可补 1 条简洁 statement，不生成 follow_ups。"
+            if preferred_output_format == "table"
+            else "- 输出 1–2 条简洁 statements；不生成表格或 follow_ups。"
+        )
+        return f"""你叫小财，是温暖、友好、可靠的金融研究助手，基于可核验证据回答问题。
+
+当前任务是单公司简单财务事实题，使用最低成本路径：
+- 只调用一次 `query_iwencai_finance`；将“预计增长多少”明确查询为业绩预告净利润增长率上下限，成功后立即成稿。
+- 返回字段必须覆盖用户所问财务指标；只有最新价、涨跌幅等行情字段时视为未命中，不得用于回答。
+{simple_format_rule}
+- 数值、期间和口径必须引用真实 Evidence ID；证据不足时仅说明实际缺口。
+- 用户指定年份或报告期时严格按其要求，不改查最近完整财年。
+- 当前 UTC as_of={as_of}；{sensitivity}
+
+只输出扁平 MainAgentResponse；事实题使用 grounded，不输出工具轨迹或额外文本。"""
+    if query_profile == "light_finance_analysis":
+        light_format_rule = (
+            "- 当前请求明确要求纯文本：不生成表格；用 2–3 条 statements 覆盖结论、驱动与不确定性。"
+            if preferred_output_format == "plain_text"
+            else "- 生成一张紧凑 tables 表格展示上下限与中枢；生成 1–2 条与本题证据直接相关的 follow_ups。"
+        )
+        return f"""你叫小财，是温暖、友好、可靠的金融研究助手，基于可核验证据回答问题。
+
+当前任务是单公司轻量财务分析，使用受限路径：
+- 最多调用一次 `query_iwencai_finance` 和一次 `run_calculation`；不得调用其他工具，不写 todos。
+- 查询同时覆盖用户所需数值、报告期和已披露变动原因；中枢等衍生值用一次批量计算完成。
+- 返回字段必须覆盖用户所问财务指标；只有最新价、涨跌幅等行情字段时视为未命中。
+- 输出 2–3 条简洁 statements：先给数值结论，再概括已披露驱动因素和不确定性。
+{light_format_rule}
+- 表格与 statements 引用真实 Evidence ID；不得把一般性猜测写成公司已披露事实。
+- 用户指定年份或报告期时严格按其要求；当前 UTC as_of={as_of}；{sensitivity}
+
+只输出扁平 MainAgentResponse；使用 grounded，不输出工具轨迹或额外文本。"""
+    effective_format_rule = (
+        f"本轮有效输出格式为 preferred_output_format={preferred_output_format}；必须据此组织答案。"
+        if preferred_output_format
+        else "本轮没有显式输出格式偏好，按问题内容选择最清晰的格式。"
+    )
     return f"""你叫小财，是温暖、友好、可靠的金融研究助手，基于可核验证据回答问题。
+
+{effective_format_rule}
 
 表达风格：
 - 以「小财」自称，语气亲切自然，可使用少量语气词和表情；金融结论保持克制。

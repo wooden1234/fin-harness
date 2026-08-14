@@ -689,6 +689,46 @@ def _unwrap_tool_mapping(data: Mapping[str, Any]) -> dict[str, Any]:
     return merged
 
 
+_NARRATIVE_NUMERIC_SUFFIXES = frozenset(
+    {"", "%", "亿", "万", "元", "亿港元", "亿元", "亿美元", "万港元", "万人民币", "美元", "港元", "人民币"}
+)
+_NARRATIVE_SKIP_KEY_MARKERS = (
+    "报告期", "日期", "时间", "代码", "股票代码", "证券代码", "股票简称", "证券简称", "股票名称",
+)
+_NARRATIVE_MIN_CHARS = 20
+
+
+def _is_pure_numeric_cell(value: object) -> bool:
+    """与 tools/iwencai.py 的数值抽取口径保持一致，避免叙述字段被误判为数值字段。"""
+    text = str(value).strip().replace(",", "")
+    match = re.match(r"[-+]?\d+(?:\.\d+)?", text)
+    if not match:
+        return False
+    suffix = text[match.end():].strip()
+    return suffix in _NARRATIVE_NUMERIC_SUFFIXES
+
+
+def _extract_narrative_from_row(row: Mapping[str, Any], *, max_chars: int = 1200) -> str:
+    """把行内非数值的长文本字段（如「变动原因」「摘要」）单独保留，避免被 facts 摘要顶替掉。"""
+    parts: list[str] = []
+    for key, value in row.items():
+        if value in (None, "", [], {}) or isinstance(value, bool):
+            continue
+        key_text = str(key).strip()
+        if not key_text or key_text.startswith("_"):
+            continue
+        if any(marker in key_text for marker in _NARRATIVE_SKIP_KEY_MARKERS):
+            continue
+        text = " ".join(str(value).split()).strip()
+        if len(text) < _NARRATIVE_MIN_CHARS or _is_pure_numeric_cell(text):
+            continue
+        # 去掉字段名里的 [YYYYMMDD] 后缀，便于阅读。
+        label = re.sub(r"\[\d{8}\]$", "", key_text)
+        parts.append(f"{label}：{text}")
+    narrative = "；".join(parts)
+    return narrative[:max_chars]
+
+
 def _row_display_chunk(row: Mapping[str, Any], *, max_fields: int = 8) -> str:
     chunks: list[str] = []
     for key, value in row.items():
@@ -970,6 +1010,9 @@ def _structured_tool_evidence(tool_id: str, data: Mapping[str, Any]) -> list[Evi
             }
         )
     readable = bool(display_text) and not display_text.startswith(("{", "["))
+    narrative = ""
+    if tool_id in _IWENCAI_FACT_QUERY_TOOL_IDS and datas:
+        narrative = _extract_narrative_from_row(datas[0])
     preview_table = _preview_table_from_datas(
         payload.get("datas") or data.get("datas"),
         query=str(payload.get("query") or data.get("query") or ""),
@@ -992,6 +1035,8 @@ def _structured_tool_evidence(tool_id: str, data: Mapping[str, Any]) -> list[Evi
         "displayable": readable,
         "facts": facts,
     }
+    if narrative:
+        metadata["narrative"] = narrative
     if preview_table is not None:
         metadata["preview_table"] = preview_table
     return [
