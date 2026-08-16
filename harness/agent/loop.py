@@ -369,6 +369,68 @@ class Agent:
             )
             if self._published:
                 return "completed"
+        if not self._published:
+            await self.inject("必须调用 submit_answer 才能结束本轮。", source="plugin")
+            extra = _MAX_STEPS + 1
+            await self._store.append(
+                self.session_id,
+                EventDraft(
+                    event_type="step/start",
+                    turn=turn,
+                    step=extra,
+                    run_id=run_id,
+                    data={"step": extra, "turn": turn},
+                ),
+            )
+            try:
+                assembled = await self._model_step(turn=turn, step=extra, run_id=run_id)
+            except (InvariantError, LlmError):
+                return "error"
+            await self._store.append(
+                self.session_id,
+                EventDraft(
+                    event_type="assistant/message",
+                    turn=turn,
+                    step=extra,
+                    run_id=run_id,
+                    surface_op="append",
+                    data={
+                        "content": assembled.content,
+                        "tool_calls": [
+                            {
+                                "call_id": call.call_id,
+                                "name": call.name,
+                                "arguments": call.arguments,
+                            }
+                            for call in assembled.tool_calls
+                        ],
+                    },
+                ),
+            )
+            if assembled.tool_calls:
+                runtime = self._bound_runtime(turn, run_id)
+                await execute_tool_calls(
+                    store=self._store,
+                    session_id=self.session_id,
+                    runtime=runtime,
+                    calls=assembled.tool_calls,
+                    turn=turn,
+                    step=extra,
+                    run_id=run_id,
+                    abort=self._abort,
+                )
+            await self._store.append(
+                self.session_id,
+                EventDraft(
+                    event_type="step/end",
+                    turn=turn,
+                    step=extra,
+                    run_id=run_id,
+                    data={"step": extra, "turn": turn},
+                ),
+            )
+            if self._published:
+                return "completed"
         return "error"
 
     async def _model_step(self, *, turn: int, step: int, run_id: str):

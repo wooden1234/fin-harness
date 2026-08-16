@@ -45,6 +45,15 @@ def tool_family(name: str) -> str:
     return "tool"
 
 
+def sse_cursor_after_completed_turns(events: Iterable[SessionEvent]) -> int:
+    """SSE 从上一轮 ``turn/end`` 之后开始，避免把已发布答案重放进新气泡。"""
+    cursor = 0
+    for event in events:
+        if event.event_type == "turn/end":
+            cursor = event.seq
+    return cursor
+
+
 def project_session_event(event: SessionEvent) -> list[dict[str, Any]]:
     if event.event_type == "tool/call":
         name = str(event.data.get("name") or "")

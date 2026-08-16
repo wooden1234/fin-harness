@@ -29,7 +29,7 @@ from app.services.persistence.outbox_service import OutboxService
 from harness.agent.result import RunResult
 from harness.approval.service import pending_approvals
 from harness.contracts.errors import AgentBusyError, ApprovalError
-from harness.projection.sse import project_session_event
+from harness.projection.sse import project_session_event, sse_cursor_after_completed_turns
 from harness.runtime import product_manager
 
 router = APIRouter(prefix="/agent", tags=["agent"])
@@ -129,7 +129,8 @@ async def _stream_agent(
     memory_action,
     started: float,
 ) -> Any:
-    after_seq = 0
+    existing = await store.load_events(agent.session_id)
+    after_seq = sse_cursor_after_completed_turns(existing)
     try:
         while not run_task.done():
             events = await store.wait_events(agent.session_id, after_seq=after_seq, timeout=0.2)

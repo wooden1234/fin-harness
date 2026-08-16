@@ -8,7 +8,7 @@ from harness.compaction.policy import CompactPolicy
 from harness.finalization.submit import execute_submit_answer
 from harness.llm.deepseek import to_langchain_messages
 from harness.llm.fake import FakeLlmAdapter, submit_turn, tool_turn
-from harness.projection.sse import project_session_event
+from harness.projection.sse import project_session_event, sse_cursor_after_completed_turns
 from harness.session.store import InMemorySessionStore, assert_contiguous
 from harness.session.surface import derive_messages, messages_for_llm, public_sse_events
 from harness.session.types import EventDraft
@@ -226,3 +226,57 @@ def test_tool_call_result_pairing_helper():
     calls = [{"call_id": "a"}, {"call_id": "b"}]
     results = [{"call_id": "a"}, {"call_id": "b"}]
     assert [item["call_id"] for item in calls] == [item["call_id"] for item in results]
+
+
+def test_parse_arguments_keeps_first_object_when_concatenated():
+    from harness.tools.scheduler import _parse_arguments
+
+    parsed = _parse_arguments(
+        '{"query": "永鼎股份2026年半年度业绩预告 净利润"}{"query": "永鼎股份2026年半年度净利润预计"}'
+    )
+    assert parsed == {"query": "永鼎股份2026年半年度业绩预告 净利润"}
+
+
+@pytest.mark.asyncio
+async def test_sse_cursor_does_not_replay_prior_published_answer():
+    store = InMemorySessionStore()
+    header = await store.create(tenant_id="t", user_id="1")
+    await store.append(
+        header.session_id,
+        EventDraft(event_type="turn/start", turn=1, run_id="r1", data={"turn": 1}),
+    )
+    await store.append(
+        header.session_id,
+        EventDraft(
+            event_type="answer/published",
+            turn=1,
+            run_id="r1",
+            data={"markdown": "永鼎股份预告净利润 5 亿至 7 亿"},
+        ),
+    )
+    await store.append(
+        header.session_id,
+        EventDraft(event_type="turn/end", turn=1, run_id="r1", data={"reason": "completed"}),
+    )
+    await store.append(
+        header.session_id,
+        EventDraft(event_type="turn/start", turn=2, run_id="r2", data={"turn": 2}),
+    )
+    await store.append(
+        header.session_id,
+        EventDraft(
+            event_type="answer/published",
+            turn=2,
+            run_id="r2",
+            data={"markdown": "抱歉，天气查询服务暂时不可用"},
+        ),
+    )
+    events = await store.load_events(header.session_id)
+    cursor = sse_cursor_after_completed_turns(events)
+    payloads = [
+        payload
+        for event in events
+        if event.seq > cursor
+        for payload in project_session_event(event)
+    ]
+    assert payloads == [{"type": "token", "content": "抱歉，天气查询服务暂时不可用"}]

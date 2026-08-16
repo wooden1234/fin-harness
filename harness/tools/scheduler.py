@@ -30,8 +30,12 @@ class SchedulerOutcome:
 
 
 def _parse_arguments(raw: str) -> dict[str, Any] | None:
+    text = str(raw or "").strip()
+    if not text:
+        return {}
+    decoder = json.JSONDecoder()
     try:
-        parsed = json.loads(raw or "{}")
+        parsed, _end = decoder.raw_decode(text)
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None

@@ -200,11 +200,7 @@ def _normalize_iwencai_payload(result: dict[str, Any]) -> dict[str, Any]:
     existing_facts = [item for item in list(data.get("facts") or []) if isinstance(item, dict)]
     normalized["facts"] = existing_facts + facts
     normalized["unmapped_rows"] = unmapped_rows
-    normalized["coverage"] = {
-        "entities": sorted({str(item.get("entity") or "") for item in facts if item.get("entity")}),
-        "metrics": sorted({str(item.get("metric") or "") for item in facts if item.get("metric")}),
-        "periods": sorted({str(item.get("fiscal_period") or "") for item in facts if item.get("fiscal_period")}),
-    }
+    normalized.pop("coverage", None)
     payload["data"] = normalized
     return payload
 _MARKET_SKILLS = frozenset(
