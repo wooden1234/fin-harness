@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Mapping
 
 from skills.loader import list_skill_catalog
 
@@ -33,6 +34,11 @@ TOOL_DISCIPLINE_SECTION = (
     "禁止把金融数字写进 direct_answer。"
 )
 
+MEMORY_TOOL_SECTION = (
+    "用户明确说请记住、以后默认、改成或忘记某项回答偏好时，调用 memory_write 或 memory_delete。"
+    "不要每轮先调这些工具。key 含糊时用 submit_answer 向用户确认，不要猜测删除哪一条。"
+)
+
 
 @dataclass(frozen=True, slots=True)
 class PromptSection:
@@ -53,10 +59,43 @@ def skill_catalog_text() -> str:
     return "\n".join(lines)
 
 
+def _preference_lines(values: Mapping[str, Any]) -> str:
+    return "\n".join(f"- {key}={value}" for key, value in sorted(values.items()))
+
+
+def preference_section(
+    preferences: Mapping[str, Any] | None = None,
+    turn_overrides: Mapping[str, Any] | None = None,
+) -> PromptSection | None:
+    """长期偏好与本轮覆盖；两者都空则不贡献 section。"""
+    prefs = {key: value for key, value in dict(preferences or {}).items() if value is not None}
+    overrides = {
+        key: value for key, value in dict(turn_overrides or {}).items() if value is not None
+    }
+    blocks: list[str] = []
+    if prefs:
+        blocks.append(
+            "[用户长期偏好]\n"
+            f"{_preference_lines(prefs)}\n"
+            "仅在当前请求未明确指定时参考长期偏好；当前轮用户要求优先。"
+            "长期偏好中的语言与详略覆盖身份段的默认中文与简洁设定。"
+        )
+    if overrides:
+        blocks.append(
+            "[本轮临时要求]\n"
+            f"{_preference_lines(overrides)}\n"
+            "这些要求只在当前轮生效，并覆盖冲突的长期偏好。"
+        )
+    if not blocks:
+        return None
+    return PromptSection("user_preferences", 25, "\n\n".join(blocks))
+
+
 def default_sections() -> tuple[PromptSection, ...]:
     return (
         PromptSection("identity", 10, IDENTITY_SECTION),
         PromptSection("compliance", 20, COMPLIANCE_SECTION),
         PromptSection("tool_discipline", 30, TOOL_DISCIPLINE_SECTION),
+        PromptSection("memory_tools", 32, MEMORY_TOOL_SECTION),
         PromptSection("skill_catalog", 40, skill_catalog_text()),
     )

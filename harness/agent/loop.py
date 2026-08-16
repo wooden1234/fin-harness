@@ -16,6 +16,8 @@ from harness.contracts.errors import InvariantError, LlmError
 from harness.finalization.submit import execute_submit_answer
 from harness.llm.types import StreamAssembler
 from harness.prompt.assembler import assemble_system, header_snapshot
+from harness.prompt.preferences import load_preference_context
+from harness.prompt.sections import default_sections, preference_section
 from harness.session.invariant import assert_model_request_logged
 from harness.session.store import SessionStore
 from harness.session.surface import messages_for_llm, project_inbox
@@ -23,6 +25,7 @@ from harness.session.types import EventDraft, SessionEvent, new_id
 from harness.tools.runtime import ToolRuntime
 from harness.tools.scheduler import execute_tool_calls
 from harness.tools.skill import inject_skill_context
+from harness.tools.memory import memory_tool_definitions
 from harness.tools.todo import todo_write_definition
 from harness.tools.retry_policy import (
     USER_UNAVAILABLE_HINT,
@@ -251,7 +254,10 @@ class Agent:
                 )
             return result
 
-        extra = [todo_write_definition(self._store, self.session_id, turn=turn, run_id=run_id)]
+        extra = [
+            todo_write_definition(self._store, self.session_id, turn=turn, run_id=run_id),
+            *memory_tool_definitions(self._store, self.session_id, run_id=run_id),
+        ]
         return self._runtime.rebind_submit(_submit).with_extra(extra)
 
     async def _publish_unavailable(self, *, turn: int, run_id: str) -> None:
@@ -499,7 +505,17 @@ class Agent:
 
     async def _model_step(self, *, turn: int, step: int, run_id: str):
         events = await self._store.load_events(self.session_id)
-        system = assemble_system()
+        loaded = await load_preference_context(
+            store=self._store,
+            session_id=self.session_id,
+            events=events,
+            turn=turn,
+        )
+        sections = list(default_sections())
+        pref = preference_section(loaded.preferences, loaded.turn_overrides)
+        if pref is not None:
+            sections.append(pref)
+        system = assemble_system(sections)
         runtime = self._bound_runtime(turn, run_id)
         tools = runtime.openai_tools()
         header = header_snapshot(

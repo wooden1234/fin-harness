@@ -343,3 +343,93 @@ async def test_unknown_tool_tells_user_without_retry_loop():
     result = await agent.prompt("查一下")
     assert result.finish_reason == "completed"
     assert result.published_answer == USER_UNAVAILABLE_HINT
+
+
+@pytest.mark.asyncio
+async def test_request_header_includes_loaded_preferences(monkeypatch):
+    from types import SimpleNamespace
+
+    store = InMemorySessionStore()
+    header = await store.create(tenant_id="tenant-1", user_id="7")
+
+    async def fake_load(**_kwargs):
+        return SimpleNamespace(as_dict=lambda: {"response_language": "en-US"})
+
+    monkeypatch.setattr(
+        "app.services.memory.memory_loader.MemoryLoader.load_for_agent",
+        fake_load,
+    )
+    llm = FakeLlmAdapter([submit_turn("Hello.")])
+    agent = Agent(header.session_id, store, llm, runtime=ToolRuntime.builtin(), owner_id="7")
+    result = await agent.prompt("hi")
+    assert result.finish_reason == "completed"
+    headers = [event for event in result.events if event.event_type == "request/header"]
+    assert "[用户长期偏好]" in headers[0].data["system"]
+    assert "response_language=en-US" in headers[0].data["system"]
+    assert llm.requests[0]["system"] == headers[0].data["system"]
+
+
+@pytest.mark.asyncio
+async def test_memory_write_is_visible_in_next_step_system(monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    store = InMemorySessionStore()
+    header = await store.create(tenant_id="tenant-1", user_id="7")
+    prefs: dict[str, str] = {}
+
+    async def fake_load(**_kwargs):
+        return SimpleNamespace(as_dict=lambda: dict(prefs))
+
+    async def fake_create(**kwargs):
+        prefs[str(kwargs["memory_key"])] = str(kwargs["value"])
+        return SimpleNamespace(version=1)
+
+    monkeypatch.setattr(
+        "app.services.memory.memory_loader.MemoryLoader.load_for_agent",
+        fake_load,
+    )
+    monkeypatch.setattr(
+        "app.services.memory.memory_service.MemoryService.create",
+        fake_create,
+    )
+    llm = FakeLlmAdapter(
+        [
+            tool_turn(
+                "memory_write",
+                json.dumps({"memory_key": "response_language", "value": "en-US"}),
+                call_id="call-mem",
+            ),
+            submit_turn("Saved."),
+        ]
+    )
+    agent = Agent(header.session_id, store, llm, runtime=ToolRuntime.builtin(), owner_id="7")
+    result = await agent.prompt("请记住以后用英文回答")
+    assert result.finish_reason == "completed"
+    headers = [event for event in result.events if event.event_type == "request/header"]
+    assert "response_language=en-US" not in headers[0].data["system"]
+    assert "[用户长期偏好]" in headers[1].data["system"]
+    assert "response_language=en-US" in headers[1].data["system"]
+
+
+@pytest.mark.asyncio
+async def test_turn_override_is_injected_without_long_term_memory(monkeypatch):
+    from types import SimpleNamespace
+
+    store = InMemorySessionStore()
+    header = await store.create(tenant_id="tenant-1", user_id="7")
+
+    async def fake_load(**_kwargs):
+        return SimpleNamespace(as_dict=lambda: {})
+
+    monkeypatch.setattr(
+        "app.services.memory.memory_loader.MemoryLoader.load_for_agent",
+        fake_load,
+    )
+    llm = FakeLlmAdapter([submit_turn("Hello.")])
+    agent = Agent(header.session_id, store, llm, runtime=ToolRuntime.builtin(), owner_id="7")
+    result = await agent.prompt("这次请用英文回答")
+    assert result.finish_reason == "completed"
+    headers = [event for event in result.events if event.event_type == "request/header"]
+    assert "[本轮临时要求]" in headers[0].data["system"]
+    assert "response_language=en-US" in headers[0].data["system"]

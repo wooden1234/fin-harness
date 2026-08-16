@@ -28,6 +28,10 @@ DSH 无工具即可 `turn/end`。fin-agent 必须调用 `submit_answer`：闲聊
 
 `iwencai.*` 与财务事实工具 `requires_human_approval=True`。决策先落盘再执行。无人审批 fail-closed。迟到/重复 409 或幂等忽略。崩溃且已批准未出 result：合成 `cancelled_after_approval`，不再执行 handler。
 
+## 长期偏好
+
+每步 `assemble_system` 注入 `user_preferences` section（MemoryLoader + Redis Cache-Aside）。Loader 失败则空段，不阻断 loop。本轮「这次/本次」覆盖冲突 key。显式「请记住 / 改成 / 忘记」走 `memory_write` / `memory_delete`；暗示提取仍回答后出盒。不把读做成工具，不做情景 `memory_search`。
+
 ## Compaction
 
 窗口 `COMPACTION_CONTEXT_WINDOW`（默认 65536）。阈值 `floor(window×0.8)`，尾部保留 `floor(window×0.16)`。先裁过大 tool/result，再事务式 summary。不拆 tool pair。overflow 最多重试 1 次。
