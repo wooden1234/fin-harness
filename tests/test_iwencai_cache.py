@@ -59,6 +59,38 @@ async def test_finance_and_usstock_tools_use_cached_skill(monkeypatch) -> None:
     assert usstock["ok"] is True
 
 
+def test_compose_iwencai_query_batches_entities_like_sql_in():
+    assert iwencai_tools.compose_iwencai_query(
+        "2026半年报净利润 毛利率 光纤光缆收入",
+        ["永鼎股份", "中天科技", "亨通光电"],
+    ) == "永鼎股份、中天科技、亨通光电 2026半年报净利润 毛利率 光纤光缆收入"
+    assert iwencai_tools.compose_iwencai_query(
+        "永鼎股份、中天科技、亨通光电 净利润",
+        ["永鼎股份", "中天科技", "亨通光电"],
+    ) == "永鼎股份、中天科技、亨通光电 净利润"
+
+
+@pytest.mark.asyncio
+async def test_finance_tool_sends_one_batched_query(monkeypatch) -> None:
+    seen: list[str] = []
+
+    async def fake_cached(skill_id, *, query, **kwargs):
+        seen.append(query)
+        return {"ok": True, "data": {"datas": []}}
+
+    monkeypatch.setattr(iwencai_tools, "_run_cached_skill", fake_cached)
+    await iwencai_tools.query_iwencai_finance.ainvoke(
+        {
+            "query": "2026半年报净利润 毛利率",
+            "entities": ["永鼎股份", "中天科技", "亨通光电"],
+            "page": 1,
+            "limit": 10,
+            "call_type": "normal",
+        }
+    )
+    assert seen == ["永鼎股份、中天科技、亨通光电 2026半年报净利润 毛利率"]
+
+
 @pytest.mark.asyncio
 async def test_retry_bypasses_cache(monkeypatch) -> None:
     reset_cache_metrics()

@@ -280,3 +280,66 @@ async def test_sse_cursor_does_not_replay_prior_published_answer():
         for payload in project_session_event(event)
     ]
     assert payloads == [{"type": "token", "content": "抱歉，天气查询服务暂时不可用"}]
+
+
+def _failing_runtime() -> tuple[ToolRuntime, list[int]]:
+    hits = [0]
+
+    async def _fail(_arguments: dict) -> dict:
+        hits[0] += 1
+        return {"ok": False, "error": "empty_result"}
+
+    lookup = ToolDefinition(
+        tool_id="lookup.fail",
+        name="lookup_fail",
+        description="always fails",
+        handler=_fail,
+        openai_schema=function_schema("lookup_fail", "always fails"),
+        is_concurrency_safe=True,
+    )
+    return ToolRuntime((skill_definition(), submit_answer_definition(), lookup)), hits
+
+
+@pytest.mark.asyncio
+async def test_same_tool_retry_once_then_tells_user():
+    from harness.tools.retry_policy import USER_UNAVAILABLE_HINT
+
+    store = InMemorySessionStore()
+    header = await store.create(tenant_id="t", user_id="1")
+    runtime, hits = _failing_runtime()
+    llm = FakeLlmAdapter(
+        [
+            tool_turn("lookup_fail", "{}", call_id="c1"),
+            tool_turn("lookup_fail", "{}", call_id="c2"),
+            tool_turn("lookup_fail", "{}", call_id="c3"),
+        ]
+    )
+    agent = Agent(header.session_id, store, llm, runtime=runtime, owner_id="1")
+    result = await agent.prompt("查一下")
+    assert hits[0] == 2
+    assert result.finish_reason == "completed"
+    assert result.published_answer == USER_UNAVAILABLE_HINT
+    errors = [
+        event.data.get("error")
+        for event in result.events
+        if event.event_type == "tool/result"
+    ]
+    contents = [
+        str(event.data.get("content") or "")
+        for event in result.events
+        if event.event_type == "tool/result"
+    ]
+    assert any("retry_exhausted" in item for item in contents + [str(errors)])
+
+
+@pytest.mark.asyncio
+async def test_unknown_tool_tells_user_without_retry_loop():
+    from harness.tools.retry_policy import USER_UNAVAILABLE_HINT
+
+    store = InMemorySessionStore()
+    header = await store.create(tenant_id="t", user_id="1")
+    llm = FakeLlmAdapter([tool_turn("not_a_real_tool", "{}", call_id="missing")])
+    agent = Agent(header.session_id, store, llm, runtime=ToolRuntime.builtin(), owner_id="1")
+    result = await agent.prompt("查一下")
+    assert result.finish_reason == "completed"
+    assert result.published_answer == USER_UNAVAILABLE_HINT

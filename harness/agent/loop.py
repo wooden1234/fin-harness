@@ -24,8 +24,13 @@ from harness.tools.runtime import ToolRuntime
 from harness.tools.scheduler import execute_tool_calls
 from harness.tools.skill import inject_skill_context
 from harness.tools.todo import todo_write_definition
+from harness.tools.retry_policy import (
+    USER_UNAVAILABLE_HINT,
+    failed_twice_without_success,
+    should_publish_unavailable,
+)
 
-_MAX_STEPS = 8
+_MAX_STEPS = 30
 
 
 class Agent:
@@ -249,6 +254,55 @@ class Agent:
         extra = [todo_write_definition(self._store, self.session_id, turn=turn, run_id=run_id)]
         return self._runtime.rebind_submit(_submit).with_extra(extra)
 
+    async def _publish_unavailable(self, *, turn: int, run_id: str) -> None:
+        if self._published:
+            return
+        events = await self._store.load_events(self.session_id)
+        result = execute_submit_answer(
+            {
+                "mode": "direct",
+                "direct_answer": USER_UNAVAILABLE_HINT,
+                "follow_ups": [],
+            },
+            events=events,
+            turn=turn,
+        )
+        if not result.get("published"):
+            return
+        self._published = str(result.get("markdown") or USER_UNAVAILABLE_HINT)
+        self._follow_ups = list(result.get("follow_ups") or [])
+        await self._store.append(
+            self.session_id,
+            EventDraft(
+                event_type="answer/published",
+                turn=turn,
+                run_id=run_id,
+                data={
+                    "markdown": self._published,
+                    "follow_ups": self._follow_ups,
+                    "mode": "direct",
+                },
+            ),
+        )
+
+    async def _maybe_give_up_without_tools(
+        self,
+        *,
+        results: Sequence[Any],
+        turn: int,
+        run_id: str,
+    ) -> None:
+        events = await self._store.load_events(self.session_id)
+        if should_publish_unavailable(results, events=events, turn=turn):
+            await self._publish_unavailable(turn=turn, run_id=run_id)
+            return
+        if failed_twice_without_success(events, turn=turn):
+            await self.inject(
+                "同一工具已重试一次仍失败。若没有更匹配的工具或技能，请立即 "
+                f"submit_answer（mode=direct）回复用户：{USER_UNAVAILABLE_HINT}",
+                source="plugin",
+            )
+
     async def _steps(self, *, turn: int, run_id: str, start_step: int) -> str:
         reminded = False
         overflow_retries = 0
@@ -363,6 +417,11 @@ class Agent:
             for call, result in zip(assembled.tool_calls, outcome.results or []):
                 if call.name == "skill" and result.get("ok"):
                     await inject_skill_context(self._store, self.session_id, result, turn=turn, run_id=run_id)
+            await self._maybe_give_up_without_tools(
+                results=outcome.results or [],
+                turn=turn,
+                run_id=run_id,
+            )
             await self._store.append(
                 self.session_id,
                 EventDraft(event_type="step/end", turn=turn, step=step, run_id=run_id, data={"turn": turn, "step": step}),
@@ -409,7 +468,7 @@ class Agent:
             )
             if assembled.tool_calls:
                 runtime = self._bound_runtime(turn, run_id)
-                await execute_tool_calls(
+                extra_outcome = await execute_tool_calls(
                     store=self._store,
                     session_id=self.session_id,
                     runtime=runtime,
@@ -418,6 +477,11 @@ class Agent:
                     step=extra,
                     run_id=run_id,
                     abort=self._abort,
+                )
+                await self._maybe_give_up_without_tools(
+                    results=extra_outcome.results or [],
+                    turn=turn,
+                    run_id=run_id,
                 )
             await self._store.append(
                 self.session_id,

@@ -2,24 +2,22 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, AsyncIterator, Mapping, Sequence
 
 from harness.contracts.errors import LlmError
 from harness.llm.types import StreamChunk
+from harness.tools.arguments import coerce_tool_arguments
 
 
 def _parse_tool_args(raw: Any) -> dict[str, Any]:
-    if isinstance(raw, dict):
+    if isinstance(raw, dict) and "query" in raw and "_raw" not in raw:
         return raw
-    text = str(raw or "").strip()
-    if not text:
-        return {}
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return {"_raw": text}
-    return parsed if isinstance(parsed, dict) else {"_raw": parsed}
+    payloads = coerce_tool_arguments(raw)
+    if payloads:
+        return payloads[0]
+    if isinstance(raw, dict):
+        return {key: value for key, value in raw.items() if key != "_raw"}
+    return {}
 
 
 def to_langchain_messages(system: str, messages: Sequence[Mapping[str, Any]]) -> list[Any]:
@@ -89,7 +87,10 @@ class DeepSeekAdapter:
         lc_messages = to_langchain_messages(system, messages)
         llm = get_finance_llm()
         if tools:
-            llm = llm.bind_tools(tools)
+            try:
+                llm = llm.bind_tools(tools, parallel_tool_calls=True)
+            except TypeError:
+                llm = llm.bind_tools(tools)
         saw_tool_call = False
         try:
             async for chunk in llm.astream(lc_messages):

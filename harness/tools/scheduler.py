@@ -9,9 +9,16 @@ from typing import Any, Protocol, Sequence
 
 from harness.llm.types import ToolCallDraft
 from harness.session.types import EventDraft, SessionEvent, new_id
+from harness.tools.arguments import coerce_tool_arguments
 from harness.tools.definition import ToolDefinition
-from harness.tools.errors import MALFORMED_ARGUMENTS, error_result
+from harness.tools.errors import error_result
 from harness.tools.pipeline import ToolPipeline
+from harness.tools.retry_policy import (
+    allocate_tool_attempts,
+    retry_exhausted_result,
+    tool_attempt_counts,
+    unknown_tool_result,
+)
 
 
 class ToolResolver(Protocol):
@@ -30,15 +37,11 @@ class SchedulerOutcome:
 
 
 def _parse_arguments(raw: str) -> dict[str, Any] | None:
-    text = str(raw or "").strip()
-    if not text:
-        return {}
-    decoder = json.JSONDecoder()
-    try:
-        parsed, _end = decoder.raw_decode(text)
-    except json.JSONDecodeError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
+    payloads = coerce_tool_arguments(raw)
+    if not payloads:
+        text = str(raw or "").strip()
+        return {} if not text else None
+    return payloads[0]
 
 
 async def execute_tool_calls(
@@ -119,6 +122,12 @@ async def execute_tool_calls(
             name=approval_call.name,
         )
 
+    events = await store.load_events(session_id)
+    blocked_ids, _counts = allocate_tool_attempts(
+        calls,
+        prior_counts=tool_attempt_counts(events, turn=turn),
+    )
+
     async def _one(call: ToolCallDraft) -> dict[str, Any]:
         await store.append(
             session_id,
@@ -131,15 +140,14 @@ async def execute_tool_calls(
             ),
         )
         definition = runtime.resolve(call.name)
-        arguments = _parse_arguments(call.arguments)
         if abort.is_set():
             result = error_result("cancelled")
-        elif arguments is None:
-            result = error_result(MALFORMED_ARGUMENTS)
         elif definition is None:
-            result = error_result("unknown_tool", name=call.name)
+            result = unknown_tool_result(call.name)
+        elif call.call_id in blocked_ids:
+            result = retry_exhausted_result(call.name)
         else:
-            result = dict(await runtime.pipeline.run(definition, arguments))
+            result = dict(await runtime.pipeline.run(definition, call.arguments))
         content = result if isinstance(result.get("content"), str) else json.dumps(result, ensure_ascii=False)
         await store.append(
             session_id,
