@@ -9,10 +9,8 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 
-from agents.finance_agent.financial_query_agent import _run_financial_query_agent
 from agents.finance_agent.financial_query_agent.predefined.intent import (
     FinancialQueryIntent,
 )
@@ -135,6 +133,10 @@ async def query_finance_advanced(question: str) -> dict:
     Args:
         question: 需要聚合、筛选或比较的财务问题。
     """
+    from langchain_core.messages import HumanMessage
+
+    from agents.finance_agent.financial_query_agent import _run_financial_query_agent
+
     result = await _run_financial_query_agent(
         {
             "messages": [HumanMessage(content=question)],

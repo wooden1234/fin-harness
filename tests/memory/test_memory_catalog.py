@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agents.orchestrator.agent_registry import list_agent_specs
+from harness.memory_specs import list_memory_agent_specs
 from app.services.memory.memory_catalog import (
     MEMORY_KEYS,
     MEMORY_TYPES,
@@ -14,7 +14,7 @@ from app.services.memory.memory_catalog import (
 
 
 def test_default_catalog_and_agent_whitelists_are_valid():
-    validate_memory_configuration(list_agent_specs())
+    validate_memory_configuration(list_memory_agent_specs())
 
 
 def test_unknown_agent_memory_key_fails_fast():

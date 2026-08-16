@@ -88,4 +88,29 @@ def load_skill(name: str) -> SkillDocument:
     )
 
 
-__all__ = ["SkillDocument", "load_skill"]
+@dataclass(frozen=True, slots=True)
+class SkillCatalogEntry:
+    name: str
+    description: str
+
+
+def list_skill_catalog() -> tuple[SkillCatalogEntry, ...]:
+    entries: list[SkillCatalogEntry] = []
+    for path in sorted(_PROJECT_SKILLS_ROOT.glob("*/SKILL.md")):
+        name = path.parent.name
+        if not _SKILL_NAME_RE.fullmatch(name):
+            continue
+        try:
+            document = load_skill(name)
+        except (FileNotFoundError, ValueError):
+            continue
+        description = ""
+        for line in document.instructions.splitlines():
+            if line.startswith("description:"):
+                description = line.split(":", 1)[1].strip().strip("\"'")
+                break
+        entries.append(SkillCatalogEntry(name=name, description=description))
+    return tuple(entries)
+
+
+__all__ = ["SkillCatalogEntry", "SkillDocument", "list_skill_catalog", "load_skill"]

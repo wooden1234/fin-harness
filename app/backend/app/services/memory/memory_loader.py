@@ -324,7 +324,7 @@ class MemoryLoader:
         audit_context: MemoryAuditContext | None = None,
     ) -> MemoryProjection:
         """按 Agent Registry 静态白名单加载结构化偏好。"""
-        from agents.orchestrator.agent_registry import get_agent_spec
+        from harness.memory_specs import get_agent_spec
 
         spec = get_agent_spec(agent_id)
         allowed = tuple(spec.memory_keys)
@@ -371,7 +371,7 @@ class MemoryLoader:
         audit_context: MemoryAuditContext | None = None,
     ) -> SemanticMemoryProjection:
         """按 Agent 类型白名单执行向量候选和 SQL 权威核验。"""
-        from agents.orchestrator.agent_registry import get_agent_spec
+        from harness.memory_specs import get_agent_spec
 
         trusted_tenant, trusted_user = _trusted_scope(tenant_id, user_id)
         if audit_context is not None:

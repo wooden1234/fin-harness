@@ -1,45 +1,14 @@
-"""Harness 统一运行入口。"""
+"""脚本入口：走 Agent loop，不再包装 LangGraph。"""
 
 from __future__ import annotations
 
-import asyncio
-import time
 from typing import Any
 
-from langchain_core.messages import HumanMessage
-
-from agents.checkpoint import make_thread_config
-from agents.orchestrator.graph import get_orchestrator_graph
-from agents.runtime_context import AgentRuntimeContext
+from harness.agent.manager import AgentManager
 from harness.context import RunContext, build_run_context
 from harness.policy import pre_check
-from app.core.config import settings
-
-
-def _runtime_context_from_run_context(
-    context: RunContext,
-    *,
-    conversation_id: str | int | None,
-    deadline_seconds: float | None = None,
-) -> AgentRuntimeContext:
-    """把 Harness 上下文转换为 LangGraph Runtime 上下文。"""
-    return AgentRuntimeContext(
-        tenant_id=context.tenant_id or "default",
-        user_id=context.user_id or "0",
-        conversation_id=(
-            str(conversation_id)
-            if conversation_id is not None
-            else context.conversation_id
-        ),
-        run_id=context.trace_id,
-        permissions=tuple(context.permissions),
-        deadline_monotonic=(
-            time.monotonic() + max(0.0, float(deadline_seconds))
-            if deadline_seconds is not None
-            else None
-        ),
-        max_concurrency=settings.AGENT_V2_MAX_CONCURRENCY,
-    )
+from harness.session.store import InMemorySessionStore
+from harness.tools.runtime import ToolRuntime
 
 
 async def run_agent(
@@ -47,48 +16,30 @@ async def run_agent(
     *,
     context: RunContext | None = None,
     conversation_id: str | int | None = None,
+    llm: Any | None = None,
 ) -> dict[str, Any]:
-    """运行现有主图，并把运行治理入口集中到 Harness。"""
     run_context = context or build_run_context(
         conversation_id=str(conversation_id) if conversation_id is not None else None
     )
     pre_check(run_context)
-
-    graph = get_orchestrator_graph()
-    runtime_context = _runtime_context_from_run_context(
-        run_context,
+    manager = AgentManager(
+        store=InMemorySessionStore(),
+        llm=llm,
+        runtime=ToolRuntime.product(),
+    )
+    agent = await manager.get(
+        tenant_id=run_context.tenant_id or "default",
+        user_id=str(run_context.user_id or "0"),
         conversation_id=conversation_id,
-        deadline_seconds=(
-            settings.AGENT_V2_COMPOUND_HARD_DEADLINE_SEC
-            + settings.AGENT_V2_FINALIZATION_GRACE_SEC
-        ),
     )
-    config = (
-        make_thread_config(
-            conversation_id,
-            user_id=run_context.user_id,
-            tenant_id=run_context.tenant_id,
-        )
-        if conversation_id is not None
-        else {
-            "configurable": {
-                "thread_id": f"{run_context.trace_id}:graph:v2",
-                "graph_version": "v2",
-            }
-        }
-    )
-    try:
-        async with asyncio.timeout(
-            settings.AGENT_V2_COMPOUND_HARD_DEADLINE_SEC
-            + settings.AGENT_V2_FINALIZATION_GRACE_SEC
-        ):
-            return await graph.ainvoke(
-                {"messages": [HumanMessage(content=query)]},
-                config,
-                context=runtime_context,
-            )
-    except (asyncio.CancelledError, TimeoutError):
-        raise
-    except Exception:
-        # V2 内部错误必须由图自身的 retry/fallback/clarify 策略收敛。
-        raise
+    result = await agent.prompt(query)
+    return {
+        "session_id": result.session_id,
+        "run_id": result.run_id,
+        "finish_reason": result.finish_reason,
+        "published_answer": result.published_answer,
+        "follow_ups": result.follow_ups,
+        "waiting_approval": result.waiting_approval,
+        "approval_id": result.approval_id,
+        "error": result.error,
+    }

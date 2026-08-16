@@ -91,6 +91,7 @@ Desktop.ini
 .cache/
 
 evals/
+archive/
 tests/*
 !tests/
 !tests/core/
@@ -99,6 +100,8 @@ tests/*
 !tests/memory/*.py
 !tests/orchestrator/
 !tests/orchestrator/*.py
+!tests/harness/
+!tests/harness/**/*.py
 !tests/retrieval/
 tests/retrieval/*
 !tests/retrieval/test_embedding_cache.py

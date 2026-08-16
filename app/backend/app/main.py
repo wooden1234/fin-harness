@@ -10,17 +10,16 @@ load_dotenv(_PROJECT_ROOT / ".env", override=False)
 
 from fastapi import FastAPI, Response, status
 
-from agents.checkpoint import close_checkpoint, init_checkpoint
-from agents.orchestrator.agent_registry import list_agent_specs
-from agents.orchestrator.graph import reset_orchestrator_graph_cache
 from app.services.memory.memory_store import close_memory_store, init_memory_store
 from app.services.memory.memory_catalog import validate_memory_configuration
 from app.api import api_router
 from app.core.config import settings
 from app.core.logger import get_logger
-from app.core.middleware import LoggingMiddleware  # 需从 AssistGen 迁 middleware.py
+from app.core.middleware import LoggingMiddleware
 from app.core.redis_client import close_redis, init_redis, redis_health
 from fastapi.middleware.cors import CORSMiddleware
+from harness.memory_specs import list_memory_agent_specs
+from harness.runtime import reset_product_manager
 
 logger = get_logger(service="main")
 
@@ -29,18 +28,15 @@ logger = get_logger(service="main")
 async def lifespan(app: FastAPI):
     logger.info("fin-agent-platform 启动中")
     logger.info(f"环境: {settings.APP_ENV}")
-    reset_orchestrator_graph_cache()
-    validate_memory_configuration(list_agent_specs())
+    validate_memory_configuration(list_memory_agent_specs())
     try:
-        await init_checkpoint()
         await init_memory_store()
         await init_redis()
         yield
     finally:
         await close_redis()
-        await close_checkpoint()
         await close_memory_store()
-        reset_orchestrator_graph_cache()
+        reset_product_manager()
         logger.info("fin-agent-platform 正在关闭")
 
 
