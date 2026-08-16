@@ -1,59 +1,7 @@
-"""从业务消息重建 LangGraph checkpoint。"""
-
-from __future__ import annotations
-
-from sqlalchemy import select
-from langchain_core.messages import AIMessage, HumanMessage
-
-from agents.checkpoint import delete_thread_checkpoint
-from app.core.database import AsyncSessionLocal
-from app.models.persistence.message import Message
-from app.models.identity.conversation import Conversation
+"""LangGraph checkpoint 重建已废弃。"""
 
 
 class CheckpointRebuildService:
     @staticmethod
-    async def rebuild_if_missing(
-        *,
-        conversation_id: int,
-        user_id: int,
-        tenant_id: str = "default",
-        thread_config: dict,
-        graph=None,
-        exclude_run_id: str | None = None,
-    ) -> bool:
-        """checkpoint 缺失时用历史消息恢复；返回是否实际重建。"""
-        if graph is None:
-            from agents.orchestrator.graph import get_orchestrator_graph
-
-            graph = get_orchestrator_graph(with_checkpointer=True)
-        current = await graph.aget_state(thread_config)
-        if current is not None and (current.values or {}).get("messages"):
-            return False
-
-        async with AsyncSessionLocal() as db:
-            stmt = select(Message).where(
-                Message.conversation_id == conversation_id,
-                Conversation.id == Message.conversation_id,
-                Conversation.user_id == user_id,
-                Conversation.tenant_id == tenant_id,
-            )
-            if exclude_run_id:
-                stmt = stmt.where(Message.run_id != exclude_run_id)
-            stmt = stmt.order_by(Message.sequence_no, Message.id)
-            rows = (await db.execute(stmt)).scalars().all()
-
-        messages = []
-        for row in rows:
-            if row.sender == "user":
-                messages.append(HumanMessage(content=row.content))
-            elif row.sender == "assistant":
-                messages.append(AIMessage(content=row.content))
-        if not messages:
-            return False
-
-        await delete_thread_checkpoint(
-            conversation_id, user_id=user_id, tenant_id=tenant_id
-        )
-        await graph.aupdate_state(thread_config, {"messages": messages})
-        return True
+    async def rebuild_if_missing(**_kwargs) -> bool:
+        return False

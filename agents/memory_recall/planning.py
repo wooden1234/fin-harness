@@ -4,24 +4,23 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from typing import Any
+from typing import Any, Mapping
 
 from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
-from agents.orchestrator.agent_registry import get_agent_spec
-from agents.orchestrator.state import OrchestratorState
 from agents.runtime_context import AgentRuntimeContext
 from app.core.logger import get_logger
 from app.core.config import settings
 from app.services.memory.memory_command import extract_turn_preferences
 from app.services.memory.memory_audit import MemoryAuditContext
 from app.services.memory.memory_loader import MemoryLoader
+from harness.memory_specs import get_agent_spec
 
 logger = get_logger(service="memory_planning")
 
 
-def _latest_query(state: OrchestratorState) -> str:
+def _latest_query(state: Mapping[str, Any]) -> str:
     for message in reversed(list(state.get("messages") or [])):
         if isinstance(message, HumanMessage):
             return str(message.content)
@@ -29,7 +28,7 @@ def _latest_query(state: OrchestratorState) -> str:
 
 
 async def memory_plan_node(
-    state: OrchestratorState,
+    state: Mapping[str, Any],
 ) -> dict[str, Any]:
     """根据已验证 TaskPlan 为每个任务生成静态记忆需求。"""
     plan = state.get("task_plan")
@@ -74,7 +73,7 @@ def _requirement_signature(
 
 
 async def load_task_memories_node(
-    state: OrchestratorState,
+    state: Mapping[str, Any],
     runtime: Runtime[AgentRuntimeContext] | None = None,
 ) -> dict[str, Any]:
     """集中加载任务记忆；相同白名单及 replan 任务复用既有投影。"""
