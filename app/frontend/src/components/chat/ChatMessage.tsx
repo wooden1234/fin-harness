@@ -5,9 +5,9 @@ import remarkGfm from 'remark-gfm'
 import type { Message } from '@/stores/useChatStore'
 import { useChatStore } from '@/stores/useChatStore'
 import type { Citation } from '@/types/api'
-import type { AgentStepDetail } from '@/types/agentSteps'
+import type { AgentStep, AgentTodo } from '@/types/agentSteps'
 import { citationFaviconUrl, citationHostname } from '@/utils/citations'
-import { StepDetailCard } from './StepDetailCard'
+import { AgentStepsPanel } from './AgentStepsPanel'
 import { AnswerChart } from './AnswerChart'
 import { FollowUpChips } from './FollowUpChips'
 
@@ -15,7 +15,6 @@ import { FollowUpChips } from './FollowUpChips'
 const MATERIAL_NOTES_SECTION_RE = /\n*###\s*资料说明\s*\n[\s\S]*$/
 /** 历史消息里可能残留的 [1][2] 角标，展示时剥离。 */
 const INLINE_CITATION_MARKERS_RE = /\[\d+\]/g
-const DATA_SOURCE_CATEGORIES = new Set(['weather', 'market', 'web', 'research', 'financial', 'knowledge'])
 
 function displayAssistantContent(content: string): string {
   return content
@@ -60,6 +59,10 @@ export function ChatMessage({
   message,
   onFollowUp,
   followUpDisabled,
+  liveSteps,
+  liveTodos,
+  isLiveGenerating = false,
+  answerStarted = false,
 }: {
   message: Message
   onFollowUp?: (
@@ -67,39 +70,20 @@ export function ChatMessage({
     options?: { attachmentId?: string; imagePreviewUrl?: string },
   ) => void
   followUpDisabled?: boolean
+  liveSteps?: AgentStep[]
+  liveTodos?: AgentTodo[]
+  isLiveGenerating?: boolean
+  answerStarted?: boolean
 }) {
   const isUser = message.role === 'user'
   const openSources = useChatStore((state) => state.openSources)
   const citations = message.citations
-  const todos = message.agentTodos ?? []
-  const steps = message.agentSteps ?? []
+  const todos = isLiveGenerating ? (liveTodos ?? []) : (message.agentTodos ?? [])
+  const steps = isLiveGenerating ? (liveSteps ?? []) : (message.agentSteps ?? [])
   const followUps = message.followUps ?? []
   const charts = message.charts ?? []
   const [lightboxOpen, setLightboxOpen] = useState(false)
-  const visibleSteps = steps.filter((step) => step.status !== 'error')
-  const dataSourceCount = visibleSteps.filter(
-    (step) => step.category !== undefined && DATA_SOURCE_CATEGORIES.has(step.category),
-  ).length
-  // 与过程面板一致：短题不摊开 todos，只保留步骤时间线。
-  const showTodosInDetails =
-    todos.length > 2 || dataSourceCount > 2
-  const timelineItems: Array<{
-    id: string
-    label: string
-    detail?: AgentStepDetail
-  }> = [
-    ...(showTodosInDetails
-      ? todos.map((todo) => ({ id: todo.id, label: todo.content }))
-      : []),
-    ...visibleSteps.map((step) => ({
-      id: step.id,
-      label: step.label,
-      detail: step.detail,
-    })),
-  ]
-  const hasAnalysisDetails = timelineItems.length > 0
-  const analysisSummary =
-    dataSourceCount > 0 ? `${dataSourceCount} 条资料` : timelineItems.length > 0 ? '快速推理' : ''
+  const hasAnalysisDetails = steps.length > 0 || todos.length > 0 || isLiveGenerating
 
   useEffect(() => {
     if (!lightboxOpen) return
@@ -128,19 +112,12 @@ export function ChatMessage({
         )}
 
         {!isUser && hasAnalysisDetails && (
-          <details className="mb-2 text-xs text-slate-500 dark:text-slate-400">
-            <summary className="cursor-pointer select-none hover:text-slate-700 dark:hover:text-slate-200">
-              已快速推理{analysisSummary ? ` · ${analysisSummary}` : ''}
-            </summary>
-            <ul className="mt-2 space-y-2 border-l border-slate-200 pl-3 dark:border-slate-700">
-              {timelineItems.map((item) => (
-                <li key={item.id}>
-                  <div>{item.label}</div>
-                  {item.detail && <StepDetailCard detail={item.detail} />}
-                </li>
-              ))}
-            </ul>
-          </details>
+          <AgentStepsPanel
+            steps={steps}
+            todos={todos}
+            isGenerating={isLiveGenerating}
+            answerStarted={answerStarted || !isLiveGenerating}
+          />
         )}
 
         {!isUser && citations && citations.length > 0 && (
@@ -169,23 +146,25 @@ export function ChatMessage({
           </button>
         ) : null}
 
-        <div
-          className={`text-[15px] leading-relaxed ${
-            isUser
-              ? 'bg-brand-navy text-white px-5 py-3 rounded-3xl rounded-tr-md'
-              : 'text-slate-800 dark:text-slate-200 prose prose-sm dark:prose-invert max-w-none'
-          }`}
-        >
-          {isUser ? (
-            message.content ? (
-              <div className="whitespace-pre-wrap">{message.content}</div>
-            ) : null
-          ) : (
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-              {displayAssistantContent(message.content)}
-            </ReactMarkdown>
-          )}
-        </div>
+        {(isUser || message.content) && (
+          <div
+            className={`text-[15px] leading-relaxed ${
+              isUser
+                ? 'bg-brand-navy text-white px-5 py-3 rounded-3xl rounded-tr-md'
+                : 'text-slate-800 dark:text-slate-200 prose prose-sm dark:prose-invert max-w-none'
+            }`}
+          >
+            {isUser ? (
+              message.content ? (
+                <div className="whitespace-pre-wrap">{message.content}</div>
+              ) : null
+            ) : (
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {displayAssistantContent(message.content)}
+              </ReactMarkdown>
+            )}
+          </div>
+        )}
 
         {!isUser &&
           charts.map((chart, index) => (

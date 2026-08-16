@@ -5,11 +5,12 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Iterable
 
+from harness.projection.step_detail import detail_from_tool_call, detail_from_tool_result
 from harness.session.types import SessionEvent
 
 _FAMILY_LABELS = {
     "weather": "天气数据",
-    "market": "问财数据",
+    "market": "金融查询",
     "web": "联网资料",
     "research": "研报与公告",
     "financial": "财务数据",
@@ -24,11 +25,11 @@ _HIDDEN_TOOLS = frozenset({"todo_write"})
 
 def tool_family(name: str) -> str:
     lowered = (name or "").lower()
-    if lowered.startswith("iwencai") or "finance-query" in lowered:
+    if "iwencai" in lowered or "finance-query" in lowered:
         return "market"
-    if lowered.startswith("weather"):
+    if "weather" in lowered:
         return "weather"
-    if lowered.startswith("web"):
+    if lowered.startswith("web") or "search_web" in lowered:
         return "web"
     if "pdf" in lowered or "research" in lowered:
         return "research"
@@ -62,16 +63,18 @@ def project_session_event(event: SessionEvent) -> list[dict[str, Any]]:
         family = tool_family(name)
         label = _FAMILY_LABELS.get(family, "资料")
         call_id = str(event.data.get("call_id") or event.seq)
-        return [
-            {
-                "type": "step",
-                "id": call_id,
-                "label": f"正在查询{label}…" if family != "answer" else "资料已就绪，正在整理答案…",
-                "status": "running",
-                "category": family,
-                "short_label": label,
-            }
-        ]
+        payload: dict[str, Any] = {
+            "type": "step",
+            "id": call_id,
+            "label": f"正在查询{label}…" if family != "answer" else "资料已就绪，正在整理答案…",
+            "status": "running",
+            "category": family,
+            "short_label": label,
+        }
+        detail = detail_from_tool_call(event.data.get("arguments"))
+        if detail:
+            payload["detail"] = detail
+        return [payload]
     if event.event_type == "tool/result":
         name = str(event.data.get("name") or "")
         if name in _HIDDEN_TOOLS:
@@ -80,16 +83,22 @@ def project_session_event(event: SessionEvent) -> list[dict[str, Any]]:
         label = _FAMILY_LABELS.get(family, "资料")
         call_id = str(event.data.get("call_id") or event.seq)
         ok = bool(event.data.get("ok", True))
-        return [
-            {
-                "type": "step",
-                "id": call_id,
-                "label": f"已取得{label}" if ok else f"查询{label}未取得有效结果",
-                "status": "done" if ok else "error",
-                "category": family,
-                "short_label": label,
-            }
-        ]
+        payload = {
+            "type": "step",
+            "id": call_id,
+            "label": label if ok else f"查询{label}未取得有效结果",
+            "status": "done" if ok else "error",
+            "category": family,
+            "short_label": label,
+        }
+        detail = detail_from_tool_result(
+            name=name,
+            content=event.data.get("content"),
+            ok=ok,
+        )
+        if detail:
+            payload["detail"] = detail
+        return [payload]
     if event.event_type == "todo/write":
         return [todo_snapshot_event(event.data.get("todos") or [])]
     if event.event_type == "approval/asked":

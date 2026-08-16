@@ -23,6 +23,7 @@ interface ChatState {
   activeConversationId: string | null
   messages: Message[]
   isGenerating: boolean
+  generationStartedAt: number | null
   agentSteps: AgentStep[]
   agentTodos: AgentTodo[]
   hitlPending: boolean
@@ -59,6 +60,7 @@ export const useChatStore = create<ChatState>((set) => ({
   activeConversationId: null,
   messages: [],
   isGenerating: false,
+  generationStartedAt: null,
   agentSteps: [],
   agentTodos: [],
   hitlPending: false,
@@ -75,7 +77,12 @@ export const useChatStore = create<ChatState>((set) => ({
     set((state) => ({
       messages: state.messages.map((msg) => (msg.id === id ? { ...msg, ...patch } : msg)),
     })),
-  setGenerating: (value) => set({ isGenerating: value }),
+  setGenerating: (value) =>
+    set(
+      value
+        ? { isGenerating: true, generationStartedAt: Date.now() }
+        : { isGenerating: false, generationStartedAt: null },
+    ),
   resetAgentSteps: () => set({ agentSteps: [] }),
   setAgentTodos: (agentTodos) => set({ agentTodos }),
   resetAgentTodos: () => set({ agentTodos: [] }),
@@ -125,6 +132,7 @@ export const useChatStore = create<ChatState>((set) => ({
       messages: [],
       activeConversationId: null,
       isGenerating: false,
+      generationStartedAt: null,
       agentSteps: [],
       agentTodos: [],
       hitlPending: false,

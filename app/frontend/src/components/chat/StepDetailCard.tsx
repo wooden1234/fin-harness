@@ -12,11 +12,8 @@ export function StepDetailCard({ detail }: { detail: AgentStepDetail }) {
   return (
     <div className="mt-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/50 px-3 py-2.5 space-y-2">
       {detail.query && (
-        <div>
-          <p className="text-[11px] text-slate-400 dark:text-slate-500 mb-1">查询</p>
-          <p className="text-xs text-slate-700 dark:text-slate-200 leading-relaxed">
-            {detail.query}
-          </p>
+        <div className="rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 px-3 py-2 text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+          {detail.query}
         </div>
       )}
       {detail.error && (
