@@ -82,10 +82,10 @@ class DeepSeekAdapter:
         tools: Sequence[Mapping[str, Any]],
         abort: Any,
     ) -> AsyncIterator[StreamChunk]:
-        from agents.llm import get_finance_llm
+        from agents.llm import get_faq_llm
 
         lc_messages = to_langchain_messages(system, messages)
-        llm = get_finance_llm()
+        llm = get_faq_llm()
         if tools:
             try:
                 llm = llm.bind_tools(tools, parallel_tool_calls=True)

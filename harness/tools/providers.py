@@ -81,6 +81,15 @@ async def _handle_calculation(arguments: dict[str, Any]) -> Mapping[str, Any]:
     return await run_calculation(arguments)
 
 
+async def _handle_analysis(arguments: dict[str, Any]) -> Mapping[str, Any]:
+    from capabilities.analysis import synthesize_answer
+
+    return await synthesize_answer(
+        question=str(arguments.get("question") or ""),
+        materials=arguments.get("materials") or [],
+    )
+
+
 def _iwencai_handler(tool_id: str):
     async def _handle(arguments: dict[str, Any]) -> Mapping[str, Any]:
         from capabilities.market import run_iwencai
@@ -99,6 +108,7 @@ _CAPABILITY_HANDLERS = {
     "knowledge.fact.lookup": _handle_fact,
     "finance.fact.lookup": _handle_fact,
     "calculation.run": _handle_calculation,
+    "finalign.analyze": _handle_analysis,
 }
 
 
@@ -129,7 +139,7 @@ def definition_from_registered(entry: Any) -> ToolDefinition:
         description=spec.description,
         handler=handler,
         openai_schema=schema,
-        is_concurrency_safe=bool(spec.read_only),
+        is_concurrency_safe=bool(spec.read_only) and spec.tool_id != "finalign.analyze",
         read_only=bool(spec.read_only),
         requires_human_approval=bool(spec.requires_human_approval),
         timeout_seconds=float(spec.timeout_seconds),

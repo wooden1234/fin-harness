@@ -5,32 +5,11 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, Iterable
 
-from harness.finalization.submit import SUBMIT_ANSWER_TOOL, execute_submit_answer
 from harness.tools.definition import ToolDefinition
-from harness.tools.errors import MALFORMED_ARGUMENTS, error_result
 from harness.tools.pipeline import ToolPipeline
 from harness.tools.providers import product_definitions
 from harness.tools.scheduler import ToolResolver
 from harness.tools.skill import skill_definition
-
-
-async def _execute_submit_answer(arguments: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(arguments, dict):
-        return error_result(MALFORMED_ARGUMENTS)
-    return {"ok": False, "error": "submit_unbound"}
-
-
-def submit_answer_definition() -> ToolDefinition:
-    return ToolDefinition(
-        tool_id="submit_answer",
-        name="submit_answer",
-        description="提交本轮对用户可见的最终回答。每一轮必须调用。",
-        handler=_execute_submit_answer,
-        openai_schema=dict(SUBMIT_ANSWER_TOOL),
-        is_concurrency_safe=False,
-        read_only=False,
-        timeout_seconds=5.0,
-    )
 
 
 class ToolRuntime(ToolResolver):
@@ -50,21 +29,30 @@ class ToolRuntime(ToolResolver):
 
     @classmethod
     def builtin(cls) -> "ToolRuntime":
-        return cls((skill_definition(), submit_answer_definition()))
+        return cls((skill_definition(),))
 
     @classmethod
     def product(cls) -> "ToolRuntime":
-        return cls((skill_definition(), submit_answer_definition(), *product_definitions()))
+        return cls((skill_definition(), *product_definitions()))
 
-    def rebind_submit(self, handler) -> "ToolRuntime":
+    def with_extra(self, extra: Iterable[ToolDefinition]) -> "ToolRuntime":
+        return ToolRuntime((*self._definitions, *extra), pipeline=self.pipeline)
+
+    def replace_handler(self, tool_id: str, handler) -> "ToolRuntime":
         definitions = tuple(
-            replace(item, handler=handler) if item.tool_id == "submit_answer" else item
+            replace(item, handler=handler) if item.tool_id == tool_id else item
             for item in self._definitions
         )
         return ToolRuntime(definitions, pipeline=self.pipeline)
 
-    def with_extra(self, extra: Iterable[ToolDefinition]) -> "ToolRuntime":
-        return ToolRuntime((*self._definitions, *extra), pipeline=self.pipeline)
+    def exclude(self, *tool_ids: str) -> "ToolRuntime":
+        drop = {str(item) for item in tool_ids}
+        definitions = tuple(
+            item
+            for item in self._definitions
+            if item.tool_id not in drop and item.name not in drop
+        )
+        return ToolRuntime(definitions, pipeline=self.pipeline)
 
     def resolve(self, name: str) -> ToolDefinition | None:
         return self._by_name.get(name) or self._by_id.get(name)

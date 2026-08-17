@@ -6,21 +6,21 @@ from collections import Counter
 from typing import Any, Mapping, Sequence
 
 from harness.session.types import SessionEvent
-from harness.tools.errors import error_result
+from harness.tools.errors import error_result, publishes_if_no_success
 
 MAX_ATTEMPTS_PER_TOOL = 2
-UNLIMITED_TOOLS = frozenset({"submit_answer", "todo_write"})
+UNLIMITED_TOOLS = frozenset({"todo_write"})
 USER_UNAVAILABLE_HINT = (
     "没有找到匹配的数据工具或技能，或查询已失败。请换个问法，或稍后再试。"
 )
 RETRY_EXHAUSTED_MESSAGE = (
     "同一工具本轮已调用过一次并重试过一次，不能再调用。"
-    "若没有更匹配的工具或技能，请立即 submit_answer（mode=direct）用下面原话回复用户："
+    "若没有更匹配的工具或技能，请立即用下面原话回复用户："
     f"{USER_UNAVAILABLE_HINT}"
 )
 UNKNOWN_TOOL_MESSAGE = (
     "没有名为该名称的工具或技能。"
-    "请立即 submit_answer（mode=direct）用下面原话回复用户："
+    "请立即用下面原话回复用户："
     f"{USER_UNAVAILABLE_HINT}"
 )
 
@@ -113,9 +113,8 @@ def should_publish_unavailable(
     events: Sequence[SessionEvent],
     turn: int,
 ) -> bool:
-    """未知工具，或同一工具重试耗尽且本轮没有成功的数据工具。"""
+    """未知工具或重试耗尽等 policy 类错误，且本轮没有成功的数据工具。"""
     items = [item for item in results if isinstance(item, Mapping)]
-    errors = {str(item.get("error") or "") for item in items}
-    if not (errors & {"retry_exhausted", "unknown_tool"}):
+    if not any(publishes_if_no_success(item) for item in items):
         return False
     return not turn_has_successful_data_tool(events, turn=turn)

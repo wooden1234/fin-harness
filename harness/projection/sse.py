@@ -16,6 +16,7 @@ _FAMILY_LABELS = {
     "financial": "财务数据",
     "knowledge": "知识库",
     "calculation": "受限计算",
+    "analysis": "综合分析",
     "skill": "技能说明",
     "answer": "整理答案",
 }
@@ -39,6 +40,8 @@ def tool_family(name: str) -> str:
         return "knowledge"
     if "calculat" in lowered:
         return "calculation"
+    if "finalign" in lowered:
+        return "analysis"
     if lowered == "skill":
         return "skill"
     if lowered == "submit_answer":
@@ -63,10 +66,16 @@ def project_session_event(event: SessionEvent) -> list[dict[str, Any]]:
         family = tool_family(name)
         label = _FAMILY_LABELS.get(family, "资料")
         call_id = str(event.data.get("call_id") or event.seq)
+        if family == "answer":
+            running_label = "资料已就绪，正在整理答案…"
+        elif family == "analysis":
+            running_label = "正在综合分析…"
+        else:
+            running_label = f"正在查询{label}…"
         payload: dict[str, Any] = {
             "type": "step",
             "id": call_id,
-            "label": f"正在查询{label}…" if family != "answer" else "资料已就绪，正在整理答案…",
+            "label": running_label,
             "status": "running",
             "category": family,
             "short_label": label,

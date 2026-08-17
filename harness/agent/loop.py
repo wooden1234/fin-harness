@@ -13,7 +13,7 @@ from harness.approval.service import validate_decision
 from harness.compaction.compact import maybe_compact
 from harness.compaction.policy import compact_limit, policy_from_settings
 from harness.contracts.errors import InvariantError, LlmError
-from harness.finalization.submit import execute_submit_answer
+from harness.finalization.submit import finalize_markdown
 from harness.llm.types import StreamAssembler
 from harness.prompt.assembler import assemble_system, header_snapshot
 from harness.prompt.preferences import load_preference_context
@@ -22,16 +22,15 @@ from harness.session.invariant import assert_model_request_logged
 from harness.session.store import SessionStore
 from harness.session.surface import messages_for_llm, project_inbox
 from harness.session.types import EventDraft, SessionEvent, new_id
+from harness.tools.analysis import TOOL_ID as FINALIGN_TOOL_ID, bind_finalign_analyze, finalign_is_ready
 from harness.tools.runtime import ToolRuntime
 from harness.tools.scheduler import execute_tool_calls
 from harness.tools.skill import inject_skill_context
 from harness.tools.memory import memory_tool_definitions
 from harness.tools.todo import todo_write_definition
-from harness.tools.retry_policy import (
-    USER_UNAVAILABLE_HINT,
-    failed_twice_without_success,
-    should_publish_unavailable,
-)
+from harness.tools.error_policy import decide_after_tools
+from harness.tools.errors import enrich_tool_result
+from harness.tools.retry_policy import USER_UNAVAILABLE_HINT
 
 _MAX_STEPS = 30
 
@@ -166,9 +165,11 @@ class Agent:
                 parsed = {}
             definition = runtime.resolve(str(asked.get("name") or ""))
             if definition is None:
-                result: dict[str, Any] = {"ok": False, "error": "unknown_tool"}
+                result = enrich_tool_result({"ok": False, "error": "unknown_tool"})
             else:
-                result = dict(await runtime.pipeline.run(definition, parsed if isinstance(parsed, dict) else {}))
+                result = enrich_tool_result(
+                    dict(await runtime.pipeline.run(definition, parsed if isinstance(parsed, dict) else {}))
+                )
             content = result.get("content")
             if not isinstance(content, str):
                 content = json.dumps(result, ensure_ascii=False)
@@ -186,6 +187,8 @@ class Agent:
                         "ok": bool(result.get("ok", True)),
                         "content": content,
                         "evidence_id": result.get("evidence_id"),
+                        "error": result.get("error"),
+                        "error_class": result.get("error_class"),
                     },
                 ),
             )
@@ -233,65 +236,39 @@ class Agent:
             )
 
     def _bound_runtime(self, turn: int, run_id: str) -> ToolRuntime:
-        async def _submit(arguments: dict[str, Any]) -> dict[str, Any]:
-            events = await self._store.load_events(self.session_id)
-            result = execute_submit_answer(arguments, events=events, turn=turn)
-            if result.get("published"):
-                self._published = str(result.get("markdown") or "")
-                self._follow_ups = list(result.get("follow_ups") or [])
-                await self._store.append(
-                    self.session_id,
-                    EventDraft(
-                        event_type="answer/published",
-                        turn=turn,
-                        run_id=run_id,
-                        data={
-                            "markdown": self._published,
-                            "follow_ups": self._follow_ups,
-                            "mode": result.get("mode"),
-                        },
-                    ),
-                )
-            return result
-
         extra = [
             todo_write_definition(self._store, self.session_id, turn=turn, run_id=run_id),
             *memory_tool_definitions(self._store, self.session_id, run_id=run_id),
         ]
-        return self._runtime.rebind_submit(_submit).with_extra(extra)
+        runtime = self._runtime.with_extra(extra)
+        if runtime.resolve(FINALIGN_TOOL_ID):
+            if finalign_is_ready():
+                runtime = runtime.replace_handler(
+                    FINALIGN_TOOL_ID,
+                    bind_finalign_analyze(self._store, self.session_id, turn=turn),
+                )
+            else:
+                runtime = runtime.exclude(FINALIGN_TOOL_ID, "finalign_analyze")
+        return runtime
 
-    async def _publish_unavailable(self, *, turn: int, run_id: str) -> None:
+    async def _publish(self, markdown: str, *, turn: int, run_id: str) -> None:
         if self._published:
             return
-        events = await self._store.load_events(self.session_id)
-        result = execute_submit_answer(
-            {
-                "mode": "direct",
-                "direct_answer": USER_UNAVAILABLE_HINT,
-                "follow_ups": [],
-            },
-            events=events,
-            turn=turn,
-        )
-        if not result.get("published"):
+        text = finalize_markdown(markdown)
+        if not text:
             return
-        self._published = str(result.get("markdown") or USER_UNAVAILABLE_HINT)
-        self._follow_ups = list(result.get("follow_ups") or [])
+        self._published = text
         await self._store.append(
             self.session_id,
             EventDraft(
                 event_type="answer/published",
                 turn=turn,
                 run_id=run_id,
-                data={
-                    "markdown": self._published,
-                    "follow_ups": self._follow_ups,
-                    "mode": "direct",
-                },
+                data={"markdown": self._published, "follow_ups": self._follow_ups},
             ),
         )
 
-    async def _maybe_give_up_without_tools(
+    async def _apply_tool_error_policy(
         self,
         *,
         results: Sequence[Any],
@@ -299,18 +276,14 @@ class Agent:
         run_id: str,
     ) -> None:
         events = await self._store.load_events(self.session_id)
-        if should_publish_unavailable(results, events=events, turn=turn):
-            await self._publish_unavailable(turn=turn, run_id=run_id)
+        decision = decide_after_tools(results, events=events, turn=turn)
+        if decision.action == "publish":
+            await self._publish(decision.text or USER_UNAVAILABLE_HINT, turn=turn, run_id=run_id)
             return
-        if failed_twice_without_success(events, turn=turn):
-            await self.inject(
-                "同一工具已重试一次仍失败。若没有更匹配的工具或技能，请立即 "
-                f"submit_answer（mode=direct）回复用户：{USER_UNAVAILABLE_HINT}",
-                source="plugin",
-            )
+        if decision.action == "inject" and decision.text:
+            await self.inject(decision.text, source="plugin")
 
     async def _steps(self, *, turn: int, run_id: str, start_step: int) -> str:
-        reminded = False
         overflow_retries = 0
         for step in range(start_step, _MAX_STEPS + 1):
             if self._abort.is_set():
@@ -397,11 +370,8 @@ class Agent:
                     self.session_id,
                     EventDraft(event_type="step/end", turn=turn, step=step, run_id=run_id, data={"turn": turn, "step": step}),
                 )
-                if not reminded:
-                    reminded = True
-                    await self.inject("必须调用 submit_answer 才能结束本轮。", source="plugin")
-                    continue
-                return "error"
+                await self._publish(assembled.content, turn=turn, run_id=run_id)
+                return "completed" if self._published else "error"
             runtime = self._bound_runtime(turn, run_id)
             outcome = await execute_tool_calls(
                 store=self._store,
@@ -423,7 +393,7 @@ class Agent:
             for call, result in zip(assembled.tool_calls, outcome.results or []):
                 if call.name == "skill" and result.get("ok"):
                     await inject_skill_context(self._store, self.session_id, result, turn=turn, run_id=run_id)
-            await self._maybe_give_up_without_tools(
+            await self._apply_tool_error_policy(
                 results=outcome.results or [],
                 turn=turn,
                 run_id=run_id,
@@ -431,73 +401,6 @@ class Agent:
             await self._store.append(
                 self.session_id,
                 EventDraft(event_type="step/end", turn=turn, step=step, run_id=run_id, data={"turn": turn, "step": step}),
-            )
-            if self._published:
-                return "completed"
-        if not self._published:
-            await self.inject("必须调用 submit_answer 才能结束本轮。", source="plugin")
-            extra = _MAX_STEPS + 1
-            await self._store.append(
-                self.session_id,
-                EventDraft(
-                    event_type="step/start",
-                    turn=turn,
-                    step=extra,
-                    run_id=run_id,
-                    data={"step": extra, "turn": turn},
-                ),
-            )
-            try:
-                assembled = await self._model_step(turn=turn, step=extra, run_id=run_id)
-            except (InvariantError, LlmError):
-                return "error"
-            await self._store.append(
-                self.session_id,
-                EventDraft(
-                    event_type="assistant/message",
-                    turn=turn,
-                    step=extra,
-                    run_id=run_id,
-                    surface_op="append",
-                    data={
-                        "content": assembled.content,
-                        "tool_calls": [
-                            {
-                                "call_id": call.call_id,
-                                "name": call.name,
-                                "arguments": call.arguments,
-                            }
-                            for call in assembled.tool_calls
-                        ],
-                    },
-                ),
-            )
-            if assembled.tool_calls:
-                runtime = self._bound_runtime(turn, run_id)
-                extra_outcome = await execute_tool_calls(
-                    store=self._store,
-                    session_id=self.session_id,
-                    runtime=runtime,
-                    calls=assembled.tool_calls,
-                    turn=turn,
-                    step=extra,
-                    run_id=run_id,
-                    abort=self._abort,
-                )
-                await self._maybe_give_up_without_tools(
-                    results=extra_outcome.results or [],
-                    turn=turn,
-                    run_id=run_id,
-                )
-            await self._store.append(
-                self.session_id,
-                EventDraft(
-                    event_type="step/end",
-                    turn=turn,
-                    step=extra,
-                    run_id=run_id,
-                    data={"step": extra, "turn": turn},
-                ),
             )
             if self._published:
                 return "completed"

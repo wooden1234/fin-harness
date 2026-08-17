@@ -11,7 +11,7 @@ from harness.llm.types import ToolCallDraft
 from harness.session.types import EventDraft, SessionEvent, new_id
 from harness.tools.arguments import coerce_tool_arguments
 from harness.tools.definition import ToolDefinition
-from harness.tools.errors import error_result
+from harness.tools.errors import enrich_tool_result, error_result
 from harness.tools.pipeline import ToolPipeline
 from harness.tools.retry_policy import (
     allocate_tool_attempts,
@@ -148,7 +148,10 @@ async def execute_tool_calls(
             result = retry_exhausted_result(call.name)
         else:
             result = dict(await runtime.pipeline.run(definition, call.arguments))
-        content = result if isinstance(result.get("content"), str) else json.dumps(result, ensure_ascii=False)
+        result = enrich_tool_result(result)
+        content = result.get("content")
+        if not isinstance(content, str):
+            content = json.dumps(result, ensure_ascii=False)
         await store.append(
             session_id,
             EventDraft(
@@ -163,6 +166,8 @@ async def execute_tool_calls(
                     "ok": bool(result.get("ok", True)),
                     "content": content if isinstance(content, str) else str(content),
                     "evidence_id": result.get("evidence_id"),
+                    "error": result.get("error"),
+                    "error_class": result.get("error_class"),
                 },
             ),
         )

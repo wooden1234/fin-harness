@@ -5,15 +5,14 @@ import pytest
 from harness.agent.loop import Agent
 from harness.compaction.compact import maybe_compact
 from harness.compaction.policy import CompactPolicy
-from harness.finalization.submit import execute_submit_answer
 from harness.llm.deepseek import to_langchain_messages
-from harness.llm.fake import FakeLlmAdapter, submit_turn, tool_turn
+from harness.llm.fake import FakeLlmAdapter, content_turn, tool_turn
 from harness.projection.sse import project_session_event, sse_cursor_after_completed_turns
 from harness.session.store import InMemorySessionStore, assert_contiguous
 from harness.session.surface import derive_messages, messages_for_llm, public_sse_events
 from harness.session.types import EventDraft
 from harness.tools.definition import ToolDefinition, function_schema
-from harness.tools.runtime import ToolRuntime, submit_answer_definition
+from harness.tools.runtime import ToolRuntime
 from harness.tools.skill import skill_definition
 
 
@@ -73,27 +72,17 @@ async def test_derive_messages_keeps_tool_calls():
     assert assistant.tool_calls[0]["id"] == "c1"
 
 
-def test_submit_answer_rejects_ungrounded_numbers():
-    result = execute_submit_answer(
-        {"mode": "direct", "direct_answer": "营收 100 元"},
-        events=[],
-        turn=1,
-    )
-    assert result["ok"] is False
-    assert result["error"] == "numbers_require_grounded"
-
-
-def test_submit_answer_grounded_requires_evidence():
-    result = execute_submit_answer(
-        {
-            "mode": "grounded",
-            "statements": [{"text": "营收 100 元", "evidence_ids": ["missing"]}],
-        },
-        events=[],
-        turn=1,
-    )
-    assert result["ok"] is False
-    assert result["error"] == "missing_or_unknown_evidence"
+@pytest.mark.asyncio
+async def test_numbers_publish_without_evidence_gate():
+    store = InMemorySessionStore()
+    header = await store.create(tenant_id="t", user_id="1")
+    llm = FakeLlmAdapter([content_turn("营收 100 元")])
+    agent = Agent(header.session_id, store, llm, runtime=ToolRuntime.builtin(), owner_id="1")
+    result = await agent.prompt("营收多少")
+    assert result.finish_reason == "completed"
+    assert result.published_answer == "营收 100 元"
+    published = [event for event in result.events if event.event_type == "answer/published"]
+    assert published
 
 
 def test_assistant_chunk_never_public():
@@ -133,7 +122,7 @@ def _approval_runtime() -> ToolRuntime:
         is_concurrency_safe=True,
         requires_human_approval=True,
     )
-    return ToolRuntime((skill_definition(), submit_answer_definition(), secret))
+    return ToolRuntime((skill_definition(), secret))
 
 
 @pytest.mark.asyncio
@@ -143,7 +132,7 @@ async def test_hitl_resume_keeps_tool_history_and_submits():
     llm = FakeLlmAdapter(
         [
             tool_turn("secret_lookup", "{}", call_id="call-secret"),
-            submit_turn("已完成查询。"),
+            content_turn("已完成查询。"),
         ]
     )
     agent = Agent(header.session_id, store, llm, runtime=_approval_runtime(), owner_id="1")
@@ -160,6 +149,7 @@ async def test_hitl_resume_keeps_tool_history_and_submits():
     events = await store.load_events(header.session_id)
     results = [event for event in events if event.event_type == "tool/result"]
     assert any(event.data.get("call_id") == "call-secret" for event in results)
+    assert any(event.data.get("evidence_id") == "ev-1" for event in results)
     history = llm.requests[-1]["messages"]
     assistant = next(item for item in history if item.get("role") == "assistant" and item.get("tool_calls"))
     assert assistant["tool_calls"][0]["name"] == "secret_lookup"
@@ -169,7 +159,7 @@ async def test_hitl_resume_keeps_tool_history_and_submits():
 async def test_chat_submit_without_tools():
     store = InMemorySessionStore()
     header = await store.create(tenant_id="t", user_id="1")
-    llm = FakeLlmAdapter([submit_turn("你好，我是小财。")])
+    llm = FakeLlmAdapter([content_turn("你好，我是小财。")])
     agent = Agent(header.session_id, store, llm, runtime=ToolRuntime.builtin(), owner_id="1")
     result = await agent.prompt("你好")
     assert result.finish_reason == "completed"
@@ -178,6 +168,48 @@ async def test_chat_submit_without_tools():
     chunks = [event for event in result.events if event.event_type == "assistant/chunk"]
     assert published
     assert all(event.visibility == "internal" for event in chunks)
+
+
+@pytest.mark.asyncio
+async def test_tool_result_keeps_evidence_id_when_answer_published():
+    async def _lookup(_arguments: dict) -> dict:
+        return {"ok": True, "content": "营收 100", "evidence_id": "ev-keep"}
+
+    lookup = ToolDefinition(
+        tool_id="lookup.ok",
+        name="lookup_ok",
+        description="ok",
+        handler=_lookup,
+        openai_schema=function_schema("lookup_ok", "ok"),
+        is_concurrency_safe=True,
+    )
+    store = InMemorySessionStore()
+    header = await store.create(tenant_id="t", user_id="1")
+    llm = FakeLlmAdapter(
+        [
+            tool_turn("lookup_ok", "{}", call_id="c1"),
+            content_turn("根据查询，营收 100 元。"),
+        ]
+    )
+    agent = Agent(
+        header.session_id,
+        store,
+        llm,
+        runtime=ToolRuntime((skill_definition(), lookup)),
+        owner_id="1",
+    )
+    result = await agent.prompt("查营收")
+    assert result.finish_reason == "completed"
+    assert result.published_answer == "根据查询，营收 100 元。"
+    results = [event for event in result.events if event.event_type == "tool/result"]
+    assert results[0].data.get("evidence_id") == "ev-keep"
+    tool_names = [
+        str((item.get("function") or item).get("name") or "")
+        for req in llm.requests
+        for item in req["tools"]
+        if isinstance(item, dict)
+    ]
+    assert "submit_answer" not in tool_names
 
 
 @pytest.mark.asyncio
@@ -297,7 +329,7 @@ def _failing_runtime() -> tuple[ToolRuntime, list[int]]:
         openai_schema=function_schema("lookup_fail", "always fails"),
         is_concurrency_safe=True,
     )
-    return ToolRuntime((skill_definition(), submit_answer_definition(), lookup)), hits
+    return ToolRuntime((skill_definition(), lookup)), hits
 
 
 @pytest.mark.asyncio
@@ -359,7 +391,7 @@ async def test_request_header_includes_loaded_preferences(monkeypatch):
         "app.services.memory.memory_loader.MemoryLoader.load_for_agent",
         fake_load,
     )
-    llm = FakeLlmAdapter([submit_turn("Hello.")])
+    llm = FakeLlmAdapter([content_turn("Hello.")])
     agent = Agent(header.session_id, store, llm, runtime=ToolRuntime.builtin(), owner_id="7")
     result = await agent.prompt("hi")
     assert result.finish_reason == "completed"
@@ -400,7 +432,7 @@ async def test_memory_write_is_visible_in_next_step_system(monkeypatch):
                 json.dumps({"memory_key": "response_language", "value": "en-US"}),
                 call_id="call-mem",
             ),
-            submit_turn("Saved."),
+            content_turn("Saved."),
         ]
     )
     agent = Agent(header.session_id, store, llm, runtime=ToolRuntime.builtin(), owner_id="7")
@@ -426,7 +458,7 @@ async def test_turn_override_is_injected_without_long_term_memory(monkeypatch):
         "app.services.memory.memory_loader.MemoryLoader.load_for_agent",
         fake_load,
     )
-    llm = FakeLlmAdapter([submit_turn("Hello.")])
+    llm = FakeLlmAdapter([content_turn("Hello.")])
     agent = Agent(header.session_id, store, llm, runtime=ToolRuntime.builtin(), owner_id="7")
     result = await agent.prompt("这次请用英文回答")
     assert result.finish_reason == "completed"

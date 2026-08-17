@@ -316,8 +316,9 @@ def _get_finance_llm_client() -> BaseChatModel:
 def get_finance_llm() -> BaseChatModel:
     """金融成稿模型：本地微调（OpenAI 兼容）。
 
-    DeepAgent 工具规划请用 get_faq_llm()；本函数仅用于基于材料的成稿/汇总。
-    未配置或 vLLM 不可达时回退 get_faq_llm()（DeepSeek）。
+    工具规划请用 get_faq_llm()。finalign.analyze 仅在 is_finance_llm_available() 时调用本函数；
+    不可达时分析工具 fail-closed，不在成稿路径回退 DeepSeek。
+    其它遗留调用若仍走本函数，未配置或 vLLM 不可达时会回退 get_faq_llm()。
     """
     if not is_finance_llm_available():
         return get_faq_llm()

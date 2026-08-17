@@ -16,12 +16,12 @@ def test_allocate_blocks_third_attempt_same_tool():
         SimpleNamespace(name="lookup_fail", call_id="c1"),
         SimpleNamespace(name="lookup_fail", call_id="c2"),
         SimpleNamespace(name="lookup_fail", call_id="c3"),
-        SimpleNamespace(name="submit_answer", call_id="s1"),
+        SimpleNamespace(name="todo_write", call_id="s1"),
     ]
     blocked, counts = allocate_tool_attempts(calls, prior_counts={})
     assert blocked == {"c3"}
     assert counts["lookup_fail"] == 2
-    assert "submit_answer" not in counts
+    assert "todo_write" not in counts
 
 
 def test_allocate_respects_prior_counts():
@@ -40,7 +40,7 @@ async def test_tool_attempt_counts_reads_turn_calls():
     )
     await store.append(
         header.session_id,
-        EventDraft(event_type="tool/call", turn=1, data={"name": "submit_answer", "call_id": "s1"}),
+        EventDraft(event_type="tool/call", turn=1, data={"name": "todo_write", "call_id": "s1"}),
     )
     events = await store.load_events(header.session_id)
     assert tool_attempt_counts(events, turn=1) == {"lookup_fail": 1}

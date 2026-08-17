@@ -13,6 +13,7 @@ TOOL_MODULES: tuple[str, ...] = (
     "tools.knowledge",
     "tools.finance",
     "tools.calculation",
+    "tools.analysis",
 )
 
 _loaded = False

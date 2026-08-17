@@ -17,27 +17,6 @@ def content_turn(text: str) -> ScriptedTurn:
     return ScriptedTurn((StreamChunk(kind="content", text=text, finish_reason="stop"),))
 
 
-def submit_turn(text: str, *, mode: str = "direct") -> ScriptedTurn:
-    import json
-
-    arguments = json.dumps(
-        {"mode": mode, "direct_answer": text, "heading": "", "statements": []},
-        ensure_ascii=False,
-    )
-    return ScriptedTurn(
-        (
-            StreamChunk(
-                kind="tool_call_delta",
-                index=0,
-                call_id="call-submit",
-                name="submit_answer",
-                arguments_delta=arguments,
-                finish_reason="tool_calls",
-            ),
-        )
-    )
-
-
 def tool_turn(name: str, arguments: str, *, call_id: str = "call-1") -> ScriptedTurn:
     return ScriptedTurn(
         (
