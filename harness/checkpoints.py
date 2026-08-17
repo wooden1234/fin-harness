@@ -1,15 +1,9 @@
-"""状态恢复和回放入口。"""
+"""Checkpoint 已废弃：产品权威日志是 session_events。"""
 
-from agents.checkpoint import (
-    delete_thread_checkpoint,
-    get_checkpointer,
-    make_thread_config,
-    make_thread_id,
-)
+from __future__ import annotations
 
-__all__ = [
-    "delete_thread_checkpoint",
-    "get_checkpointer",
-    "make_thread_config",
-    "make_thread_id",
-]
+from typing import Any
+
+
+async def delete_thread_checkpoint(*_args: Any, **_kwargs: Any) -> None:
+    return None

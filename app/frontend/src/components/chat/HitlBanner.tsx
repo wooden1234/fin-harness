@@ -25,14 +25,14 @@ export function HitlBanner({
           <Headphones size={18} />
         </div>
         <div className="flex-1 min-w-0">
-          <h4 className="text-sm font-semibold text-orange-800 dark:text-orange-200">已升级人工处理 (L4 HITL)</h4>
+          <h4 className="text-sm font-semibold text-orange-800 dark:text-orange-200">需要批准工具调用</h4>
           <p className="text-xs text-orange-700/80 dark:text-orange-300/80 mt-1">{message}</p>
           <div className="mt-3 flex gap-2">
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
-              placeholder="输入人工处理意见或补充说明…"
+              placeholder="输入「同意」继续，或「拒绝」取消…"
               disabled={disabled}
               className="flex-1 rounded-lg border border-orange-200 dark:border-orange-800 bg-white dark:bg-slate-900 px-3 py-2 text-sm outline-none focus:border-orange-400 disabled:opacity-60"
             />

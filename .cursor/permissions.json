@@ -1,0 +1,15 @@
+{
+  // 与 ~/.cursor/permissions.json 数组合并，不替换。本仓库额外允许的开发命令。
+  "terminalAllowlist": [
+    "ruff",
+    "mypy",
+    "uvicorn",
+    "alembic"
+  ],
+  "autoRun": {
+    "block_instructions": [
+      "Block any command that drops, truncates, or migrates production databases.",
+      "Block writing secrets into .env or committing .env, credentials, or private keys."
+    ]
+  }
+}

@@ -25,6 +25,12 @@
       "source": "skillhub",
       "version": ""
     },
+    "news-search": {
+      "name": "news-search",
+      "zip_url": "http://ms.10jqka.com.cn/gateway/market/api/v1/skills/square/download?name=news-search",
+      "source": "skillhub",
+      "version": ""
+    },
     "hithink-insresearch-query": {
       "name": "hithink-insresearch-query",
       "zip_url": "http://ms.10jqka.com.cn/gateway/market/api/v1/skills/square/download?name=hithink-insresearch-query",

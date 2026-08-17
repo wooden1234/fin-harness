@@ -1,8 +1,6 @@
-"""Harness 运行治理层。
+"""Harness 运行时：session kernel + agent-in-the-loop。"""
 
-`runner` 会加载现有 Agent graph 和配置，包级导入时保持轻量。
-"""
-
+from harness.agent.manager import AgentManager
 from harness.context import RunContext
 
-__all__ = ["RunContext"]
+__all__ = ["AgentManager", "RunContext"]

@@ -26,7 +26,6 @@ from app.services.memory.memory_episodic_extraction import (
     render_source_messages,
 )
 from app.services.memory.memory_service import MemoryService
-from agents.checkpoint import delete_thread_checkpoint
 
 logger = get_logger(service="outbox")
 
@@ -294,10 +293,9 @@ class OutboxService:
                 )
                 await AgentRunService.mark_persisted(str(payload["run_id"]))
             elif event.event_type == "conversation.checkpoint_delete":
-                await delete_thread_checkpoint(
-                    int(payload["conversation_id"]),
-                    user_id=int(payload["user_id"]),
-                    tenant_id=str(payload.get("tenant_id") or "default"),
+                logger.info(
+                    "ignored legacy checkpoint_delete conversation_id={}",
+                    payload.get("conversation_id"),
                 )
             elif event.event_type == "memory.index.upsert":
                 await MemoryIndexService.upsert_from_event(payload)

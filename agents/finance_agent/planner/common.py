@@ -12,7 +12,6 @@ from agents.finance_agent.planner.prompts import (
     PLANNER_REPAIR_SYSTEM_PROMPT,
     PLANNER_SYSTEM_PROMPT,
 )
-from agents.init_turn.turn_workspace import reset_worker_workspace
 from agents.llm import get_router_llm
 from agents.structured_output import ainvoke_json_output
 from agents.states import PlannerOutput, SubTask
@@ -32,6 +31,14 @@ def latest_user_query(messages: list) -> str:
             content = msg.content
             return content if isinstance(content, str) else str(content)
     return ""
+
+
+def reset_worker_workspace() -> dict:
+    return {
+        "task_results": [],
+        "citations": [],
+        "sub_tasks": [],
+    }
 
 
 def begin_turn_workspace() -> dict:

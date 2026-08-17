@@ -36,6 +36,7 @@ _SKILL_DESCRIPTION_RE = re.compile(
     r"^description:\s*[\"']?(.+?)[\"']?\s*$",
     re.MULTILINE,
 )
+_ENTITY_SPLIT_RE = re.compile(r"[,，、/;]+")
 
 
 def _iwencai_skill_root() -> Path:
@@ -73,6 +74,53 @@ def _apply_skill_description(langchain_tool: BaseTool, skill_id: str) -> str:
     )
     langchain_tool.description = description
     return description
+
+
+def normalize_iwencai_entities(raw: Any) -> list[str]:
+    """把模型传来的公司列表收成去重后的简称列表。"""
+    if raw is None or raw == "":
+        return []
+    if isinstance(raw, str):
+        parts = _ENTITY_SPLIT_RE.split(raw)
+    elif isinstance(raw, (list, tuple)):
+        parts = []
+        for item in raw:
+            parts.extend(_ENTITY_SPLIT_RE.split(str(item)))
+    else:
+        parts = [str(raw)]
+    names: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        name = str(part or "").strip()
+        if not name:
+            continue
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        names.append(name)
+    return names
+
+
+def compose_iwencai_query(query: str, entities: Any = None) -> str:
+    """多家公司合成一条问财问句，对应一次 HTTP、返回多行 datas。"""
+    text = " ".join(str(query or "").split())
+    names = normalize_iwencai_entities(entities)
+    if not names:
+        return text
+    if text and all(name in text for name in names):
+        return text
+    prefix = "、".join(names)
+    if not text:
+        return prefix
+    return f"{prefix} {text}"
+
+
+def _limit_for_entities(limit: int, entities: Any) -> int:
+    names = normalize_iwencai_entities(entities)
+    wanted = max(int(limit or 10), len(names) if names else 0, 1)
+    ceiling = max(1, int(settings.IWENCAI_MAX_LIMIT))
+    return min(wanted, ceiling)
 
 _IWENCAI_DOMAIN = "iwencai"
 _IWENCAI_DATA_TYPE = "iwencai_result"
@@ -200,11 +248,7 @@ def _normalize_iwencai_payload(result: dict[str, Any]) -> dict[str, Any]:
     existing_facts = [item for item in list(data.get("facts") or []) if isinstance(item, dict)]
     normalized["facts"] = existing_facts + facts
     normalized["unmapped_rows"] = unmapped_rows
-    normalized["coverage"] = {
-        "entities": sorted({str(item.get("entity") or "") for item in facts if item.get("entity")}),
-        "metrics": sorted({str(item.get("metric") or "") for item in facts if item.get("metric")}),
-        "periods": sorted({str(item.get("fiscal_period") or "") for item in facts if item.get("fiscal_period")}),
-    }
+    normalized.pop("coverage", None)
     payload["data"] = normalized
     return payload
 _MARKET_SKILLS = frozenset(
@@ -220,6 +264,7 @@ _DOCUMENT_SKILLS = frozenset(
     {
         "announcement-search",
         "report-search",
+        "news-search",
         "hithink-insresearch-query",
     }
 )
@@ -499,15 +544,26 @@ async def fetch_iwencai(
 
 
 @tool(parse_docstring=True)
-async def query_iwencai(query: str, page: int = 1, limit: int = 10) -> dict[str, Any]:
+async def query_iwencai(
+    query: str,
+    page: int = 1,
+    limit: int = 10,
+    entities: list[str] | None = None,
+) -> dict[str, Any]:
     """使用自然语言查询同花顺问财数据（通用/兼容入口）。
 
     Args:
-        query: 股票、指数、财务或选股查询语句。
+        query: 股票、指数、财务或选股查询语句。对比多家时把公司写进同一句，或用 entities。
         page: 结果页码，从 1 开始。
         limit: 每页返回条数，最大值由配置控制。
+        entities: 可选公司列表；会与 query 合成一次请求，返回多行，不要拆成多次调用。
     """
-    result = await fetch_iwencai(query, page=page, limit=limit)
+    composed = compose_iwencai_query(query, entities)
+    result = await fetch_iwencai(
+        composed,
+        page=page,
+        limit=_limit_for_entities(limit, entities),
+    )
     return _normalize_iwencai_payload(result)
 
 
@@ -517,20 +573,23 @@ async def query_iwencai_finance(
     page: int = 1,
     limit: int = 10,
     call_type: str = "normal",
+    entities: list[str] | None = None,
 ) -> dict[str, Any]:
     """查询全市场个股财务指标（营收、净利、ROE、负债率、现金流等）。
 
     Args:
-        query: 财务指标自然语言查询语句。
+        query: 财务指标自然语言查询语句。对比用「永鼎股份、中天科技、亨通光电 2026半年报净利润 毛利率」，一次返回多行。
         page: 结果页码，从 1 开始。
         limit: 每页返回条数。
         call_type: 调用类型，只能是 normal 或 retry。
+        entities: 可选公司列表，与 query 合成一条问句后只请求一次问财。
     """
+    composed = compose_iwencai_query(query, entities)
     result = await _run_query_skill(
         "hithink-finance-query",
-        query,
+        composed,
         page=page,
-        limit=limit,
+        limit=_limit_for_entities(limit, entities),
         call_type=call_type,
     )
     return _normalize_iwencai_payload(result)
@@ -592,22 +651,25 @@ async def query_iwencai_market(
     page: int = 1,
     limit: int = 10,
     call_type: str = "normal",
+    entities: list[str] | None = None,
 ) -> dict[str, Any]:
     """查询股票、ETF 和指数等行情（价、涨跌幅、成交、资金等）。
 
     不用于板块领涨或行业涨跌幅排名（请用 query_iwencai_industry）。
 
     Args:
-        query: 行情查询语句（个股/ETF/指数；A股「今日」未收盘时请改写为明确交易日）。
+        query: 行情查询语句（个股/ETF/指数；A股「今日」未收盘时请改写为明确交易日）。多家对比写进同一句或用 entities。
         page: 结果页码，从 1 开始。
         limit: 每页返回条数。
         call_type: 调用类型，只能是 normal 或 retry。
+        entities: 可选公司/标的列表，与 query 合成一次请求。
     """
+    composed = compose_iwencai_query(query, entities)
     return await _run_query_skill(
         "hithink-market-query",
-        query,
+        composed,
         page=page,
-        limit=limit,
+        limit=_limit_for_entities(limit, entities),
         call_type=call_type,
     )
 
@@ -736,6 +798,20 @@ async def search_iwencai_report(
     return await _run_search_skill("report-search", query, limit=limit)
 
 
+@tool(parse_docstring=True)
+async def search_iwencai_news(
+    query: str,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """搜索财经新闻、政策动态、行业革新和企业业务进展。
+
+    Args:
+        query: 财经新闻搜索语句。
+        limit: 返回结果数量。
+    """
+    return await _run_search_skill("news-search", query, limit=limit)
+
+
 register_tool(
     ToolSpec(
         tool_id="iwencai.query",
@@ -757,6 +833,7 @@ _TOOL_SKILL_BINDINGS: tuple[tuple[str, str, BaseTool, dict[str, Any]], ...] = (
     ("iwencai.rating.query", "hithink-insresearch-query", query_iwencai_rating, {}),
     ("iwencai.announcement.search", "announcement-search", search_iwencai_announcement, {}),
     ("iwencai.report.search", "report-search", search_iwencai_report, {}),
+    ("iwencai.news.search", "news-search", search_iwencai_news, {}),
     ("iwencai.fund.screen", "hithink-fund-selector", screen_iwencai_fund, {}),
     ("iwencai.usstock.screen", "hithink-usstock-selector", screen_iwencai_usstock, {}),
     (
@@ -784,6 +861,7 @@ for _tool_id, _skill_id, _langchain_tool, _extra in _TOOL_SKILL_BINDINGS:
 
 
 __all__ = [
+    "compose_iwencai_query",
     "fetch_iwencai",
     "query_iwencai",
     "query_iwencai_finance",
@@ -796,5 +874,6 @@ __all__ = [
     "screen_iwencai_usstock",
     "search_iwencai_announcement",
     "search_iwencai_report",
+    "search_iwencai_news",
     "skill_description",
 ]

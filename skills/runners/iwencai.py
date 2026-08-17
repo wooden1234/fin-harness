@@ -53,6 +53,9 @@ _SUPPORTED_SKILLS = {
     "report-search": _InstalledSkillSpec(
         "scripts/report_search.py", "search_positional", "1.0.0"
     ),
+    "news-search": _InstalledSkillSpec(
+        "scripts/news_search.py", "search_positional", "1.0.0"
+    ),
 }
 
 

@@ -1,5 +1,5 @@
-import { Fragment, useEffect, useRef, useState } from 'react'
-import { Flame, LineChart, Sparkles } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Bot, Flame, LineChart, Sparkles } from 'lucide-react'
 import { ChatMessage } from './ChatMessage'
 import { ChatInput, type PendingImage, DEFAULT_IMAGE_QUERY } from './ChatInput'
 import { HitlBanner } from './HitlBanner'
@@ -311,34 +311,38 @@ export function ChatView() {
         ) : (
           <div className="max-w-4xl mx-auto px-4 py-8">
             {messages.map((msg, index) => {
-              const showStepsBefore =
+              const isLiveAssistant =
                 isGenerating &&
                 index === messages.length - 1 &&
                 msg.role === 'assistant'
               return (
-                <Fragment key={msg.id}>
-                  {showStepsBefore && (
-                    <AgentStepsPanel
-                      steps={agentSteps}
-                      todos={agentTodos}
-                      isGenerating={isGenerating}
-                    />
-                  )}
-                  <ChatMessage
-                    message={msg}
-                    onFollowUp={handleFollowUp}
-                    followUpDisabled={isGenerating || hitlPending}
-                  />
-                </Fragment>
+                <ChatMessage
+                  key={msg.id}
+                  message={msg}
+                  onFollowUp={handleFollowUp}
+                  followUpDisabled={isGenerating || hitlPending}
+                  liveSteps={isLiveAssistant ? agentSteps : undefined}
+                  liveTodos={isLiveAssistant ? agentTodos : undefined}
+                  isLiveGenerating={isLiveAssistant}
+                  answerStarted={isLiveAssistant && Boolean(msg.content)}
+                />
               )
             })}
             {isGenerating &&
               (messages.length === 0 || messages[messages.length - 1].role !== 'assistant') && (
-                <AgentStepsPanel
-                  steps={agentSteps}
-                  todos={agentTodos}
-                  isGenerating={isGenerating}
-                />
+                <div className="flex w-full justify-start mb-6">
+                  <div className="w-8 h-8 rounded-full bg-brand-navy text-brand-gold flex items-center justify-center mr-3 shrink-0 mt-1">
+                    <Bot size={16} />
+                  </div>
+                  <div className="max-w-[80%] min-w-0 flex-1">
+                    <AgentStepsPanel
+                      steps={agentSteps}
+                      todos={agentTodos}
+                      isGenerating={isGenerating}
+                      answerStarted={false}
+                    />
+                  </div>
+                </div>
               )}
             <div ref={messagesEndRef} />
           </div>

@@ -1,42 +1,6 @@
-from agents.checkpoint import (
-    delete_thread_checkpoint,
-    get_checkpointer,
-    init_checkpoint,
-    make_thread_config,
-    make_thread_id,
-)
-from agents.orchestrator.graph import (
-    build_orchestrator_graph as build_graph,
-    get_orchestrator_graph as get_graph,
-)
-from agents.states import FinAgentInput, FinAgentState, Router
-from agents.runtime_context import AgentRuntimeContext
-from agents.context_compressor import compress_context
-from agents.final_answer import final_answer_node
-from agents.guardrails import guardrails_edge, guardrails_node
-from agents.init_turn import init_turn_node
-from agents.query_rewrite import query_rewrite_node
-from agents.general_agent.node import general_agent
-from agents.finance_agent import finance_agent as finance_agent_graph
+"""Agent 包：领域服务与 LLM 工厂。产品 HTTP 不再导出 LangGraph 主环。"""
 
-__all__ = [
-    "FinAgentInput",
-    "FinAgentState",
-    "Router",
-    "AgentRuntimeContext",
-    "init_turn_node",
-    "guardrails_node",
-    "guardrails_edge",
-    "compress_context",
-    "query_rewrite_node",
-    "general_agent",
-    "final_answer_node",
-    "finance_agent_graph",
-    "build_graph",
-    "get_graph",
-    "init_checkpoint",
-    "make_thread_config",
-    "make_thread_id",
-    "delete_thread_checkpoint",
-    "get_checkpointer",
-]
+from agents.llm import get_finance_llm
+from agents.runtime_context import AgentRuntimeContext
+
+__all__ = ["AgentRuntimeContext", "get_finance_llm"]
