@@ -31,6 +31,7 @@ _DEFAULT_USER_READ_ONLY_TOOLS = (
     "iwencai.rating.query",
     "iwencai.announcement.search",
     "iwencai.report.search",
+    "iwencai.news.search",
     "iwencai.fund.screen",
     "knowledge.faq.search",
     "knowledge.pdf.catalog",

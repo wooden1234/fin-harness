@@ -264,6 +264,7 @@ _DOCUMENT_SKILLS = frozenset(
     {
         "announcement-search",
         "report-search",
+        "news-search",
         "hithink-insresearch-query",
     }
 )
@@ -797,6 +798,20 @@ async def search_iwencai_report(
     return await _run_search_skill("report-search", query, limit=limit)
 
 
+@tool(parse_docstring=True)
+async def search_iwencai_news(
+    query: str,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """搜索财经新闻、政策动态、行业革新和企业业务进展。
+
+    Args:
+        query: 财经新闻搜索语句。
+        limit: 返回结果数量。
+    """
+    return await _run_search_skill("news-search", query, limit=limit)
+
+
 register_tool(
     ToolSpec(
         tool_id="iwencai.query",
@@ -818,6 +833,7 @@ _TOOL_SKILL_BINDINGS: tuple[tuple[str, str, BaseTool, dict[str, Any]], ...] = (
     ("iwencai.rating.query", "hithink-insresearch-query", query_iwencai_rating, {}),
     ("iwencai.announcement.search", "announcement-search", search_iwencai_announcement, {}),
     ("iwencai.report.search", "report-search", search_iwencai_report, {}),
+    ("iwencai.news.search", "news-search", search_iwencai_news, {}),
     ("iwencai.fund.screen", "hithink-fund-selector", screen_iwencai_fund, {}),
     ("iwencai.usstock.screen", "hithink-usstock-selector", screen_iwencai_usstock, {}),
     (
@@ -858,5 +874,6 @@ __all__ = [
     "screen_iwencai_usstock",
     "search_iwencai_announcement",
     "search_iwencai_report",
+    "search_iwencai_news",
     "skill_description",
 ]
