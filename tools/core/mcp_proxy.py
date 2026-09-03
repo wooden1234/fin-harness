@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from langchain_core.tools import StructuredTool
+from pydantic import BaseModel
 
 from mcp.gateway import McpGateway
 from tools.core.base import ToolRiskLevel, ToolSpec
 from tools.core.registry import RegisteredTool, register_tool
+
+ArgumentAdapter = Callable[[dict[str, Any]], dict[str, Any]]
 
 
 def register_mcp_tool(
@@ -19,6 +23,8 @@ def register_mcp_tool(
     server: str,
     remote_tool: str,
     gateway: McpGateway | None = None,
+    args_schema: type[BaseModel] | None = None,
+    argument_adapter: ArgumentAdapter | None = None,
     risk_level: ToolRiskLevel = "medium",
     read_only: bool = True,
     timeout_seconds: float = 30.0,
@@ -27,10 +33,13 @@ def register_mcp_tool(
     client = gateway or McpGateway()
 
     async def _call(arguments: dict[str, Any] | None = None) -> Any:
+        payload = arguments or {}
+        if argument_adapter is not None:
+            payload = argument_adapter(payload)
         response = await client.call_tool(
             server=server,
             tool=remote_tool,
-            arguments=arguments or {},
+            arguments=payload,
         )
         if not response.ok:
             return {
@@ -47,6 +56,7 @@ def register_mcp_tool(
         coroutine=_ainvoke,
         name=name,
         description=description,
+        args_schema=args_schema,
     )
     return register_tool(
         ToolSpec(

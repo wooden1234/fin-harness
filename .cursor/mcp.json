@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "tyc-mcp": {
+      "type": "streamable_http",
+      "url": "https://mcp.api-inference.modelscope.net/54e323b3f49449/mcp",
+      "headers": {
+        "Authorization": "ms-0828270b-8bec-4198-b705-27c788d1f1a1"
+      }
+    }
+  }
+}
