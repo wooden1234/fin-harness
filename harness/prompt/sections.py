@@ -68,32 +68,59 @@ def _preference_lines(values: Mapping[str, Any]) -> str:
     return "\n".join(f"- {key}={value}" for key, value in sorted(values.items()))
 
 
-def preference_section(
+def preference_sections(
     preferences: Mapping[str, Any] | None = None,
     turn_overrides: Mapping[str, Any] | None = None,
-) -> PromptSection | None:
-    """长期偏好与本轮覆盖；两者都空则不贡献 section。"""
+) -> tuple[PromptSection, ...]:
+    """长期偏好与本轮覆盖，接在稳定 system 之后，避免插在工具纪律前打冷 KV 前缀。
+
+    身份 / 合规 / 工具纪律 / skill 目录保持固定前缀。
+    长期偏好 order=50；本轮临时 order=60，只冷尾巴。
+    """
     prefs = {key: value for key, value in dict(preferences or {}).items() if value is not None}
     overrides = {
         key: value for key, value in dict(turn_overrides or {}).items() if value is not None
     }
-    blocks: list[str] = []
+    sections: list[PromptSection] = []
     if prefs:
-        blocks.append(
-            "[用户长期偏好]\n"
-            f"{_preference_lines(prefs)}\n"
-            "仅在当前请求未明确指定时参考长期偏好；当前轮用户要求优先。"
-            "长期偏好中的语言与详略覆盖身份段的默认中文与简洁设定。"
+        sections.append(
+            PromptSection(
+                "user_preferences",
+                50,
+                "[用户长期偏好]\n"
+                f"{_preference_lines(prefs)}\n"
+                "仅在当前请求未明确指定时参考长期偏好；当前轮用户要求优先。"
+                "长期偏好中的语言与详略覆盖身份段的默认中文与简洁设定。",
+            )
         )
     if overrides:
-        blocks.append(
-            "[本轮临时要求]\n"
-            f"{_preference_lines(overrides)}\n"
-            "这些要求只在当前轮生效，并覆盖冲突的长期偏好。"
+        sections.append(
+            PromptSection(
+                "turn_overrides",
+                60,
+                "[本轮临时要求]\n"
+                f"{_preference_lines(overrides)}\n"
+                "这些要求只在当前轮生效，并覆盖冲突的长期偏好。",
+            )
         )
-    if not blocks:
+    return tuple(sections)
+
+
+def preference_section(
+    preferences: Mapping[str, Any] | None = None,
+    turn_overrides: Mapping[str, Any] | None = None,
+) -> PromptSection | None:
+    """兼容单段调用：多段时拼成一段，order 取末尾。"""
+    sections = preference_sections(preferences, turn_overrides)
+    if not sections:
         return None
-    return PromptSection("user_preferences", 25, "\n\n".join(blocks))
+    if len(sections) == 1:
+        return sections[0]
+    return PromptSection(
+        "user_preferences",
+        sections[-1].order,
+        "\n\n".join(item.text for item in sections),
+    )
 
 
 def default_sections() -> tuple[PromptSection, ...]:

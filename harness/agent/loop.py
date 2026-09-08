@@ -17,7 +17,7 @@ from harness.finalization.submit import finalize_markdown
 from harness.llm.types import StreamAssembler
 from harness.prompt.assembler import assemble_system, header_snapshot
 from harness.prompt.preferences import load_preference_context
-from harness.prompt.sections import default_sections, preference_section
+from harness.prompt.sections import default_sections, preference_sections
 from harness.session.invariant import assert_model_request_logged
 from harness.session.store import SessionStore
 from harness.session.surface import messages_for_llm, project_inbox
@@ -297,6 +297,7 @@ class Agent:
                 turn=turn,
                 run_id=run_id,
                 token_limit=self._compact_token_limit,
+                allow_llm=True,
                 trigger="pressure",
                 policy=self._compact_policy,
             )
@@ -340,9 +341,11 @@ class Agent:
                     await maybe_compact(
                         store=self._store,
                         session_id=self.session_id,
+                        llm=self._llm,
                         turn=turn,
                         run_id=run_id,
                         token_limit=self._compact_token_limit,
+                        allow_llm=True,
                         trigger="context-overflow",
                         policy=self._compact_policy,
                     )
@@ -415,9 +418,7 @@ class Agent:
             turn=turn,
         )
         sections = list(default_sections())
-        pref = preference_section(loaded.preferences, loaded.turn_overrides)
-        if pref is not None:
-            sections.append(pref)
+        sections.extend(preference_sections(loaded.preferences, loaded.turn_overrides))
         system = assemble_system(sections)
         runtime = self._bound_runtime(turn, run_id)
         tools = runtime.openai_tools()

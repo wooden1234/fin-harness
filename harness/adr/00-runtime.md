@@ -34,7 +34,7 @@ DSH 无工具即可 `turn/end`。fin-agent 同样：模型不再调用 `submit_a
 
 ## 长期偏好
 
-每步 `assemble_system` 注入 `user_preferences` section（MemoryLoader + Redis Cache-Aside）。Loader 失败则空段，不阻断 loop。本轮「这次/本次」覆盖冲突 key。显式「请记住 / 改成 / 忘记」走 `memory_write` / `memory_delete`；暗示提取仍回答后出盒。不把读做成工具，不做情景 `memory_search`。
+每步 `assemble_system` 在稳定前缀（身份、合规、工具纪律、skill 目录）之后注入偏好：长期偏好 `order=50`，本轮「这次/本次」`order=60`。两者都不插入工具纪律之前，以免打冷 KV 前缀。Loader（MemoryLoader + Redis Cache-Aside）失败则空段，不阻断 loop。显式「请记住 / 改成 / 忘记」走 `memory_write` / `memory_delete`；暗示提取仍回答后出盒。不把读做成工具，不做情景 `memory_search`。
 
 ## 工具错误分类
 

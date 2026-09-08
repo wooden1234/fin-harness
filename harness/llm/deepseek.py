@@ -130,3 +130,38 @@ class DeepSeekAdapter:
             kind="usage",
             finish_reason="tool_calls" if saw_tool_call else "stop",
         )
+
+    async def complete(self, *, system: str, prompt: str) -> str:
+        """非流式补全，供压缩摘要等旁路使用，不走工具调用。"""
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        from agents.llm import get_faq_llm
+
+        llm = get_faq_llm()
+        result = await llm.ainvoke(
+            [SystemMessage(content=system), HumanMessage(content=prompt)]
+        )
+        text = getattr(result, "content", result)
+        if isinstance(text, list):
+            text = "".join(
+                part if isinstance(part, str) else str(getattr(part, "text", part) or "")
+                for part in text
+            )
+        return str(text or "").strip()
+
+    async def complete_structured(self, schema: type[Any], prompt: str) -> Any:
+        """结构化抽取，供压缩摘要使用；走 router（温度 0）。"""
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        from agents.llm import get_router_llm
+        from agents.structured_output import ainvoke_json_output
+
+        system = (
+            "请严格返回一个合法 JSON object，并满足指定结构；不要输出 Markdown 或额外文本。"
+            "只写窗口里出现过的事实。不要编造数据或买卖建议。"
+        )
+        return await ainvoke_json_output(
+            get_router_llm(),
+            schema,
+            [SystemMessage(content=system), HumanMessage(content=prompt)],
+        )
