@@ -297,6 +297,7 @@ class Agent:
                 turn=turn,
                 run_id=run_id,
                 token_limit=self._compact_token_limit,
+                allow_llm=True,
                 trigger="pressure",
                 policy=self._compact_policy,
             )
@@ -340,9 +341,11 @@ class Agent:
                     await maybe_compact(
                         store=self._store,
                         session_id=self.session_id,
+                        llm=self._llm,
                         turn=turn,
                         run_id=run_id,
                         token_limit=self._compact_token_limit,
+                        allow_llm=True,
                         trigger="context-overflow",
                         policy=self._compact_policy,
                     )

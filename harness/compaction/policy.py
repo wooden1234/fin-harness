@@ -15,6 +15,8 @@ class CompactPolicy:
     prune_chars: int = 8192
     head_chars: int = 4096
     tail_chars: int = 1024
+    max_summary_turns: int = 10
+    max_narrative_chars: int = 400
 
 
 def policy_from_settings() -> CompactPolicy:
@@ -29,3 +31,7 @@ def policy_from_settings() -> CompactPolicy:
 
 def compact_limit(policy: CompactPolicy) -> int:
     return math.floor(policy.context_window * policy.trigger_ratio)
+
+
+def retain_limit(policy: CompactPolicy) -> int:
+    return math.floor(policy.context_window * policy.retain_ratio)

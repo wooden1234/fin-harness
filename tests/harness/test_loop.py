@@ -254,6 +254,125 @@ async def test_compaction_replaces_tool_result_without_splitting_pair():
     assert "truncated" in tools[0].content
 
 
+@pytest.mark.asyncio
+async def test_compaction_writes_committed_summary_without_splitting_pair():
+    store = InMemorySessionStore()
+    header = await store.create(tenant_id="t", user_id="1")
+    await store.append(
+        header.session_id,
+        EventDraft(event_type="turn/start", turn=1, data={"turn": 1}),
+    )
+    await store.append(
+        header.session_id,
+        EventDraft(
+            event_type="user/message",
+            turn=1,
+            surface_op="append",
+            data={"content": "甲" * 40, "source": "user"},
+        ),
+    )
+    await store.append(
+        header.session_id,
+        EventDraft(
+            event_type="assistant/message",
+            turn=1,
+            surface_op="append",
+            data={
+                "content": "",
+                "tool_calls": [{"call_id": "c1", "name": "web.search", "arguments": "{}"}],
+            },
+        ),
+    )
+    await store.append(
+        header.session_id,
+        EventDraft(
+            event_type="tool/result",
+            turn=1,
+            surface_op="append",
+            data={"call_id": "c1", "name": "web.search", "ok": True, "content": "乙" * 40},
+        ),
+    )
+    await store.append(
+        header.session_id,
+        EventDraft(
+            event_type="user/message",
+            turn=1,
+            surface_op="append",
+            data={"content": "当前问题", "source": "user"},
+        ),
+    )
+    llm = FakeLlmAdapter(summaries=["较早已查乙公司相关材料。"])
+    await maybe_compact(
+        store=store,
+        session_id=header.session_id,
+        llm=llm,
+        turn=1,
+        run_id="r",
+        token_limit=20,
+        allow_llm=True,
+        trigger="pressure",
+        policy=CompactPolicy(context_window=40, retain_ratio=0.2, prune_chars=10_000),
+    )
+    events = await store.load_events(header.session_id)
+    types = [event.event_type for event in events]
+    assert types[-3:] == ["compaction/start", "compaction/summary", "compaction/end"]
+    summary = next(event for event in events if event.event_type == "compaction/summary")
+    dropped = set(summary.source_event_seqs)
+    assistant = next(
+        event for event in events if event.event_type == "assistant/message"
+    )
+    tool = next(
+        event
+        for event in events
+        if event.event_type == "tool/result" and event.surface_op == "append"
+    )
+    assert assistant.seq in dropped
+    assert tool.seq in dropped
+    messages = derive_messages(events)
+    compacted = [item for item in messages if item.source == "compaction"]
+    assert compacted
+    assert compacted[0].content == "较早已查乙公司相关材料。"
+    assert not any(item.call_id == "c1" for item in messages)
+    assert messages[-1].content == "当前问题"
+
+
+@pytest.mark.asyncio
+async def test_compaction_skips_summary_when_llm_disallowed():
+    store = InMemorySessionStore()
+    header = await store.create(tenant_id="t", user_id="1")
+    await store.append(
+        header.session_id,
+        EventDraft(
+            event_type="user/message",
+            turn=1,
+            surface_op="append",
+            data={"content": "甲" * 40, "source": "user"},
+        ),
+    )
+    await store.append(
+        header.session_id,
+        EventDraft(
+            event_type="user/message",
+            turn=1,
+            surface_op="append",
+            data={"content": "乙" * 40, "source": "user"},
+        ),
+    )
+    await maybe_compact(
+        store=store,
+        session_id=header.session_id,
+        llm=FakeLlmAdapter(summaries=["不该出现"]),
+        turn=1,
+        run_id="r",
+        token_limit=10,
+        allow_llm=False,
+        trigger="pressure",
+        policy=CompactPolicy(context_window=40, retain_ratio=0.2, prune_chars=10_000),
+    )
+    events = await store.load_events(header.session_id)
+    assert not any(event.event_type.startswith("compaction/") for event in events)
+
+
 def test_tool_call_result_pairing_helper():
     calls = [{"call_id": "a"}, {"call_id": "b"}]
     results = [{"call_id": "a"}, {"call_id": "b"}]
