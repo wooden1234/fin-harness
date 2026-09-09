@@ -6,12 +6,25 @@ from harness.compaction.compact import (
     current_turn_todos,
     drop_oldest_turn_facts,
     latest_committed_summary,
+    load_summary_v2,
     maybe_compact,
     merge_summary,
+    merge_summary_v2,
     prune_facts,
+    shrink_summary_v2,
 )
+from harness.compaction.meter import request_tokens
 from harness.compaction.policy import CompactPolicy
-from harness.compaction.schema import CompactionDelta, CompactionFact, CompactionSummary, render_summary_text
+from harness.compaction.schema import (
+    CompactionDelta,
+    CompactionDeltaV2,
+    CompactionFact,
+    CompactionItemV2,
+    CompactionSummary,
+    CompactionSummaryV2,
+    render_summary_text,
+)
+from harness.contracts.errors import ContextBudgetExhaustedError
 from harness.llm.fake import FakeLlmAdapter
 from harness.session.store import InMemorySessionStore
 from harness.session.surface import derive_messages
@@ -20,6 +33,10 @@ from harness.session.types import EventDraft
 
 def _delta(**kwargs: object) -> CompactionDelta:
     return CompactionDelta.model_validate(kwargs)
+
+
+def _contents(rows: list[dict[str, object]]) -> list[str]:
+    return [str(row.get("content") or "") for row in rows]
 
 
 async def _seed_turn(store: InMemorySessionStore, session_id: str, turn: int, *, user: str, tool: str) -> None:
@@ -103,8 +120,9 @@ async def test_structured_summary_writes_facts_and_turn_progress():
     summary = next(event for event in events if event.event_type == "compaction/summary")
     structured = summary.data["structured"]
     assert structured["facts"][0]["evidence_id"] == "ev-1"
-    assert "已查乙公司营收" in structured["completed_items"]
-    assert "净利润未查" in structured["open_items"]
+    assert "已查乙公司营收" in _contents(structured["completed_items"])
+    assert "净利润未查" in _contents(structured["open_items"])
+    assert summary.data["compaction_schema_version"] == 2
     messages = derive_messages(events)
     assert messages[-1].content == "当前问题"
     assert any(item.source == "compaction" for item in messages)
@@ -191,8 +209,8 @@ async def test_second_compaction_folds_previous_summary():
     compacted = [item for item in messages if item.source == "compaction"]
     assert len(compacted) == 1
     structured = summaries[1].data["structured"]
-    assert "净利润未查" not in structured["open_items"]
-    assert "估值未查" in structured["open_items"]
+    assert "净利润未查" not in _contents(structured["open_items"])
+    assert "估值未查" in _contents(structured["open_items"])
 
 
 @pytest.mark.asyncio
@@ -304,9 +322,9 @@ async def test_todo_write_overrides_task_lists():
     structured = next(event for event in events if event.event_type == "compaction/summary").data[
         "structured"
     ]
-    assert structured["completed_items"][0] == "查营收"
-    assert "查净利润" in structured["open_items"]
-    assert "LLM 多写的遗漏" in structured["open_items"]
+    assert _contents(structured["completed_items"])[0] == "查营收"
+    assert "查净利润" in _contents(structured["open_items"])
+    assert "LLM 多写的遗漏" in _contents(structured["open_items"])
     todos = current_turn_todos(events, turn=1)
     assert len(todos) == 2
 
@@ -395,7 +413,8 @@ async def test_free_text_fallback_then_narrative_merge():
         for event in await store.load_events(header.session_id)
         if event.event_type == "compaction/summary"
     )
-    assert "structured" not in first_summary.data
+    assert first_summary.data["compaction_schema_version"] == 2
+    assert "较早已查乙公司相关材料" in first_summary.data["structured"]["narrative"]
     await _seed_turn(store, header.session_id, 1, user="更多" * 20, tool="丙" * 40)
     await store.append(
         header.session_id,
@@ -473,3 +492,90 @@ def test_merge_summary_clips_narrative_and_same_turn_open_items():
     text = render_summary_text(merged)
     assert "已确认事实" in text
     assert "本轮未完成" in text
+
+
+def test_request_tokens_includes_system_messages_and_tools():
+    base = request_tokens(system="系统", messages=[], tools=[])
+    with_message = request_tokens(
+        system="系统", messages=[{"role": "user", "content": "问题" * 20}], tools=[]
+    )
+    with_tools = request_tokens(
+        system="系统", messages=[], tools=[{"type": "function", "name": "search", "description": "检索" * 20}]
+    )
+    assert with_message > base
+    assert with_tools > base
+
+
+def test_v2_merge_resolves_items_and_completed_closes_open():
+    old = CompactionSummaryV2(
+        decisions=[CompactionItemV2(id="decision-1", content="使用旧来源")],
+        open_items=[CompactionItemV2(id="open-1", content="核验利润")],
+    )
+    merged = merge_summary_v2(
+        old,
+        CompactionDeltaV2(
+            resolved_ids=["decision-1"],
+            new_completed_items=[CompactionItemV2(content="核验利润")],
+        ),
+        turn=2,
+    )
+    assert merged.decisions == []
+    assert merged.open_items == []
+    assert merged.completed_items[0].content == "核验利润"
+
+
+def test_v2_shrink_preserves_protected_state():
+    summary = CompactionSummaryV2(
+        constraints=[
+            CompactionItemV2(id="c", content="只能使用官方来源", priority="critical")
+        ],
+        open_items=[CompactionItemV2(id="o", content="核验利润", updated_turn=3)],
+        conversation_notes=[
+            CompactionItemV2(id=f"n-{index}", content="旧闲聊" * 30, updated_turn=1)
+            for index in range(4)
+        ],
+    )
+    shrunk = shrink_summary_v2(summary, turn=3, token_budget=20)
+    assert [item.id for item in shrunk.constraints] == ["c"]
+    assert [item.id for item in shrunk.open_items] == ["o"]
+    assert shrunk.conversation_notes == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_budget_error_has_no_retry_loop():
+    store = InMemorySessionStore()
+    header = await store.create(tenant_id="t", user_id="1")
+    await store.append(
+        header.session_id,
+        EventDraft(
+            event_type="user/message",
+            turn=1,
+            surface_op="append",
+            data={"content": "当前问题", "source": "user"},
+        ),
+    )
+
+    class FixedCounter(FakeLlmAdapter):
+        def count_request_tokens(self, **_: object) -> int:
+            return 100
+
+    with pytest.raises(ContextBudgetExhaustedError) as raised:
+        await maybe_compact(
+            store=store,
+            session_id=header.session_id,
+            llm=FixedCounter(),
+            turn=1,
+            run_id="r",
+            token_limit=80,
+            allow_llm=True,
+            system="system",
+            tools=[],
+            enforce_budget=True,
+            policy=CompactPolicy(context_window=100, trigger_ratio=0.8, target_ratio=0.6),
+        )
+    assert raised.value.code == "context_budget_exhausted"
+    violations = [
+        event for event in await store.load_events(header.session_id)
+        if event.event_type == "invariant/violation"
+    ]
+    assert violations[-1].data["final_tokens"] == 100

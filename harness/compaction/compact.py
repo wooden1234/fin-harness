@@ -2,25 +2,39 @@
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
-from harness.compaction.meter import estimate_tokens, surface_tokens
-from harness.compaction.policy import CompactPolicy, retain_limit
+from harness.compaction.meter import count_request_tokens, estimate_tokens, surface_tokens
+from harness.compaction.policy import CompactPolicy, retain_limit, target_limit
 from harness.compaction.schema import (
     CompactionDelta,
+    CompactionDeltaV2,
     CompactionFact,
+    CompactionFactV2,
+    CompactionItemV2,
     CompactionSummary,
+    CompactionSummaryV2,
     render_summary_text,
+    render_summary_text_v2,
+    stable_item_id,
+    summary_v1_to_v2,
 )
+from harness.contracts.errors import ContextBudgetExhaustedError
 from harness.session.surface import SurfaceMessage, derive_messages
+from harness.session.surface import messages_for_llm
 from harness.session.types import EventDraft, SessionEvent
 
 _SUMMARY_SYSTEM = (
-    "你在压缩金融助手的较早对话。只写事实摘要：问题、已查到的数字、证据编号、未完成项。"
-    "不要编造数据或结论。不要给出买卖建议。控制在 400 字以内。"
+    "你在压缩通用 Agent 的较早上下文。保留事实、决策、约束、偏好、实体、技能/资源引用、"
+    "工具续接状态、任务和失败原因。不要编造数据或结论。控制在 400 字以内。"
 )
 
 _REAL_USER_SOURCES = frozenset({"user", "legacy", "vision"})
+_V2_FIELDS = (
+    "facts", "decisions", "constraints", "preferences", "entities", "skills",
+    "resources", "tool_state", "completed_items", "open_items", "failures",
+    "conversation_notes",
+)
 
 
 def _trim(text: str, policy: CompactPolicy) -> str:
@@ -121,7 +135,8 @@ def _format_for_summary(messages: Sequence[SurfaceMessage]) -> str:
     for item in messages:
         content = str(item.content or "").strip()
         if item.role == "user":
-            lines.append(f"用户：{content}")
+            label = "用户" if item.source in _REAL_USER_SOURCES else f"上下文[{item.source}]"
+            lines.append(f"{label}：{content}")
         elif item.role == "assistant":
             names = []
             for call in item.tool_calls:
@@ -184,6 +199,206 @@ def load_summary(event: SessionEvent | None) -> CompactionSummary | None:
     if text:
         return CompactionSummary(narrative=text)
     return None
+
+
+def load_summary_v2(event: SessionEvent | None) -> CompactionSummaryV2 | None:
+    """读取 v2；历史 v1 在内存中升级，不改写事件。"""
+    if event is None:
+        return None
+    raw = event.data.get("structured")
+    version = int(event.data.get("compaction_schema_version") or 0)
+    if isinstance(raw, dict) and (version == 2 or int(raw.get("schema_version") or 0) == 2):
+        try:
+            return CompactionSummaryV2.model_validate(raw)
+        except (TypeError, ValueError):
+            pass
+    legacy = load_summary(event)
+    return summary_v1_to_v2(legacy) if legacy is not None else None
+
+
+def _item_payload(item: CompactionItemV2) -> dict[str, Any]:
+    if isinstance(item, CompactionFactV2):
+        if item.company or item.period or item.metric:
+            return {"company": item.company, "period": item.period, "metric": item.metric}
+        return {"note": item.note or item.content, "evidence_id": item.evidence_id}
+    key = item.metadata.get("key") or item.metadata.get("canonical_name")
+    return {"key": key} if key else {"content": item.content}
+
+
+def _stamp_item(item: CompactionItemV2, *, kind: str, turn: int) -> CompactionItemV2:
+    payload = item.model_dump()
+    payload["created_turn"] = int(payload.get("created_turn") or turn)
+    payload["updated_turn"] = int(payload.get("updated_turn") or turn)
+    if not str(payload.get("id") or "").strip():
+        payload["id"] = stable_item_id(kind, _item_payload(item))
+    return type(item).model_validate(payload)
+
+
+def _upsert_items(
+    old: Sequence[CompactionItemV2],
+    new: Sequence[CompactionItemV2],
+    *,
+    kind: str,
+    turn: int,
+    removed: set[str],
+) -> list[CompactionItemV2]:
+    merged: dict[str, CompactionItemV2] = {}
+    order: list[str] = []
+    for raw in (*old, *new):
+        item = _stamp_item(raw, kind=kind, turn=turn)
+        if item.id in removed:
+            continue
+        if item.id not in merged:
+            order.append(item.id)
+        merged[item.id] = item
+    return [merged[item_id] for item_id in order]
+
+
+def _legacy_delta_to_v2(delta: CompactionDelta, *, turn: int) -> CompactionDeltaV2:
+    facts = []
+    for fact in delta.new_facts:
+        raw = fact.model_dump()
+        fact_turn = int(raw.pop("turn", 0) or turn)
+        facts.append(
+            CompactionFactV2(
+                **raw,
+                id=stable_item_id(
+                    "fact",
+                    {key: raw.get(key) for key in ("company", "period", "metric", "note", "evidence_id")},
+                ),
+                content=fact.note,
+                created_turn=fact_turn,
+                updated_turn=fact_turn,
+                source=fact.source_tool or "compaction",
+            )
+        )
+    def items(kind: str, values: Sequence[str]) -> list[CompactionItemV2]:
+        return [
+            CompactionItemV2(
+                id=stable_item_id(kind, value), content=value,
+                created_turn=turn, updated_turn=turn,
+            )
+            for value in values if str(value).strip()
+        ]
+    return CompactionDeltaV2(
+        new_facts=facts,
+        new_open_items=items("open", delta.new_open_items),
+        new_completed_items=items("completed", delta.new_completed_items),
+        narrative_delta=delta.narrative_delta,
+    )
+
+
+def merge_summary_v2(
+    old: CompactionSummaryV2 | None,
+    delta: CompactionDeltaV2,
+    *,
+    turn: int,
+    todos: Sequence[dict[str, str]] | None = None,
+    max_narrative_chars: int = 400,
+) -> CompactionSummaryV2:
+    previous = old or CompactionSummaryV2()
+    removed = {str(value) for value in (*delta.resolved_ids, *delta.superseded_ids)}
+    updates: dict[str, Any] = {}
+    for field in _V2_FIELDS:
+        updates[field] = _upsert_items(
+            getattr(previous, field), getattr(delta, f"new_{field}"),
+            kind=field, turn=turn, removed=removed,
+        )
+    if todos:
+        open_items: list[CompactionItemV2] = []
+        completed: list[CompactionItemV2] = []
+        for row in todos:
+            content = str(row.get("content") or "").strip()
+            if not content:
+                continue
+            item = CompactionItemV2(
+                id=stable_item_id("todo", content), content=content,
+                created_turn=turn, updated_turn=turn, source="todo",
+                priority="high" if row.get("status") == "in_progress" else "normal",
+            )
+            if row.get("status") in {"pending", "in_progress"}:
+                open_items.append(item)
+            elif row.get("status") == "completed":
+                completed.append(item.model_copy(update={"status": "completed"}))
+        known = {item.content for item in (*open_items, *completed)}
+        updates["open_items"] = [*open_items, *[item for item in updates["open_items"] if item.content not in known]]
+        updates["completed_items"] = [*completed, *[item for item in updates["completed_items"] if item.content not in known]]
+    completed_content = {item.content for item in updates["completed_items"] if item.content}
+    updates["open_items"] = [
+        item for item in updates["open_items"] if item.content not in completed_content
+    ]
+    narrative = " ".join(
+        value.strip() for value in (previous.narrative, delta.narrative_delta) if value.strip()
+    )
+    updates["narrative"] = clip_narrative(narrative, max_chars=max_narrative_chars)
+    return CompactionSummaryV2(**updates)
+
+
+def _protected(item: CompactionItemV2, field: str, *, turn: int) -> bool:
+    if field == "open_items" and item.status == "active":
+        return True
+    if field == "completed_items" and item.updated_turn == turn:
+        return True
+    if field in {"constraints", "preferences", "entities"} and item.status == "active":
+        return item.priority in {"high", "critical"} or field != "constraints"
+    if field == "resources" and item.metadata.get("rebuildable") is False:
+        return True
+    if field == "failures" and item.metadata.get("retryable") is False and item.status == "active":
+        return True
+    if field == "facts" and (
+        item.priority in {"high", "critical"} or item.updated_turn == turn
+    ):
+        return True
+    return item.priority == "critical" or item.updated_turn == turn and field == "open_items"
+
+
+def protected_summary_tokens(summary: CompactionSummaryV2, *, turn: int) -> int:
+    payload = CompactionSummaryV2()
+    updates = {
+        field: [item for item in getattr(summary, field) if _protected(item, field, turn=turn)]
+        for field in _V2_FIELDS
+    }
+    payload = payload.model_copy(update=updates)
+    return estimate_tokens(render_summary_text_v2(payload))
+
+
+def shrink_summary_v2(
+    summary: CompactionSummaryV2,
+    *,
+    turn: int,
+    token_budget: int,
+    drop_narrative: bool = True,
+) -> CompactionSummaryV2:
+    """确定性按生命周期、类别、优先级和轮次收缩。"""
+    current = summary
+    inactive = {"resolved", "superseded", "expired"}
+    current = current.model_copy(update={
+        field: [item for item in getattr(current, field) if item.status not in inactive]
+        for field in _V2_FIELDS
+    })
+    if estimate_tokens(render_summary_text_v2(current)) <= token_budget:
+        return current
+    if drop_narrative:
+        current = current.model_copy(update={"narrative": ""})
+    order = (
+        "conversation_notes", "failures", "tool_state", "completed_items", "resources",
+        "decisions", "facts", "skills", "preferences", "entities", "constraints",
+    )
+    rank = {"low": 0, "normal": 1, "high": 2, "critical": 3}
+    while estimate_tokens(render_summary_text_v2(current)) > token_budget:
+        candidates: list[tuple[int, int, int, str, str]] = []
+        for field_index, field in enumerate(order):
+            for item in getattr(current, field):
+                if _protected(item, field, turn=turn):
+                    continue
+                candidates.append((field_index, rank[item.priority], item.updated_turn, field, item.id))
+        if not candidates:
+            break
+        _, _, _, victim_field, victim_id = min(candidates)
+        current = current.model_copy(update={
+            victim_field: [item for item in getattr(current, victim_field) if item.id != victim_id]
+        })
+    return current
 
 
 def current_turn_todos(events: Sequence[SessionEvent], *, turn: int) -> list[dict[str, str]]:
@@ -362,23 +577,40 @@ async def _complete_summary(llm: Any, prompt: str) -> str:
     return str(text or "").strip()
 
 
-async def _complete_delta(llm: Any, prompt: str) -> CompactionDelta | None:
+async def _compress_narrative(llm: Any, narrative: str, *, max_chars: int) -> str:
+    if not narrative.strip():
+        return ""
+    complete = getattr(llm, "complete", None)
+    if not callable(complete):
+        return clip_narrative(narrative, max_chars=max_chars)
+    try:
+        value = await complete(
+            system="只压缩给定补充说明，不添加事实，不修改结构化状态。",
+            prompt=f"压缩到 {max_chars} 字以内：\n{narrative}",
+        )
+    except Exception:  # noqa: BLE001
+        value = narrative
+    return clip_narrative(str(value or narrative), max_chars=max_chars)
+
+
+async def _complete_delta_v2(llm: Any, prompt: str, *, turn: int) -> CompactionDeltaV2 | None:
     complete_structured = getattr(llm, "complete_structured", None)
     if complete_structured is None:
         return None
     try:
-        result = await complete_structured(CompactionDelta, prompt)
+        result = await complete_structured(CompactionDeltaV2, prompt)
     except Exception:  # noqa: BLE001
         return None
-    if isinstance(result, CompactionDelta):
+    if isinstance(result, CompactionDeltaV2):
         return result
-    validator = getattr(CompactionDelta, "model_validate", None)
-    if not callable(validator):
-        return None
     try:
-        return validator(result)
+        return CompactionDeltaV2.model_validate(result)
     except (TypeError, ValueError):
-        return None
+        try:
+            legacy = result if isinstance(result, CompactionDelta) else CompactionDelta.model_validate(result)
+            return _legacy_delta_to_v2(legacy, turn=turn)
+        except (TypeError, ValueError):
+            return None
 
 
 async def _trim_longest_tool(
@@ -395,6 +627,12 @@ async def _trim_longest_tool(
         event
         for event in events
         if event.event_type == "tool/result" and event.surface_op == "append"
+        and event.seq not in {
+            seq
+            for replacement in events
+            if replacement.event_type == "tool/result" and replacement.surface_op == "replace"
+            for seq in replacement.source_event_seqs
+        }
     ]
     if not tool_results:
         return False
@@ -427,16 +665,19 @@ async def _trim_longest_tool(
 
 def _build_delta_prompt(
     *,
-    old: CompactionSummary | None,
+    old: CompactionSummaryV2 | None,
     older: Sequence[SurfaceMessage],
     current: Sequence[SurfaceMessage],
     turn: int,
 ) -> str:
     parts = [
         f"当前轮次是 {turn}。请只返回 JSON。",
-        "new_facts 可来自两段窗口；每条 fact 填写 turn。",
-        "new_open_items / new_completed_items 只能描述当前轮次窗口里尚未结束的工作。",
-        "更早轮次已经结束，不要把它们写成未完成。套不进指标的约束、失败原因写入 narrative_delta。",
+        "输出 CompactionDeltaV2，只提取即将移除窗口相对已有摘要的增量。",
+        "每项填写稳定 id、content、created_turn、updated_turn、status、priority、source。",
+        "把客观事实、决策、约束、偏好、实体、技能引用、资源、工具续接状态、任务、失败和对话说明分别归类。",
+        "Skill 只保存名称、版本/来源、用途和恢复状态，不复制完整指令。",
+        "new_open_items / new_completed_items 只描述当前轮；更早轮次不能产生未完成事项。",
+        "已解决或被替代的条目分别写入 resolved_ids / superseded_ids。无法归类但必须保留的信息写 narrative_delta。",
     ]
     if old is not None:
         parts.append("已有摘要 JSON（不要复述成新 facts 的重复项，只抽窗口增量）：")
@@ -476,6 +717,7 @@ async def _append_summary_events(
     }
     if structured is not None:
         data["structured"] = structured
+        data["compaction_schema_version"] = 2
     await store.append(
         session_id,
         EventDraft(
@@ -518,7 +760,7 @@ async def _write_summary(
         seq_to_turn=seq_to_turn,
     )
     old_event = latest_committed_summary(events)
-    old_summary = load_summary(old_event)
+    old_summary = load_summary_v2(old_event)
     extract = [item for item in prefix if item.source != "compaction"]
     if not extract:
         return False
@@ -533,28 +775,32 @@ async def _write_summary(
     older = [item for item in extract if seq_to_turn.get(item.seq, turn) < turn]
     current = [item for item in extract if seq_to_turn.get(item.seq, turn) >= turn]
     prompt = _build_delta_prompt(old=old_summary, older=older, current=current, turn=turn)
-    delta = await _complete_delta(llm, prompt)
+    delta = await _complete_delta_v2(llm, prompt, turn=turn)
     if delta is not None:
         if not current:
             delta = delta.model_copy(update={"new_open_items": [], "new_completed_items": []})
-        same_turn = old_event is not None and old_event.turn == turn
-        merged = merge_summary(
+        merged = merge_summary_v2(
             old_summary,
             delta,
             turn=turn,
-            same_turn=bool(same_turn),
             todos=current_turn_todos(events, turn=turn),
-            max_turns=policy.max_summary_turns,
             max_narrative_chars=policy.max_narrative_chars,
         )
-        fitted = _fit_summary(
-            merged,
-            kept=kept,
-            token_limit=token_limit,
-            turn=turn,
-            max_narrative_chars=policy.max_narrative_chars,
+        summary_budget = max(
+            1,
+            token_limit - surface_tokens(kept),
         )
-        content = render_summary_text(fitted)
+        fitted = shrink_summary_v2(
+            merged, turn=turn, token_budget=summary_budget, drop_narrative=False
+        )
+        if estimate_tokens(render_summary_text_v2(fitted)) > summary_budget and fitted.narrative:
+            narrative = await _compress_narrative(
+                llm, fitted.narrative, max_chars=max(64, policy.max_narrative_chars // 2)
+            )
+            fitted = fitted.model_copy(update={"narrative": narrative})
+        if estimate_tokens(render_summary_text_v2(fitted)) > summary_budget:
+            fitted = shrink_summary_v2(fitted, turn=turn, token_budget=summary_budget)
+        content = render_summary_text_v2(fitted)
         if not content.strip():
             return False
         await _append_summary_events(
@@ -577,13 +823,58 @@ async def _write_summary(
         summary = excerpt[:budget] + ("\n…[truncated]…" if len(excerpt) > budget else "")
     if not summary.strip():
         return False
+    fallback = CompactionSummaryV2(
+        narrative=clip_narrative(summary, max_chars=policy.max_narrative_chars)
+    )
     await _append_summary_events(
         store=store,
         session_id=session_id,
         turn=turn,
         run_id=run_id,
         source_seqs=source_seqs,
-        content=summary,
+        content=render_summary_text_v2(fallback),
+        structured=fallback.model_dump(),
+    )
+    return True
+
+
+async def _rewrite_existing_summary(
+    *,
+    store: Any,
+    session_id: str,
+    llm: Any,
+    events: Sequence[SessionEvent],
+    turn: int,
+    run_id: str,
+    message_budget: int,
+    policy: CompactPolicy,
+) -> bool:
+    """没有新原文可 fold 时，只收缩当前已提交摘要。"""
+    old_event = latest_committed_summary(events)
+    old = load_summary_v2(old_event)
+    if old_event is None or old is None:
+        return False
+    others = [item for item in derive_messages(events) if item.source != "compaction"]
+    summary_budget = max(1, message_budget - surface_tokens(others))
+    fitted = shrink_summary_v2(old, turn=turn, token_budget=summary_budget, drop_narrative=False)
+    if estimate_tokens(render_summary_text_v2(fitted)) > summary_budget and fitted.narrative:
+        fitted = fitted.model_copy(update={
+            "narrative": await _compress_narrative(
+                llm, fitted.narrative, max_chars=max(64, policy.max_narrative_chars // 2)
+            )
+        })
+    if estimate_tokens(render_summary_text_v2(fitted)) > summary_budget:
+        fitted = shrink_summary_v2(fitted, turn=turn, token_budget=summary_budget)
+    if fitted.model_dump() == old.model_dump():
+        return False
+    await _append_summary_events(
+        store=store,
+        session_id=session_id,
+        turn=turn,
+        run_id=run_id,
+        source_seqs=(old_event.seq,),
+        content=render_summary_text_v2(fitted),
+        structured=fitted.model_dump(),
     )
     return True
 
@@ -608,37 +899,111 @@ async def maybe_compact(
     allow_llm: bool = False,
     trigger: str = "pressure",
     policy: CompactPolicy | None = None,
+    system: str = "",
+    tools: Sequence[Mapping[str, Any]] = (),
+    enforce_budget: bool = False,
 ) -> bool:
     policy = policy or CompactPolicy()
+    stages: list[str] = []
+
+    async def current_tokens(events: Sequence[SessionEvent]) -> int:
+        if not system and not tools:
+            return surface_tokens(derive_messages(events))
+        return await count_request_tokens(
+            llm,
+            system=system,
+            messages=messages_for_llm(events),
+            tools=tools,
+        )
+
     events = await store.load_events(session_id)
     messages = derive_messages(events)
-    if not _is_over(messages, token_limit=token_limit, trigger=trigger):
+    measured = await current_tokens(events)
+    if measured < token_limit and trigger != "context-overflow":
         return False
 
-    changed = await _trim_longest_tool(
-        store=store,
-        session_id=session_id,
-        events=events,
-        turn=turn,
-        run_id=run_id,
-        trigger=trigger,
-        policy=policy,
-    )
-    events = await store.load_events(session_id)
-    messages = derive_messages(events)
-    if not _is_over(messages, token_limit=token_limit, trigger=trigger):
-        return changed
-    if not allow_llm or llm is None:
-        return changed
-    summarized = await _write_summary(
-        store=store,
-        session_id=session_id,
-        llm=llm,
-        events=events,
-        messages=messages,
-        turn=turn,
-        run_id=run_id,
-        policy=policy,
-        token_limit=token_limit,
-    )
-    return changed or summarized
+    target = target_limit(policy) if (system or tools) else token_limit
+    changed = False
+    while measured > target:
+        trimmed = await _trim_longest_tool(
+            store=store,
+            session_id=session_id,
+            events=events,
+            turn=turn,
+            run_id=run_id,
+            trigger=trigger,
+            policy=policy,
+        )
+        if not trimmed:
+            break
+        changed = True
+        if "tool-trim" not in stages:
+            stages.append("tool-trim")
+        events = await store.load_events(session_id)
+        messages = derive_messages(events)
+        measured = await current_tokens(events)
+
+    if measured > target and allow_llm and llm is not None:
+        overhead = max(0, measured - surface_tokens(messages))
+        summarized = await _write_summary(
+            store=store,
+            session_id=session_id,
+            llm=llm,
+            events=events,
+            messages=messages,
+            turn=turn,
+            run_id=run_id,
+            policy=policy,
+            token_limit=max(1, target - overhead),
+        )
+        changed = changed or summarized
+        if summarized:
+            stages.extend(["summary-merge", "summary-shrink"])
+            events = await store.load_events(session_id)
+            measured = await current_tokens(events)
+
+    if measured > target and allow_llm and llm is not None:
+        overhead = max(0, measured - surface_tokens(derive_messages(events)))
+        rewritten = await _rewrite_existing_summary(
+            store=store,
+            session_id=session_id,
+            llm=llm,
+            events=events,
+            turn=turn,
+            run_id=run_id,
+            message_budget=max(1, target - overhead),
+            policy=policy,
+        )
+        changed = changed or rewritten
+        if rewritten:
+            stages.append("summary-recompress")
+            events = await store.load_events(session_id)
+            measured = await current_tokens(events)
+
+    if enforce_budget and measured > target:
+        latest = load_summary_v2(latest_committed_summary(events))
+        protected = protected_summary_tokens(latest, turn=turn) if latest is not None else 0
+        await store.append(
+            session_id,
+            EventDraft(
+                event_type="invariant/violation",
+                turn=turn,
+                run_id=run_id,
+                data={
+                    "code": "context_budget_exhausted",
+                    "context_window": policy.context_window,
+                    "trigger_tokens": token_limit,
+                    "target_tokens": target,
+                    "final_tokens": measured,
+                    "protected_tokens": protected,
+                    "stages": stages,
+                },
+            ),
+        )
+        raise ContextBudgetExhaustedError(
+            context_window=policy.context_window,
+            final_tokens=measured,
+            stages=stages,
+            protected_tokens=protected,
+        )
+    return changed

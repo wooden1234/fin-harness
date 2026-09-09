@@ -12,7 +12,7 @@ from harness.agent.result import RunResult
 from harness.approval.service import validate_decision
 from harness.compaction.compact import maybe_compact
 from harness.compaction.policy import compact_limit, policy_from_settings
-from harness.contracts.errors import InvariantError, LlmError
+from harness.contracts.errors import ContextBudgetExhaustedError, InvariantError, LlmError
 from harness.finalization.submit import finalize_markdown
 from harness.llm.types import StreamAssembler
 from harness.prompt.assembler import assemble_system, header_snapshot
@@ -290,23 +290,41 @@ class Agent:
                 return "cancelled"
             if self._published:
                 return "completed"
-            await maybe_compact(
-                store=self._store,
-                session_id=self.session_id,
-                llm=self._llm,
-                turn=turn,
-                run_id=run_id,
-                token_limit=self._compact_token_limit,
-                allow_llm=True,
-                trigger="pressure",
-                policy=self._compact_policy,
-            )
             await self._store.append(
                 self.session_id,
                 EventDraft(event_type="step/start", turn=turn, step=step, run_id=run_id, data={"turn": turn, "step": step}),
             )
             try:
-                assembled = await self._model_step(turn=turn, step=step, run_id=run_id)
+                system, tools = await self._request_context(turn=turn, run_id=run_id)
+                await maybe_compact(
+                    store=self._store,
+                    session_id=self.session_id,
+                    llm=self._llm,
+                    turn=turn,
+                    run_id=run_id,
+                    token_limit=self._compact_token_limit,
+                    allow_llm=True,
+                    trigger="pressure",
+                    policy=self._compact_policy,
+                    system=system,
+                    tools=tools,
+                    enforce_budget=True,
+                )
+                assembled = await self._model_step(
+                    turn=turn, step=step, run_id=run_id, system=system, tools=tools
+                )
+            except ContextBudgetExhaustedError as exc:
+                await self._store.append(
+                    self.session_id,
+                    EventDraft(
+                        event_type="step/end",
+                        turn=turn,
+                        step=step,
+                        run_id=run_id,
+                        data={"error": exc.code, "message": str(exc)[:800]},
+                    ),
+                )
+                return "error"
             except InvariantError as exc:
                 await self._store.append(
                     self.session_id,
@@ -338,17 +356,23 @@ class Agent:
                     return "cancelled"
                 if exc.code == "context_overflow" and overflow_retries < self._compact_policy.max_overflow_retries:
                     overflow_retries += 1
-                    await maybe_compact(
-                        store=self._store,
-                        session_id=self.session_id,
-                        llm=self._llm,
-                        turn=turn,
-                        run_id=run_id,
-                        token_limit=self._compact_token_limit,
-                        allow_llm=True,
-                        trigger="context-overflow",
-                        policy=self._compact_policy,
-                    )
+                    try:
+                        await maybe_compact(
+                            store=self._store,
+                            session_id=self.session_id,
+                            llm=self._llm,
+                            turn=turn,
+                            run_id=run_id,
+                            token_limit=self._compact_token_limit,
+                            allow_llm=True,
+                            trigger="context-overflow",
+                            policy=self._compact_policy,
+                            system=system,
+                            tools=tools,
+                            enforce_budget=True,
+                        )
+                    except ContextBudgetExhaustedError:
+                        return "error"
                     continue
                 return "error"
             await self._store.append(
@@ -409,7 +433,7 @@ class Agent:
                 return "completed"
         return "error"
 
-    async def _model_step(self, *, turn: int, step: int, run_id: str):
+    async def _request_context(self, *, turn: int, run_id: str) -> tuple[str, list[dict[str, Any]]]:
         events = await self._store.load_events(self.session_id)
         loaded = await load_preference_context(
             store=self._store,
@@ -422,6 +446,19 @@ class Agent:
         system = assemble_system(sections)
         runtime = self._bound_runtime(turn, run_id)
         tools = runtime.openai_tools()
+        return system, tools
+
+    async def _model_step(
+        self,
+        *,
+        turn: int,
+        step: int,
+        run_id: str,
+        system: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+    ):
+        if system is None or tools is None:
+            system, tools = await self._request_context(turn=turn, run_id=run_id)
         header = header_snapshot(
             system=system,
             tools=tools,

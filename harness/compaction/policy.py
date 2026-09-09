@@ -10,6 +10,8 @@ import math
 class CompactPolicy:
     context_window: int = 65536
     trigger_ratio: float = 0.8
+    target_ratio: float = 0.6
+    output_reserve_ratio: float = 0.2
     retain_ratio: float = 0.16
     max_overflow_retries: int = 1
     prune_chars: int = 8192
@@ -35,3 +37,12 @@ def compact_limit(policy: CompactPolicy) -> int:
 
 def retain_limit(policy: CompactPolicy) -> int:
     return math.floor(policy.context_window * policy.retain_ratio)
+
+
+def target_limit(policy: CompactPolicy) -> int:
+    """压缩后完整输入（system + messages + tools）的目标上限。"""
+    return math.floor(policy.context_window * policy.target_ratio)
+
+
+def output_reserve(policy: CompactPolicy) -> int:
+    return math.floor(policy.context_window * policy.output_reserve_ratio)

@@ -331,7 +331,7 @@ async def test_compaction_writes_committed_summary_without_splitting_pair():
     messages = derive_messages(events)
     compacted = [item for item in messages if item.source == "compaction"]
     assert compacted
-    assert compacted[0].content == "较早已查乙公司相关材料。"
+    assert "较早已查乙公司相关材料。" in compacted[0].content
     assert not any(item.call_id == "c1" for item in messages)
     assert messages[-1].content == "当前问题"
 
