@@ -8,6 +8,7 @@ from harness.tools.errors import (
     classify,
     enrich_tool_result,
     error_result,
+    normalize_tool_result,
 )
 from harness.tools.retry_policy import USER_UNAVAILABLE_HINT
 
@@ -42,6 +43,7 @@ def test_classify_known_codes():
     assert classify("finalign_unavailable").action == ToolErrorAction.SURFACE
     assert classify("iwencai_not_configured").error_class == ToolErrorClass.UNAVAILABLE
     assert classify("cancelled").error_class == ToolErrorClass.CONTROL
+    assert classify("tool_contract_error").error_class == ToolErrorClass.CONTRACT
 
 
 def test_classify_infers_unlisted_codes():
@@ -62,6 +64,28 @@ def test_enrich_adds_class_to_bare_failure():
     payload = enrich_tool_result({"ok": False, "error": "empty_result"})
     assert payload["error_class"] == "empty"
     assert payload["model_guidance"]
+
+
+def test_normalize_accepts_soft_success_values():
+    assert normalize_tool_result("done", tool="demo") == {"ok": True, "content": "done"}
+    assert normalize_tool_result({"data": [1]}, tool="demo") == {"ok": True, "data": [1]}
+
+
+def test_normalize_rejects_invalid_result_contract():
+    null_result = normalize_tool_result(None, tool="demo")
+    assert null_result["error"] == "tool_contract_error"
+    assert null_result["error_class"] == "contract"
+    assert null_result["metadata"]["contract_reason"] == "null_result"
+
+    missing_error = normalize_tool_result({"ok": False}, tool="demo")
+    assert missing_error["error"] == "tool_contract_error"
+    assert missing_error["metadata"]["contract_reason"] == "missing_error"
+
+
+def test_normalize_rejects_non_serializable_payload():
+    payload = normalize_tool_result({"ok": True, "content": object()}, tool="demo")
+    assert payload["error"] == "tool_contract_error"
+    assert payload["metadata"]["contract_reason"] == "not_json_serializable"
 
 
 def test_policy_without_success_publishes():

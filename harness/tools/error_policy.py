@@ -27,6 +27,19 @@ _RETRY_FAMILY = frozenset(
     }
 )
 
+# 只有临时基础设施故障适合不改参数、原样再次调用。
+SAME_CALL_RETRYABLE = frozenset({ToolErrorClass.TRANSIENT.value})
+
+# 这些错误可以恢复，但必须修改参数、工具或数据源。
+RECOVERABLE_WITH_CHANGE = frozenset(
+    {
+        ToolErrorClass.INVALID_INPUT.value,
+        ToolErrorClass.EMPTY.value,
+        ToolErrorClass.UNAVAILABLE.value,
+        ToolErrorClass.CONTRACT.value,
+    }
+)
+
 GIVE_UP_INJECT = (
     "同一工具已重试一次仍失败。若没有更匹配的工具或技能，请直接用原话回复用户："
     f"{USER_UNAVAILABLE_HINT}"

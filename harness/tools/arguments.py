@@ -6,6 +6,17 @@ import json
 from typing import Any, Mapping
 
 
+_JSON_TYPES = {
+    "object": dict,
+    "array": list,
+    "string": str,
+    "integer": int,
+    "number": (int, float),
+    "boolean": bool,
+    "null": type(None),
+}
+
+
 def parse_json_objects(raw: Any) -> list[dict[str, Any]]:
     """解码一个或多个首尾相接的 JSON 对象；兼容 ``_raw`` 包裹。"""
     if isinstance(raw, dict):
@@ -78,6 +89,52 @@ def coerce_tool_arguments(
     for item in parse_json_objects(raw):
         payloads.append(filter_tool_arguments(item, openai_schema=openai_schema))
     return payloads
+
+
+def validate_tool_arguments(
+    payload: Mapping[str, Any], *, openai_schema: Mapping[str, Any] | None
+) -> list[str]:
+    """校验常用 JSON Schema 约束；返回适合日志的简短错误列表。"""
+    if not openai_schema:
+        return []
+    function = openai_schema.get("function")
+    parameters = function.get("parameters") if isinstance(function, Mapping) else openai_schema.get("parameters")
+    if not isinstance(parameters, Mapping):
+        return []
+    errors: list[str] = []
+    required = parameters.get("required") or []
+    for name in required:
+        if name not in payload:
+            errors.append(f"missing required field: {name}")
+    properties = parameters.get("properties") or {}
+    if not isinstance(properties, Mapping):
+        return errors
+    for name, value in payload.items():
+        spec = properties.get(name)
+        if not isinstance(spec, Mapping):
+            continue
+        expected = spec.get("type")
+        expected_types = expected if isinstance(expected, list) else [expected]
+        if expected and not any(_matches_json_type(value, item) for item in expected_types):
+            errors.append(f"invalid type for {name}: expected {expected}")
+            continue
+        if "enum" in spec and value not in spec.get("enum", []):
+            errors.append(f"invalid value for {name}: not in enum")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if "minimum" in spec and value < spec["minimum"]:
+                errors.append(f"invalid value for {name}: below minimum")
+            if "maximum" in spec and value > spec["maximum"]:
+                errors.append(f"invalid value for {name}: above maximum")
+    return errors
+
+
+def _matches_json_type(value: Any, expected: Any) -> bool:
+    python_type = _JSON_TYPES.get(str(expected))
+    if python_type is None:
+        return True
+    if expected in {"integer", "number"} and isinstance(value, bool):
+        return False
+    return isinstance(value, python_type)
 
 
 def merge_tool_results(results: list[Mapping[str, Any]]) -> dict[str, Any]:

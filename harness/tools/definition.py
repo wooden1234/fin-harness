@@ -6,7 +6,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-ToolHandler = Callable[[dict[str, Any]], Awaitable[Mapping[str, Any]]]
+# Handler 允许返回宽松业务值；ToolPipeline 会把它归一化为 Mapping。
+ToolHandler = Callable[[dict[str, Any]], Awaitable[Any]]
 
 
 def function_schema(
