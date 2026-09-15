@@ -1,5 +1,7 @@
 """Harness 运行时错误。"""
 
+from __future__ import annotations
+
 
 class HarnessError(Exception):
     def __init__(self, message: str = "", *, code: str = "error") -> None:
@@ -31,6 +33,25 @@ class AgentBusyError(HarnessError):
 class PersistFailedError(HarnessError):
     def __init__(self, message: str = "persist failed") -> None:
         super().__init__(message, code="persist_failed")
+
+
+class ContextBudgetExhaustedError(HarnessError):
+    def __init__(
+        self,
+        *,
+        context_window: int,
+        final_tokens: int,
+        stages: list[str],
+        protected_tokens: int = 0,
+    ) -> None:
+        self.context_window = context_window
+        self.final_tokens = final_tokens
+        self.stages = tuple(stages)
+        self.protected_tokens = protected_tokens
+        super().__init__(
+            f"context budget exhausted: {final_tokens}/{context_window}",
+            code="context_budget_exhausted",
+        )
 
 
 class ApprovalError(HarnessError):

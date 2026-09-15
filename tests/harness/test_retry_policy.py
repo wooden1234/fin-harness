@@ -4,6 +4,7 @@ import pytest
 
 from harness.tools.retry_policy import (
     allocate_tool_attempts,
+    blocked_retries,
     should_publish_unavailable,
     tool_attempt_counts,
 )
@@ -28,6 +29,51 @@ def test_allocate_respects_prior_counts():
     calls = [SimpleNamespace(name="lookup_fail", call_id="c3")]
     blocked, _counts = allocate_tool_attempts(calls, prior_counts={"lookup_fail": 2})
     assert blocked == {"c3"}
+
+
+def test_contract_failure_blocks_same_tool_retry():
+    from harness.session.types import SessionEvent
+    from datetime import datetime, timezone
+
+    def event(event_type, data):
+        return SessionEvent(
+            seq=1, event_id="e", event_type=event_type, schema_version=1,
+            run_id="r", turn=1, step=1, causation_seq=None,
+            correlation_id=None, surface_op="append", source_event_seqs=(),
+            visibility="public", data=data, created_at=datetime.now(timezone.utc),
+        )
+
+    events = [
+        event("tool/call", {"call_id": "c1", "name": "demo", "arguments": '{"q":"x"}'}),
+        event("tool/result", {"call_id": "c1", "name": "demo", "ok": False,
+                              "error": "tool_contract_error", "error_class": "contract"}),
+    ]
+    calls = [SimpleNamespace(name="demo", call_id="c2", arguments='{"q":"y"}')]
+    blocked = blocked_retries(calls, events=events, turn=1)
+    assert blocked["c2"]["error"] == "contract_retry_blocked"
+
+
+def test_invalid_input_requires_changed_arguments():
+    from harness.session.types import SessionEvent
+    from datetime import datetime, timezone
+
+    def event(event_type, data):
+        return SessionEvent(
+            seq=1, event_id="e", event_type=event_type, schema_version=1,
+            run_id="r", turn=1, step=1, causation_seq=None,
+            correlation_id=None, surface_op="append", source_event_seqs=(),
+            visibility="public", data=data, created_at=datetime.now(timezone.utc),
+        )
+
+    events = [
+        event("tool/call", {"call_id": "c1", "name": "demo", "arguments": '{"q":"x"}'}),
+        event("tool/result", {"call_id": "c1", "name": "demo", "ok": False,
+                              "error": "malformed_arguments", "error_class": "invalid_input"}),
+    ]
+    same = [SimpleNamespace(name="demo", call_id="c2", arguments='{"q": "x"}')]
+    changed = [SimpleNamespace(name="demo", call_id="c3", arguments='{"q":"y"}')]
+    assert "c2" in blocked_retries(same, events=events, turn=1)
+    assert blocked_retries(changed, events=events, turn=1) == {}
 
 
 @pytest.mark.asyncio

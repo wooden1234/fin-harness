@@ -15,6 +15,7 @@ from harness.tools.errors import enrich_tool_result, error_result
 from harness.tools.pipeline import ToolPipeline
 from harness.tools.retry_policy import (
     allocate_tool_attempts,
+    blocked_retries,
     retry_exhausted_result,
     tool_attempt_counts,
     unknown_tool_result,
@@ -57,10 +58,21 @@ async def execute_tool_calls(
 ) -> SchedulerOutcome:
     if not calls:
         return SchedulerOutcome(results=[])
+    events = await store.load_events(session_id)
+    blocked_ids, _counts = allocate_tool_attempts(
+        calls,
+        prior_counts=tool_attempt_counts(events, turn=turn),
+    )
+    policy_blocks = blocked_retries(calls, events=events, turn=turn)
     approval_call = None
     for call in calls:
         definition = runtime.resolve(call.name)
-        if definition is not None and definition.requires_human_approval:
+        if (
+            definition is not None
+            and definition.requires_human_approval
+            and call.call_id not in blocked_ids
+            and call.call_id not in policy_blocks
+        ):
             approval_call = call
             break
     if approval_call is not None:
@@ -82,7 +94,11 @@ async def execute_tool_calls(
             )
             if call.call_id == approval_call.call_id:
                 continue
-            deferred = error_result("deferred_for_approval", name=call.name)
+            deferred = policy_blocks.get(call.call_id)
+            if deferred is None and call.call_id in blocked_ids:
+                deferred = retry_exhausted_result(call.name)
+            if deferred is None:
+                deferred = error_result("deferred_for_approval", name=call.name)
             await store.append(
                 session_id,
                 EventDraft(
@@ -96,6 +112,8 @@ async def execute_tool_calls(
                         "name": call.name,
                         "ok": False,
                         "content": json.dumps(deferred, ensure_ascii=False),
+                        "error": deferred.get("error"),
+                        "error_class": deferred.get("error_class"),
                     },
                 ),
             )
@@ -122,12 +140,6 @@ async def execute_tool_calls(
             name=approval_call.name,
         )
 
-    events = await store.load_events(session_id)
-    blocked_ids, _counts = allocate_tool_attempts(
-        calls,
-        prior_counts=tool_attempt_counts(events, turn=turn),
-    )
-
     async def _one(call: ToolCallDraft) -> dict[str, Any]:
         await store.append(
             session_id,
@@ -144,6 +156,8 @@ async def execute_tool_calls(
             result = error_result("cancelled")
         elif definition is None:
             result = unknown_tool_result(call.name)
+        elif call.call_id in policy_blocks:
+            result = policy_blocks[call.call_id]
         elif call.call_id in blocked_ids:
             result = retry_exhausted_result(call.name)
         else:

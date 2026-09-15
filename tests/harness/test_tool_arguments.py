@@ -89,3 +89,52 @@ async def test_pipeline_runs_concatenated_objects_in_parallel():
         "永鼎股份 2026年半年报业绩预告 净利润",
     ]
     assert len(result["data"]["datas"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_pipeline_normalizes_invalid_handler_result():
+    async def handler(_arguments: dict):
+        return None
+
+    definition = ToolDefinition(
+        tool_id="demo.invalid",
+        name="demo_invalid",
+        description="invalid result",
+        handler=handler,
+        openai_schema=function_schema("demo_invalid", "invalid result"),
+    )
+    result = await ToolPipeline().run(definition, {})
+    assert result["ok"] is False
+    assert result["error"] == "tool_contract_error"
+    assert result["error_class"] == "contract"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_validates_required_and_type_before_handler():
+    called = False
+
+    async def handler(_arguments: dict):
+        nonlocal called
+        called = True
+        return {"ok": True}
+
+    definition = ToolDefinition(
+        tool_id="demo.validated",
+        name="demo_validated",
+        description="validated",
+        handler=handler,
+        openai_schema=function_schema(
+            "demo_validated",
+            "validated",
+            {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "minimum": 1}},
+                "required": ["limit"],
+            },
+        ),
+    )
+    missing = await ToolPipeline().run(definition, {})
+    wrong_type = await ToolPipeline().run(definition, {"limit": "ten"})
+    assert missing["error"] == "malformed_arguments"
+    assert wrong_type["error"] == "malformed_arguments"
+    assert called is False

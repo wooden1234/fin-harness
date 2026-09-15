@@ -7,9 +7,9 @@ from typing import Any, Mapping
 
 from pydantic import ValidationError
 
-from harness.tools.arguments import coerce_tool_arguments, merge_tool_results
+from harness.tools.arguments import coerce_tool_arguments, merge_tool_results, validate_tool_arguments
 from harness.tools.definition import ToolDefinition
-from harness.tools.errors import MALFORMED_ARGUMENTS, error_result
+from harness.tools.errors import MALFORMED_ARGUMENTS, error_result, normalize_tool_result
 
 
 class ToolPipeline:
@@ -19,11 +19,21 @@ class ToolPipeline:
             return error_result(MALFORMED_ARGUMENTS, tool=definition.tool_id)
 
         async def _invoke(payload: dict[str, Any]) -> Mapping[str, Any]:
+            validation_errors = validate_tool_arguments(
+                payload, openai_schema=definition.openai_schema
+            )
+            if validation_errors:
+                return error_result(
+                    MALFORMED_ARGUMENTS,
+                    tool=definition.tool_id,
+                    message="; ".join(validation_errors)[:400],
+                )
             try:
-                return await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     definition.handler(payload),
                     timeout=definition.timeout_seconds,
                 )
+                return normalize_tool_result(result, tool=definition.tool_id)
             except asyncio.TimeoutError:
                 return error_result("tool_timeout", tool=definition.tool_id)
             except ValidationError as exc:

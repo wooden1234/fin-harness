@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from collections import Counter
+import json
 from typing import Any, Mapping, Sequence
 
 from harness.session.types import SessionEvent
-from harness.tools.errors import error_result, publishes_if_no_success
+from harness.tools.errors import ToolErrorClass, classify, error_result, publishes_if_no_success
 
 MAX_ATTEMPTS_PER_TOOL = 2
 UNLIMITED_TOOLS = frozenset({"todo_write"})
@@ -78,6 +79,59 @@ def unknown_tool_result(name: str) -> dict[str, Any]:
         message=UNKNOWN_TOOL_MESSAGE,
         user_hint=USER_UNAVAILABLE_HINT,
     )
+
+
+def blocked_retries(
+    calls: Sequence[Any], *, events: Sequence[SessionEvent], turn: int
+) -> dict[str, dict[str, Any]]:
+    """拦截确定无意义的重试；参数类/空结果仅拦截相同参数。"""
+    calls_by_id: dict[str, SessionEvent] = {}
+    latest_failure: dict[str, SessionEvent] = {}
+    for event in events:
+        if event.turn != turn:
+            continue
+        if event.event_type == "tool/call":
+            calls_by_id[str(event.data.get("call_id") or "")] = event
+        elif event.event_type == "tool/result" and event.data.get("ok") is False:
+            name = str(event.data.get("name") or "").strip()
+            if name:
+                latest_failure[name] = event
+
+    blocked: dict[str, dict[str, Any]] = {}
+    for call in calls:
+        name = str(getattr(call, "name", "") or "").strip()
+        call_id = str(getattr(call, "call_id", "") or "")
+        failure = latest_failure.get(name)
+        if failure is None:
+            continue
+        error_class = str(failure.data.get("error_class") or "")
+        if not error_class:
+            error_class = classify(str(failure.data.get("error") or "")).error_class.value
+        if error_class == ToolErrorClass.TRANSIENT.value:
+            continue
+        if error_class in {ToolErrorClass.INVALID_INPUT.value, ToolErrorClass.EMPTY.value}:
+            previous = calls_by_id.get(str(failure.data.get("call_id") or ""))
+            if previous is None or _canonical_arguments(previous.data.get("arguments")) != _canonical_arguments(
+                getattr(call, "arguments", "")
+            ):
+                continue
+            code = "retry_requires_change"
+        elif error_class == ToolErrorClass.UNAVAILABLE.value:
+            code = "unavailable_retry_blocked"
+        elif error_class == ToolErrorClass.CONTRACT.value:
+            code = "contract_retry_blocked"
+        else:
+            continue
+        blocked[call_id] = error_result(code, name=name)
+    return blocked
+
+
+def _canonical_arguments(raw: Any) -> str:
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return str(raw or "").strip()
 
 
 def turn_has_successful_data_tool(events: Sequence[SessionEvent], *, turn: int) -> bool:

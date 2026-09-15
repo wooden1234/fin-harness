@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+import json
 from typing import Any, Mapping
 
 
@@ -20,6 +21,7 @@ class ToolErrorClass(StrEnum):
     POLICY = "policy"  # 运行时规则：未知工具、重试耗尽
     COMPENSATE = "compensate"  # 成稿模型不可用，主路径根据已有材料作答
     CONTROL = "control"  # 取消、等待审批，不是对用户的失败
+    CONTRACT = "contract"  # 工具返回不符合最小结果契约，禁止原样重试
 
 
 class ToolErrorAction(StrEnum):
@@ -48,6 +50,7 @@ _GUIDANCE = {
         "请根据本轮已检索的 tool/result 直接用正文回答用户。"
     ),
     ToolErrorClass.CONTROL: "",
+    ToolErrorClass.CONTRACT: "工具返回格式不符合约定。不要原样重试；可换用其它工具，或根据已有信息继续回答。",
 }
 
 _CATALOG: dict[str, ToolErrorSpec] = {}
@@ -84,6 +87,7 @@ for _code in (
     "query_must_not_be_empty",
     "invalid_call_type",
     "invalid_calculation_batch_size",
+    "retry_requires_change",
 ):
     _add(_code, ToolErrorClass.INVALID_INPUT)
 for _code in (
@@ -116,10 +120,13 @@ for _code in (
     "invalid_api_key",
     "iwencai_auth_failed",
     "skill_runner_disabled",
+    "unavailable_retry_blocked",
 ):
     _add(_code, ToolErrorClass.UNAVAILABLE)
 for _code in ("finalign_unavailable", "draft_disabled"):
     _add(_code, ToolErrorClass.COMPENSATE)
+_add("tool_contract_error", ToolErrorClass.CONTRACT)
+_add("contract_retry_blocked", ToolErrorClass.CONTRACT)
 
 
 def _infer_class(code: str) -> ToolErrorClass:
@@ -166,6 +173,51 @@ def enrich_tool_result(result: Mapping[str, Any] | None) -> dict[str, Any]:
     spec = classify(str(payload.get("error") or ""))
     payload.setdefault("error_class", spec.error_class.value)
     payload.setdefault("model_guidance", spec.guidance)
+    return payload
+
+
+def normalize_tool_result(value: Any, *, tool: str) -> dict[str, Any]:
+    """把宽松的 handler 返回归一化为可持久化的最小工具信封。"""
+    if value is None:
+        return error_result(
+            "tool_contract_error",
+            tool=tool,
+            metadata={"contract_reason": "null_result"},
+        )
+
+    if isinstance(value, Mapping):
+        payload = dict(value)
+        if payload.get("ok") is False and not str(payload.get("error") or "").strip():
+            return error_result(
+                "tool_contract_error",
+                tool=tool,
+                metadata={"contract_reason": "missing_error"},
+            )
+        if payload.get("error") and payload.get("ok") is not False:
+            payload["ok"] = False
+        else:
+            payload.setdefault("ok", True)
+        payload = enrich_tool_result(payload)
+    elif isinstance(value, (str, int, float, bool, list)):
+        payload = {"ok": True, "content": value}
+    else:
+        return error_result(
+            "tool_contract_error",
+            tool=tool,
+            metadata={
+                "contract_reason": "unsupported_return_type",
+                "actual_type": type(value).__name__,
+            },
+        )
+
+    try:
+        json.dumps(payload, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return error_result(
+            "tool_contract_error",
+            tool=tool,
+            metadata={"contract_reason": "not_json_serializable"},
+        )
     return payload
 
 

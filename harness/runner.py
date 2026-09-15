@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from harness.agent.manager import AgentManager
+from harness.control.manager import AgentManager
 from harness.context import RunContext, build_run_context
 from harness.policy import pre_check
-from harness.session.store import InMemorySessionStore
-from harness.tools.runtime import ToolRuntime
+from harness.runtime import InMemorySessionStore, ToolRuntime
 
 
 async def run_agent(
