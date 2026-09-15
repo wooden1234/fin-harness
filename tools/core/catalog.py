@@ -14,6 +14,7 @@ TOOL_MODULES: tuple[str, ...] = (
     "tools.finance",
     "tools.calculation",
     "tools.analysis",
+    "mcp.adapters.tyc",
 )
 
 _loaded = False

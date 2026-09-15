@@ -287,5 +287,11 @@ class Settings(BaseSettings):
     # text_to_sql：连续相同 validation_error_type 多少次后提前放弃纠错
     FINANCIAL_SQL_MAX_REPEAT_SAME_ERROR: int = 2
 
+    # 天眼查 MCP（魔搭 ModelScope Streamable HTTP）。密钥只从环境变量读取。
+    TYC_MCP_ENABLED: bool = False
+    TYC_MCP_URL: str = ""
+    TYC_MCP_TOKEN: str = ""
+    TYC_MCP_TIMEOUT_SEC: float = 30.0
+
 
 settings = Settings()

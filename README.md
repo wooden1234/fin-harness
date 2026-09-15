@@ -188,6 +188,7 @@ pytest
 | `LANGGRAPH_CHECKPOINT_URL` | LangGraph 状态持久化 |
 | `SECRET_KEY` | JWT 签名密钥 |
 | `IWENCAI_API_KEY` | 问财选股 / 市场数据（若启用） |
+| `TYC_MCP_URL` / `TYC_MCP_TOKEN` | 天眼查 MCP（魔搭托管；需 `TYC_MCP_ENABLED=true`） |
 
 > `.env` 已在 `.gitignore` 中，请勿提交至仓库。
 
