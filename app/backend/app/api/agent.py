@@ -8,7 +8,7 @@ import time
 import uuid
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, Form, HTTPException
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from agents.guardrails.input.secrets import check_secrets
@@ -31,6 +31,7 @@ from harness.approval.service import pending_approvals
 from harness.contracts.errors import AgentBusyError, ApprovalError
 from harness.projection.sse import project_session_event, sse_cursor_after_completed_turns
 from harness.runtime import product_manager
+from harness.tracing import incoming_trace_context
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 logger = get_logger(service="agent")
@@ -301,6 +302,7 @@ async def _stream_agent(
 
 @router.post("/query")
 async def agent_query(
+    request: Request,
     query: str = Form(...),
     conversation_id: Optional[str] = Form(None),
     client_message_id: Optional[str] = Form(None),
@@ -365,7 +367,8 @@ async def agent_query(
         raise
 
     started = time.monotonic()
-    run_task = asyncio.create_task(agent.prompt(effective_query, source="user"))
+    with incoming_trace_context(request.headers, thread_id=agent.session_id):
+        run_task = asyncio.create_task(agent.prompt(effective_query, source="user"))
 
     async def process_stream():
         async for chunk in _stream_agent(
@@ -393,6 +396,7 @@ async def agent_query(
 
 @router.post("/resume")
 async def agent_resume(
+    request: Request,
     conversation_id: str = Form(...),
     query: str = Form(""),
     approval_id: Optional[str] = Form(None),
@@ -438,9 +442,10 @@ async def agent_resume(
             logger.exception("failed to mark resume run failed: {}", run_id)
         raise
     started = time.monotonic()
-    run_task = asyncio.create_task(
-        agent.resume_approval(target_id, decision=chosen)
-    )
+    with incoming_trace_context(request.headers, thread_id=agent.session_id):
+        run_task = asyncio.create_task(
+            agent.resume_approval(target_id, decision=chosen)
+        )
 
     async def process_stream():
         async for chunk in _stream_agent(

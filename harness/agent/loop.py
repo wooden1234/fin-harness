@@ -23,6 +23,7 @@ from harness.tools.runtime import ToolRuntime
 from harness.tools.scheduler import execute_tool_calls
 from harness.tools.retry_policy import USER_UNAVAILABLE_HINT
 from harness.runtime.context import request_header
+from harness.tracing import traceable, turn_langsmith_extra, without_self
 
 _MAX_STEPS = 30
 
@@ -54,6 +55,14 @@ class Agent:
         self._waiting: dict[str, Any] | None = None
 
     async def prompt(self, text: str, *, source: str = "user") -> RunResult:
+        return await self._prompt_impl(
+            text,
+            source=source,
+            langsmith_extra=turn_langsmith_extra(self.session_id, entry="prompt"),
+        )
+
+    @traceable(name="agent.turn", run_type="chain", process_inputs=without_self)
+    async def _prompt_impl(self, text: str, *, source: str = "user") -> RunResult:
         self._abort = asyncio.Event()
         self._published = None
         self._follow_ups = []
@@ -99,6 +108,14 @@ class Agent:
         )
 
     async def resume_approval(self, approval_id: str, *, decision: str = "allow") -> RunResult:
+        return await self._resume_approval_impl(
+            approval_id,
+            decision=decision,
+            langsmith_extra=turn_langsmith_extra(self.session_id, entry="resume"),
+        )
+
+    @traceable(name="agent.turn", run_type="chain", process_inputs=without_self)
+    async def _resume_approval_impl(self, approval_id: str, *, decision: str = "allow") -> RunResult:
         self._abort = asyncio.Event()
         self._published = None
         self._follow_ups = []
