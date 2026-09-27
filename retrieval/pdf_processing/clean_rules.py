@@ -483,6 +483,9 @@ def extract_blocks(
 
             if btype == "title":
                 title = _extract_text_from_block(block)
+                if is_noise_paragraph(title, rules):
+                    dropped_noise += 1
+                    continue
                 level = _title_level(block) or 1
                 if level == 1:
                     seen_level1 = True
@@ -527,6 +530,9 @@ def extract_blocks(
             if btype == "list":
                 text = _extract_text_from_block(block)
                 if not text:
+                    continue
+                if is_noise_paragraph(text, rules):
+                    dropped_noise += 1
                     continue
                 extracted.append(
                     ExtractedBlock(

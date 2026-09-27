@@ -47,6 +47,7 @@ ROOT_DIR = Path(_ROOT_DIR_STR)
 
 MANIFEST_PATH = ROOT_DIR / "knowledge" / "raw" / "manifest_pdf.yaml"
 DEFAULT_OUTPUT_DIR = ROOT_DIR / "knowledge" / "cleaned"
+PARSED_DIR = ROOT_DIR / "knowledge" / "parsed"
 INGEST_MANIFEST_PATH = DEFAULT_OUTPUT_DIR / "ingest_manifest.json"
 
 logger = logging.getLogger(__name__)
@@ -108,6 +109,34 @@ def _part_start_from_dir(parsed_dir: Path) -> int:
     return int(m.group("start")) if m else 1
 
 
+def _parsed_parts_from_disk(category: str, file: str) -> list[ParsedPart]:
+    """manifest 未写 parsed_path 时，按文件名对齐 knowledge/parsed/<category>/。"""
+    stem = Path(file).stem
+    category_dir = PARSED_DIR / category
+    if not category_dir.is_dir():
+        return []
+    matches = sorted(
+        path
+        for path in category_dir.iterdir()
+        if path.is_dir()
+        and (path.name == stem or path.name.startswith(f"{stem}_p"))
+        and find_content_list_v2(path) is not None
+    )
+    parts: list[ParsedPart] = []
+    for index, parsed_path in enumerate(matches, start=1):
+        matched = _SPLIT_PAGE_RE.search(parsed_path.name)
+        page_range = f"{matched.group('start')}-{matched.group('end')}" if matched else None
+        parts.append(
+            ParsedPart(
+                parsed_path=parsed_path,
+                page_range=page_range,
+                part_index=index,
+                part_start=_part_start_from_dir(parsed_path),
+            )
+        )
+    return parts
+
+
 def discover_ingest_jobs(
     manifest: dict[str, Any],
     *,
@@ -153,6 +182,8 @@ def discover_ingest_jobs(
                         part_start=_part_start_from_dir(parsed_path),
                     )
                 )
+            else:
+                parts = _parsed_parts_from_disk(category, doc["file"])
 
             if not parts:
                 logger.warning(f"跳过无 parsed_path 的文档: {doc_id}")

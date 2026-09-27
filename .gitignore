@@ -57,8 +57,13 @@ app/frontend/.vite/
 logs/
 *.log
 
-# Knowledge base artifacts (large generated data; keep eval sets)
+# Knowledge base artifacts (large generated data)
 knowledge/
+
+# Retrieval eval artifacts
+retrieval/eval/*.json
+retrieval/eval/*.jsonl
+retrieval/eval/README.md
 
 # Documentation (local only)
 docs/

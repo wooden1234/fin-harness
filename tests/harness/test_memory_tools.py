@@ -41,6 +41,32 @@ async def test_memory_write_rejects_invalid_value(monkeypatch):
     result = await write.handler({"memory_key": "response_language", "value": "fr-FR"})
     assert result["ok"] is False
     assert result["error"] == "invalid_memory_value"
+    assert "en-US" in result["model_guidance"]
+    assert "zh-CN" in result["model_guidance"]
+
+
+@pytest.mark.asyncio
+async def test_memory_write_accepts_common_language_aliases(monkeypatch):
+    store = InMemorySessionStore()
+    header = await store.create(tenant_id="tenant-1", user_id="7")
+    captured: dict[str, object] = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(version=1)
+
+    monkeypatch.setattr(
+        "app.services.memory.memory_service.MemoryService.create",
+        fake_create,
+    )
+    write = _definitions(store, header.session_id)["memory_write"]
+    result = await write.handler({"memory_key": "response_language", "value": "en"})
+    assert result["ok"] is True
+    assert result["value"] == "en-US"
+    assert captured["value"] == "en-US"
+
+    schema = write.openai_schema["function"]["parameters"]["properties"]["value"]["description"]
+    assert "response_language: zh-CN, en-US" in schema
 
 
 @pytest.mark.asyncio

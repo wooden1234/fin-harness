@@ -9,6 +9,7 @@ from harness.prompt.preferences import load_preference_context
 from harness.prompt.sections import default_sections, preference_sections
 from harness.session.store import SessionStore
 from harness.tools.analysis import TOOL_ID as FINALIGN_TOOL_ID, bind_finalign_analyze, finalign_is_ready
+from harness.tools.log_read import read_tool_log_definition
 from harness.tools.memory import memory_tool_definitions
 from harness.tools.runtime import ToolRuntime
 from harness.tools.skill import inject_skill_context
@@ -37,6 +38,7 @@ class AgentControl:
     def bind_runtime(self, *, turn: int, run_id: str, base_runtime: ToolRuntime) -> ToolRuntime:
         runtime = base_runtime.with_extra([
             todo_write_definition(self.store, self.session_id, turn=turn, run_id=run_id),
+            read_tool_log_definition(self.store, self.session_id),
             *memory_tool_definitions(self.store, self.session_id, run_id=run_id),
         ])
         if runtime.resolve(FINALIGN_TOOL_ID):

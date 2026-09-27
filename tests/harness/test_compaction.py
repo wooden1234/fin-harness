@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from harness.compaction.compact import (
@@ -13,7 +15,8 @@ from harness.compaction.compact import (
     prune_facts,
     shrink_summary_v2,
 )
-from harness.compaction.meter import request_tokens
+from harness.compaction.meter import request_tokens, surface_tokens
+from harness.compaction.project import project_tool_json
 from harness.compaction.policy import CompactPolicy
 from harness.compaction.schema import (
     CompactionDelta,
@@ -579,3 +582,78 @@ async def test_terminal_budget_error_has_no_retry_loop():
         if event.event_type == "invariant/violation"
     ]
     assert violations[-1].data["final_tokens"] == 100
+
+
+@pytest.mark.asyncio
+async def test_tool_trim_quantitative_workload():
+    """负载 1：超长 tool/result 走 tool-trim，不走 LLM 摘要。"""
+    store = InMemorySessionStore()
+    header = await store.create(tenant_id="t", user_id="1")
+    tool_body = "报" * 40_000
+    await _seed_turn(store, header.session_id, 1, user="问" * 200, tool=tool_body)
+
+    events_before = await store.load_events(header.session_id)
+    messages_before = derive_messages(events_before)
+    tokens_before = surface_tokens(messages_before)
+
+    token_limit = 30_000
+    changed = await maybe_compact(
+        store=store,
+        session_id=header.session_id,
+        llm=None,
+        turn=1,
+        run_id="r-tool-trim",
+        token_limit=token_limit,
+        allow_llm=False,
+    )
+
+    events_after = await store.load_events(header.session_id)
+    messages_after = derive_messages(events_after)
+    tokens_after = surface_tokens(messages_after)
+
+    replace = next(
+        event for event in events_after if event.event_type == "tool/result" and event.surface_op == "replace"
+    )
+    trimmed = str(replace.data.get("content") or "")
+    marker = "\n…[truncated]…\n"
+    expected_len = 4096 + len(marker) + 1024
+
+    assert changed is True
+    assert len(tool_body) == 40_000
+    assert len(trimmed) == expected_len
+    assert tokens_before > token_limit
+    assert tokens_after < token_limit
+    reduction = 1 - tokens_after / tokens_before
+    assert reduction > 0.85
+    assert not any(event.event_type == "compaction/summary" for event in events_after)
+
+    # 面试/报告可直接引用的一组数（pytest -s 时打印）
+    print(
+        "\n[tool-trim workload]"
+        f" chars_before={len(tool_body)} chars_after={len(trimmed)}"
+        f" tokens_before={tokens_before} tokens_after={tokens_after}"
+        f" reduction={reduction:.2%} token_limit={token_limit}"
+        f" stages=tool-trim-only"
+    )
+
+
+def test_record_projection_drops_whole_items_and_keeps_log_ref() -> None:
+    items = [
+        {"title": f"新闻{index}", "summary": "摘要" * 400, "url": f"http://n/{index}"}
+        for index in range(20)
+    ]
+    raw = json.dumps({"ok": True, "data": {"data": items}}, ensure_ascii=False)
+    projected = project_tool_json(raw, limit=1500, source_seq=42)
+    assert projected is not None
+    payload = json.loads(projected)
+    kept = payload["data"]["data"]
+    assert "…[truncated]…" not in projected
+    assert kept
+    assert all(item["title"].startswith("新闻") and "summary" in item for item in kept)
+    assert all(len(item["summary"]) <= 120 for item in kept)
+    assert payload["log_ref"] == {
+        "seq": 42,
+        "total": 20,
+        "omitted": 20 - len(kept),
+    }
+    assert len(projected) <= 1500

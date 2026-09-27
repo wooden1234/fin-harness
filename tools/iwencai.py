@@ -6,10 +6,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
 from datetime import timezone
 from pathlib import Path
+import asyncio
 import re
 import secrets
 from typing import Any
@@ -160,6 +161,78 @@ def _prioritize_finance_facts(row_facts: list[dict[str, Any]]) -> list[dict[str,
         for item in ordered
         if _finance_fact_rank(str(item.get("metric") or "")) < 90
     ]
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _screen_counts(data: dict[str, Any]) -> tuple[int, int, int]:
+    rows = data.get("datas") if isinstance(data.get("datas"), list) else []
+    returned = _as_int(data.get("returned_count"), len(rows))
+    matched = _as_int(data.get("code_count"), returned)
+    limit = _as_int(data.get("limit"), 0)
+    return matched, returned, limit
+
+
+def _with_screen_coverage(result: dict[str, Any]) -> dict[str, Any]:
+    """用命中数和返回数表示是否取完，不把翻页说明塞回模型。"""
+    payload = dict(result)
+    data = payload.get("data")
+    if payload.get("ok") is False or not isinstance(data, dict):
+        return payload
+    data = dict(data)
+    matched, returned, _limit = _screen_counts(data)
+    data.pop("pagination_tip", None)
+    data["coverage"] = {
+        "matched": matched,
+        "returned": returned,
+        "complete": matched <= returned,
+    }
+    payload["data"] = data
+    return payload
+
+
+async def _fill_screen(
+    skill_id: str,
+    *,
+    query: str,
+    page: int,
+    limit: int,
+    call_type: str,
+) -> dict[str, Any]:
+    """未取完且低于配置上限时，在同一次工具调用内补到上限。"""
+    version = installed_skill_version(skill_id)
+    result = await _run_cached_skill(
+        skill_id,
+        version=version,
+        query=query,
+        page=page,
+        limit=limit,
+        call_type=call_type,
+    )
+    if page != 1 or result.get("ok") is False:
+        return _with_screen_coverage(result)
+    data = result.get("data")
+    if not isinstance(data, dict):
+        return _with_screen_coverage(result)
+    matched, returned, used_limit = _screen_counts(data)
+    maximum = max(1, int(settings.IWENCAI_MAX_LIMIT))
+    if matched > returned and 0 < used_limit < maximum:
+        upgraded = await _run_cached_skill(
+            skill_id,
+            version=version,
+            query=query,
+            page=page,
+            limit=maximum,
+            call_type=call_type,
+        )
+        if upgraded.get("ok") is not False:
+            result = upgraded
+    return _with_screen_coverage(result)
 
 
 def _normalize_iwencai_payload(result: dict[str, Any]) -> dict[str, Any]:
@@ -424,6 +497,88 @@ async def _run_search_skill(
     )
 
 
+def _shared_search_condition(query: str, entities: list[str]) -> str:
+    """从问句里去掉已传入的公司名，只留下每家共用的检索条件。"""
+    text = " ".join(str(query or "").split())
+    remainder = text
+    for name in sorted(entities, key=len, reverse=True):
+        if name:
+            remainder = remainder.replace(name, " ")
+    remainder = re.sub(r"[\s、,，;；/|]+", " ", remainder).strip(" 、,，")
+    return remainder.strip()
+
+
+def _entity_search_query(condition: str, entity: str) -> str:
+    name = entity.strip()
+    text = " ".join(str(condition or "").split())
+    if not text:
+        return name
+    if text == name or text.startswith(f"{name} "):
+        return text
+    return f"{name} {text}"
+
+
+def _search_documents(result: Mapping[str, Any]) -> list[Any]:
+    if result.get("ok") is False:
+        return []
+    data = result.get("data")
+    if isinstance(data, list):
+        return [item for item in data if item]
+    if not isinstance(data, dict):
+        return []
+    for key in ("data", "datas", "list", "news", "items", "results"):
+        rows = data.get(key)
+        if isinstance(rows, list):
+            return [item for item in rows if item]
+    return []
+
+
+async def _search_by_entities(
+    skill_id: str,
+    query: str,
+    *,
+    limit: int = 10,
+    entities: Any = None,
+) -> dict[str, Any]:
+    """按 entities 逐家查询。名单为空时保持原来的一次查询。"""
+    names = normalize_iwencai_entities(entities)
+    if not names:
+        return await _run_search_skill(skill_id, query, limit=limit)
+
+    condition = _shared_search_condition(query, names)
+    queries = [(name, _entity_search_query(condition, name)) for name in names]
+
+    async def _one(name: str, text: str) -> tuple[str, str, list[Any]]:
+        try:
+            result = await _run_search_skill(skill_id, text, limit=limit)
+        except Exception:  # noqa: BLE001
+            return name, text, []
+        return name, text, _search_documents(result)
+
+    gathered = await asyncio.gather(*[_one(name, text) for name, text in queries])
+    groups: dict[str, list[Any]] = {}
+    missing: list[str] = []
+    issued: list[dict[str, str]] = []
+    for name, text, documents in gathered:
+        issued.append({"entity": name, "query": text})
+        if documents:
+            groups[name] = documents
+        else:
+            missing.append(name)
+    return {
+        "ok": True,
+        "provider": "iwencai",
+        "skill_id": skill_id,
+        "data": {
+            "query": query,
+            "entities": names,
+            "queries": issued,
+            "groups": groups,
+            "missing": missing,
+        },
+    }
+
+
 def _base_url() -> str:
     return settings.IWENCAI_BASE_URL.rstrip("/") + "/"
 
@@ -607,13 +762,11 @@ async def screen_iwencai(
     Args:
         query: 自然语言选股条件。
         page: 结果页码，从 1 开始。
-        limit: 每页返回条数。
+        limit: 每页返回条数。未取完时工具会提高到配置上限。
         call_type: 调用类型，只能是 normal 或 retry。
     """
-    skill_id = "hithink-astock-selector"
-    return await _run_cached_skill(
-        skill_id,
-        version=installed_skill_version(skill_id),
+    return await _fill_screen(
+        "hithink-astock-selector",
         query=query,
         page=page,
         limit=limit,
@@ -633,12 +786,12 @@ async def screen_iwencai_usstock(
     Args:
         query: 自然语言美股筛选条件。
         page: 结果页码，从 1 开始。
-        limit: 每页返回条数。
+        limit: 每页返回条数。未取完时工具会提高到配置上限。
         call_type: 调用类型，只能是 normal 或 retry。
     """
-    return await _run_query_skill(
+    return await _fill_screen(
         "hithink-usstock-selector",
-        query,
+        query=query,
         page=page,
         limit=limit,
         call_type=call_type,
@@ -758,12 +911,12 @@ async def screen_iwencai_fund(
     Args:
         query: 基金筛选语句。
         page: 结果页码，从 1 开始。
-        limit: 每页返回条数。
+        limit: 每页返回条数。未取完时工具会提高到配置上限。
         call_type: 调用类型，只能是 normal 或 retry。
     """
-    return await _run_query_skill(
+    return await _fill_screen(
         "hithink-fund-selector",
-        query,
+        query=query,
         page=page,
         limit=limit,
         call_type=call_type,
@@ -774,42 +927,63 @@ async def screen_iwencai_fund(
 async def search_iwencai_announcement(
     query: str,
     limit: int = 10,
+    entities: list[str] | None = None,
 ) -> dict[str, Any]:
     """搜索上市公司公告和重大事件。
 
     Args:
-        query: 公告搜索语句。
-        limit: 返回结果数量。
+        query: 公告搜索语句。多家公司时这里只写公共条件，例如「最新公告」。
+        limit: 每家公司的返回条数。
+        entities: 公司列表。传入后按列表逐家查询，每家单独占用 limit。
     """
-    return await _run_search_skill("announcement-search", query, limit=limit)
+    return await _search_by_entities(
+        "announcement-search",
+        query,
+        limit=limit,
+        entities=entities,
+    )
 
 
 @tool(parse_docstring=True)
 async def search_iwencai_report(
     query: str,
     limit: int = 10,
+    entities: list[str] | None = None,
 ) -> dict[str, Any]:
     """搜索券商研报和机构研究报告。
 
     Args:
-        query: 研报搜索语句。
-        limit: 返回结果数量。
+        query: 研报搜索语句。多家公司时这里只写公共条件，例如「最新研报」。
+        limit: 每家公司的返回条数。
+        entities: 公司列表。传入后按列表逐家查询，每家单独占用 limit。
     """
-    return await _run_search_skill("report-search", query, limit=limit)
+    return await _search_by_entities(
+        "report-search",
+        query,
+        limit=limit,
+        entities=entities,
+    )
 
 
 @tool(parse_docstring=True)
 async def search_iwencai_news(
     query: str,
     limit: int = 10,
+    entities: list[str] | None = None,
 ) -> dict[str, Any]:
     """搜索财经新闻、政策动态、行业革新和企业业务进展。
 
     Args:
-        query: 财经新闻搜索语句。
-        limit: 返回结果数量。
+        query: 财经新闻搜索语句。多家公司时这里只写公共条件，例如「最新新闻」。
+        limit: 每家公司的返回条数。
+        entities: 公司列表。传入后按列表逐家查询，每家单独占用 limit。
     """
-    return await _run_search_skill("news-search", query, limit=limit)
+    return await _search_by_entities(
+        "news-search",
+        query,
+        limit=limit,
+        entities=entities,
+    )
 
 
 register_tool(
