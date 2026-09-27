@@ -28,3 +28,43 @@ body {
 .animate-step-in {
   animation: step-in 0.28s ease-out;
 }
+
+/* 助手 Markdown 不用 prose 的标题阶梯，正文、表格、标题保持同一字号。 */
+.chat-markdown {
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.chat-markdown :where(h1, h2, h3, h4, p, li, td, th, blockquote, strong) {
+  font-size: 15px;
+  line-height: 1.7;
+  color: inherit;
+}
+
+.chat-markdown :where(h1, h2, h3, h4) {
+  font-weight: 600;
+  margin-top: 1.15em;
+  margin-bottom: 0.4em;
+}
+
+.chat-markdown :where(h1) {
+  margin-top: 0;
+}
+
+.chat-markdown :where(p) {
+  margin-top: 0.55em;
+  margin-bottom: 0.55em;
+}
+
+.chat-markdown :where(blockquote) {
+  font-style: normal;
+  font-weight: 400;
+}
+
+.chat-markdown :where(th) {
+  font-weight: 600;
+}
+
+.chat-markdown :where(table) {
+  font-size: 15px;
+}
