@@ -9,6 +9,7 @@ from agents.runtime_context import AgentRuntimeContext
 from agents.states import FinAgentState
 from app.core.logger import get_logger
 from app.services.memory.memory_command import (
+    extract_session_preferences,
     extract_turn_preferences,
     parse_memory_rule_action,
 )
@@ -31,6 +32,14 @@ def _latest_query(state: FinAgentState) -> str:
     return ""
 
 
+def _session_preferences(state: FinAgentState) -> dict[str, str]:
+    merged: dict[str, str] = {}
+    for message in list(state.get("messages") or []):
+        if isinstance(message, HumanMessage):
+            merged.update(extract_session_preferences(str(message.content)))
+    return merged
+
+
 async def memory_recall_node(
     state: FinAgentState,
     runtime: Runtime[AgentRuntimeContext],
@@ -38,10 +47,12 @@ async def memory_recall_node(
     context = runtime.context
     query = _latest_query(state)
     turn_preferences = extract_turn_preferences(query)
+    session_preferences = _session_preferences(state)
     if context is None:
         return {
             "memory_context": {},
             "turn_preferences": turn_preferences,
+            "session_preferences": session_preferences,
         }
     try:
         preferences = await recall_preferences(
@@ -55,6 +66,7 @@ async def memory_recall_node(
     return {
         "memory_context": preferences,
         "turn_preferences": turn_preferences,
+        "session_preferences": session_preferences,
     }
 
 

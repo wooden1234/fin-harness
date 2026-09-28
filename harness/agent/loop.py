@@ -14,6 +14,7 @@ from harness.control.policy import TurnPolicy
 from harness.compaction.compact import maybe_compact
 from harness.compaction.policy import compact_limit, policy_from_settings
 from harness.contracts.errors import ContextBudgetExhaustedError, InvariantError, LlmError
+from harness.finalization.language import enforce_response_language
 from harness.llm.types import StreamAssembler
 from harness.session.invariant import assert_model_request_logged
 from harness.session.store import SessionStore
@@ -205,7 +206,12 @@ class Agent:
     async def _publish(self, markdown: str, *, turn: int, run_id: str) -> None:
         if self._published:
             return
-        text = self._turn_policy.finalize(markdown)
+        compliant = await enforce_response_language(
+            markdown,
+            preferences=self._control.effective_preferences(run_id),
+            llm=self._llm,
+        )
+        text = self._turn_policy.finalize(compliant)
         if not text:
             return
         self._published = text
@@ -421,7 +427,11 @@ class Agent:
             abort=self._abort,
         ):
             assembler.push(chunk)
-            if chunk.kind == "content" and chunk.text:
+            if (
+                chunk.kind == "content"
+                and chunk.text
+                and getattr(self._store, "persist_assistant_chunks", True)
+            ):
                 await self._store.append(
                     self.session_id,
                     EventDraft(
@@ -437,6 +447,7 @@ class Agent:
     async def _close_turn(self, turn: int, run_id: str, reason: str) -> None:
         events = await self._store.load_events(self.session_id)
         if any(event.event_type == "turn/end" and event.turn == turn for event in events):
+            self._control.finish_run(run_id)
             return
         await self._store.append(
             self.session_id,
@@ -447,6 +458,7 @@ class Agent:
                 data={"turn": turn, "reason": reason},
             ),
         )
+        self._control.finish_run(run_id)
 
     async def _result(self, run_id: str, reason: str) -> RunResult:
         events = await self._store.load_events(self.session_id)

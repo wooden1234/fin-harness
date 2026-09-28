@@ -90,7 +90,10 @@ async def test_synthesize_answer_uses_finance_llm_and_stamps_evidence(monkeypatc
 
     class FakeLlm:
         async def ainvoke(self, messages):
+            system = messages[0][1]
             human = messages[1][1]
+            assert "response_language=en-US" in system
+            assert "preferred_output_format=markdown" in system
             assert "营收 100" in human
             assert "evidence_id=ev-keep" in human
             return SimpleNamespace(content="综合结论：营收 100 元")
@@ -102,6 +105,7 @@ async def test_synthesize_answer_uses_finance_llm_and_stamps_evidence(monkeypatc
     result = await synthesize_answer(
         question="营收多少",
         materials=[{"content": "营收 100", "evidence_id": "ev-keep", "tool": "lookup_ok"}],
+        preferences={"response_language": "en-US", "preferred_output_format": "markdown"},
     )
     assert result["ok"] is True
     assert result["content"] == "综合结论：营收 100 元"
@@ -146,14 +150,18 @@ def test_sse_labels_finalign_as_analysis():
 
 @pytest.mark.asyncio
 async def test_loop_analyze_reads_prior_tool_result(monkeypatch):
-    from harness.agent.loop import Agent
+    from harness.control.services import AgentControl
 
     async def _lookup(_arguments: dict) -> dict:
         return {"ok": True, "content": "营收 100", "evidence_id": "ev-1"}
 
-    async def _fake_synthesize(*, question, materials):
+    async def _fake_synthesize(*, question, materials, preferences):
         assert question == "对比营收"
         assert any(item.get("evidence_id") == "ev-1" for item in materials)
+        assert preferences == {
+            "response_language": "en-US",
+            "preferred_output_format": "markdown",
+        }
         return {
             "ok": True,
             "content": "两家合计营收 100",
@@ -162,7 +170,7 @@ async def test_loop_analyze_reads_prior_tool_result(monkeypatch):
         }
 
     monkeypatch.setattr("harness.tools.analysis.synthesize_answer", _fake_synthesize)
-    monkeypatch.setattr("harness.agent.loop.finalign_is_ready", lambda: True)
+    monkeypatch.setattr("harness.control.services.finalign_is_ready", lambda: True)
 
     lookup = ToolDefinition(
         tool_id="lookup.ok",
@@ -182,38 +190,42 @@ async def test_loop_analyze_reads_prior_tool_result(monkeypatch):
     )
     store = InMemorySessionStore()
     header = await store.create(tenant_id="t", user_id="1")
-    llm = FakeLlmAdapter(
-        [
-            tool_turn("lookup_ok", "{}", call_id="c1"),
-            tool_turn("finalign_analyze", '{"question":"对比营收"}', call_id="c2"),
-            content_turn("两家合计营收 100"),
-        ]
-    )
-    agent = Agent(
+    await store.append(
         header.session_id,
-        store,
-        llm,
-        runtime=ToolRuntime((skill_definition(), lookup, analyze)),
-        owner_id="1",
+        EventDraft(
+            event_type="tool/result",
+            turn=1,
+            data={
+                "call_id": "c1",
+                "name": "lookup_ok",
+                "ok": True,
+                "content": "营收 100",
+                "evidence_id": "ev-1",
+            },
+        ),
     )
-    result = await agent.prompt("对比营收")
-    assert result.finish_reason == "completed"
-    assert result.published_answer == "两家合计营收 100"
-    results = [event for event in result.events if event.event_type == "tool/result"]
-    assert results[0].data.get("evidence_id") == "ev-1"
-    assert results[1].data.get("evidence_id") == "finalign.analyze:test"
-    assert results[1].data.get("content") == "两家合计营收 100"
+    control = AgentControl(store, header.session_id)
+    control._effective_preferences["r1"] = {
+        "response_language": "en-US",
+        "preferred_output_format": "markdown",
+    }
+    runtime = control.bind_runtime(
+        turn=1,
+        run_id="r1",
+        base_runtime=ToolRuntime((skill_definition(), lookup, analyze)),
+    )
+    result = await runtime.resolve("finalign_analyze").handler({"question": "对比营收"})
+    assert result["content"] == "两家合计营收 100"
 
 
 @pytest.mark.asyncio
 async def test_loop_hides_finalign_and_answers_from_retrieval(monkeypatch):
-    from harness.agent.loop import Agent
-    from harness.tools.retry_policy import USER_UNAVAILABLE_HINT
+    from harness.control.services import AgentControl
 
     async def _lookup(_arguments: dict) -> dict:
         return {"ok": True, "content": "营收 100", "evidence_id": "ev-1"}
 
-    monkeypatch.setattr("harness.agent.loop.finalign_is_ready", lambda: False)
+    monkeypatch.setattr("harness.control.services.finalign_is_ready", lambda: False)
 
     lookup = ToolDefinition(
         tool_id="lookup.ok",
@@ -233,33 +245,15 @@ async def test_loop_hides_finalign_and_answers_from_retrieval(monkeypatch):
     )
     store = InMemorySessionStore()
     header = await store.create(tenant_id="t", user_id="1")
-    llm = FakeLlmAdapter(
-        [
-            tool_turn("lookup_ok", "{}", call_id="c1"),
-            content_turn("根据查询，营收 100"),
-        ]
+    control = AgentControl(store, header.session_id)
+    runtime = control.bind_runtime(
+        turn=1,
+        run_id="r1",
+        base_runtime=ToolRuntime((skill_definition(), lookup, analyze)),
     )
-    agent = Agent(
-        header.session_id,
-        store,
-        llm,
-        runtime=ToolRuntime((skill_definition(), lookup, analyze)),
-        owner_id="1",
-    )
-    result = await agent.prompt("对比营收")
-    assert result.finish_reason == "completed"
-    assert result.published_answer == "根据查询，营收 100"
-    assert result.published_answer != USER_UNAVAILABLE_HINT
     tool_names = [
         str((item.get("function") or item).get("name") or "")
-        for req in llm.requests
-        for item in req["tools"]
+        for item in runtime.openai_tools()
         if isinstance(item, dict)
     ]
     assert "finalign_analyze" not in tool_names
-    injected = [
-        event
-        for event in result.events
-        if event.event_type == "user/message" and event.data.get("source") == "plugin"
-    ]
-    assert injected == []

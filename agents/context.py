@@ -38,9 +38,10 @@ def conversation_messages(
     history = list(state.get("messages") or [])
     summary = project_conversation_context(state, purpose=purpose)
     memory_context = state.get("memory_context") or {}
+    session_preferences = state.get("session_preferences") or {}
     turn_preferences = state.get("turn_preferences") or {}
 
-    if not summary and not memory_context and not turn_preferences:
+    if not summary and not memory_context and not session_preferences and not turn_preferences:
         return history
 
     system_messages: list[SystemMessage] = []
@@ -55,7 +56,23 @@ def conversation_messages(
                 content=(
                     "[用户长期偏好]\n"
                     f"{preferences}\n"
-                    "仅在当前请求未明确指定时参考长期偏好；当前轮用户要求优先。"
+                    "回答默认遵守这些长期偏好，并覆盖身份段的默认中文与简洁设定。"
+                    "用户提问时使用的语言或打招呼不改变回答方式。"
+                    "只有用户明确声明本次会话改用某种方式时，才在本会话内改用该方式。"
+                )
+            )
+        )
+    if session_preferences:
+        preferences = "\n".join(
+            f"- {key}={value}" for key, value in sorted(session_preferences.items())
+        )
+        system_messages.append(
+            SystemMessage(
+                content=(
+                    "[本会话要求]\n"
+                    f"{preferences}\n"
+                    "用户已声明本会话采用这些方式。本会话内按这里回答，并覆盖冲突的长期偏好。"
+                    "不要写入长期记忆。"
                 )
             )
         )
@@ -68,7 +85,7 @@ def conversation_messages(
                 content=(
                     "[本轮临时要求]\n"
                     f"{preferences}\n"
-                    "这些要求只在当前轮生效，并覆盖冲突的长期偏好。"
+                    "这些要求只在当前轮生效，并覆盖冲突的长期偏好和本会话要求。"
                 )
             )
         )

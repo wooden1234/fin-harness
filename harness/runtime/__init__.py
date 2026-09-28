@@ -17,6 +17,7 @@ def product_manager():
     global _MANAGER
     if _MANAGER is None:
         from harness.llm.deepseek import DeepSeekAdapter
+        from harness.agent.postgres_leases import PostgresLeaseStore
         from harness.session.postgres import PostgresSessionStore
         from harness.control.manager import AgentManager
 
@@ -24,6 +25,7 @@ def product_manager():
             store=PostgresSessionStore(),
             llm=DeepSeekAdapter(),
             runtime=ToolRuntime.product(),
+            leases=PostgresLeaseStore(),
         )
     return _MANAGER
 

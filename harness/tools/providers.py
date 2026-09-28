@@ -6,7 +6,16 @@ from typing import Any, Mapping
 
 from harness.tools.definition import ToolDefinition, function_schema
 
-_EXCLUDED_PRODUCT_TOOLS = frozenset({"finance.query_advanced"})
+# These are compatibility registrations, not independent product capabilities.
+# Keep the Python entrypoints importable for legacy callers, but do not expose
+# duplicate/legacy finance tools to the Main Agent.  The canonical local fact
+# tool is ``knowledge.fact.lookup``; the external provider is ``iwencai.*``.
+_EXCLUDED_PRODUCT_TOOLS = frozenset(
+    {
+        "finance.query_advanced",
+        "finance.fact.lookup",
+    }
+)
 
 
 def _schema_from_langchain(name: str, description: str, langchain_tool: Any) -> dict[str, Any]:

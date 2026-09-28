@@ -15,7 +15,7 @@
 
 ## 2. 设计原则
 
-1. `session_event_log` 是“发生了什么以及先后顺序”的权威来源。
+1. `session_event_log` 是“发生了什么以及先后顺序”的审计权威，正文和对象当前状态由被引用的领域记录承载。
 2. 领域表是“某类对象当前是什么状态”的查询模型。
 3. `session_state_snapshots` 用于快速恢复 Harness 执行现场。
 4. `session_compactions` 用于缩短 LLM 上下文，不负责恢复执行现场。
@@ -24,6 +24,9 @@
 7. 大型工具结果、模型原始响应和生成文件不直接塞入事件日志。
 8. 任何有副作用的工具都必须支持幂等键或结果状态查询。
 9. `agent_sessions` 是当前状态索引，不是最终审计依据。
+10. Session 只持久化执行记录和恢复状态，不持有完整工具目录或工具实现。
+11. 工具目录属于应用级 Runtime；每个 Turn 基于硬约束生成临时、可重建的 Runtime View。
+12. 权威来源按职责划分：事件日志负责顺序与状态变化审计，领域表或对象存储负责正文和对象当前状态。
 
 ## 3. 当前实现
 
@@ -36,6 +39,12 @@
 - `Agent` 内存字段：`_published`、`_follow_ups`、`_waiting`、`_abort`。
 
 生产路径通过 `PostgresSessionStore` 将 Session 和事件写入 PostgreSQL。内存中的 `_sessions` 和 `_agents` 不落表，进程重启后会消失。
+
+当前所有产品 Session 默认共享同一个 `ToolRuntime.product()` 基础工具目录；每轮会绑定当前
+`session_id` 的 Todo、日志和记忆工具，并按可用性移除少量工具。目前尚未按能力域为每个 Turn
+生成不同的工具视图。工具定义本身不写入 Session，Session 只记录 `tool/call` 与
+`tool/result`。如需严格 replay，应保存该次模型调用的 `tools_hash`，必要时通过对象引用保存
+实际工具 Schema。
 
 当前事件契约包含：
 
@@ -55,6 +64,36 @@ invariant/violation
 ```
 
 其中 `request/context`、`inbox/spliced`、`inbox/discarded`、`session/seed-end` 当前只有契约或投影，尚未发现生产写入点，应在迁移时决定补齐还是删除。
+
+### 3.1 Session 与 Runtime 的边界
+
+Session 和工具目录必须解耦：
+
+```text
+Tool Catalog              应用级、只读，保存完整工具定义
+Base ToolRuntime          进程级组合，保存产品默认工具集合
+Turn Runtime View         本轮临时视图，应用来源、审批和可用性硬约束
+Session Event/Domain Row  只保存实际发生的调用、结果及恢复状态
+```
+
+每个 Turn 的工具处理流程：
+
+```text
+Base ToolRuntime
+  -> 移除全局禁用或不健康工具
+  -> 应用 source_locked、审批状态等确定性硬约束
+  -> 绑定当前 session_id/run_id/turn 的控制工具
+  -> 生成本次模型请求的 tools schema
+  -> 记录 tools_hash；严格 replay 时另存 tools_ref
+```
+
+不要把完整工具列表或工具实现复制到 `agent_sessions`，也不要把临时 Runtime View 作为长期
+Session 状态。恢复时应根据已版本化的策略和工具目录重建 View；只有严格重放需要保存当时实际
+发送给模型的 Schema。普通、意图不明确的问题仍由 Main Agent 在允许集合内选择工具，不能为此
+额外增加一次 LLM 路由。
+
+Session 的 `session_tool_calls` 记录“实际调用了什么”，`session_model_calls.tools_hash` 记录“模型当时
+看到了哪套工具”，二者职责不同。
 
 ## 4. 目标总体结构
 
@@ -90,13 +129,13 @@ flowchart TD
 | 表 | 职责 | 是否权威 |
 |---|---|---|
 | `agent_sessions` | Session 当前状态与快速索引 | 派生状态 |
-| `session_event_log` | 全局有序、轻量、不可变事件 | 是 |
-| `session_messages` | 用户消息、模型消息、最终答案 | 内容权威 |
-| `session_model_calls` | 每次模型请求及结果元信息 | 调用权威 |
-| `session_tool_calls` | 一次逻辑工具调用的当前状态 | 调用权威 |
-| `session_tool_attempts` | 工具的每一次实际尝试 | 尝试权威 |
-| `session_approvals` | 待审批事项与决定 | 审批权威 |
-| `session_compactions` | 模型上下文摘要及覆盖范围 | 上下文权威 |
+| `session_event_log` | 全局有序、轻量、不可变的状态变化索引 | 顺序与审计权威 |
+| `session_messages` | 用户消息、模型消息、最终答案 | 消息内容权威 |
+| `session_model_calls` | 每次模型请求及结果元信息 | 模型调用状态权威 |
+| `session_tool_calls` | 一次逻辑工具调用的当前状态 | 工具调用状态权威 |
+| `session_tool_attempts` | 工具的每一次实际尝试 | 工具尝试记录权威 |
+| `session_approvals` | 待审批事项与决定 | 审批状态权威 |
+| `session_compactions` | 模型上下文摘要及覆盖范围 | 已提交摘要权威 |
 | `session_todo_snapshots` | 每次完整 Todo 快照 | Todo 权威 |
 | `session_state_snapshots` | 某个 seq 时的运行状态 | 可重建缓存 |
 
@@ -131,6 +170,10 @@ CREATE TABLE app.agent_sessions (
     UNIQUE (tenant_id, user_id, conversation_id)
 );
 ```
+
+`conversation_id` 为空时不参与“恢复同一会话”的唯一性语义；创建可恢复会话时必须提供非空
+`conversation_id`。查找会话必须同时携带 `tenant_id`、`user_id` 和 `conversation_id`，不能先按
+全局 `conversation_id` 命中后再做归属判断。
 
 推荐状态：
 
@@ -194,7 +237,8 @@ seq=6  tool/result        payload_id=call-001
 ```sql
 CREATE TABLE app.session_messages (
     message_id UUID PRIMARY KEY,
-    session_id UUID NOT NULL,
+    session_id UUID NOT NULL REFERENCES app.agent_sessions(session_id),
+    event_seq BIGINT NOT NULL,
     run_id UUID,
     turn INTEGER,
     step INTEGER,
@@ -203,12 +247,16 @@ CREATE TABLE app.session_messages (
     content TEXT NOT NULL DEFAULT '',
     tool_calls JSONB,
     published BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    UNIQUE (session_id, event_seq)
 );
 
 CREATE INDEX ix_session_messages_surface
-    ON app.session_messages(session_id, turn, step, created_at);
+    ON app.session_messages(session_id, event_seq);
 ```
+
+消息顺序必须使用 `event_seq`，不得依赖 `created_at`；数据库时间戳可能相同，也不能表达严格因果顺序。
 
 保存：
 
@@ -223,7 +271,7 @@ CREATE INDEX ix_session_messages_surface
 ```sql
 CREATE TABLE app.session_model_calls (
     model_call_id UUID PRIMARY KEY,
-    session_id UUID NOT NULL,
+    session_id UUID NOT NULL REFERENCES app.agent_sessions(session_id),
     run_id UUID NOT NULL,
     turn INTEGER NOT NULL,
     step INTEGER NOT NULL,
@@ -233,6 +281,7 @@ CREATE TABLE app.session_model_calls (
     status VARCHAR(32) NOT NULL,
     system_prompt_hash VARCHAR(64),
     tools_hash VARCHAR(64),
+    tools_ref VARCHAR(256),
     source_from_seq BIGINT,
     source_to_seq BIGINT,
     request_ref VARCHAR(256),
@@ -256,8 +305,9 @@ CREATE TABLE app.session_model_calls (
 
 ```sql
 CREATE TABLE app.session_tool_calls (
-    call_id VARCHAR(128) PRIMARY KEY,
-    session_id UUID NOT NULL,
+    tool_call_id UUID PRIMARY KEY,
+    provider_call_id VARCHAR(128),
+    session_id UUID NOT NULL REFERENCES app.agent_sessions(session_id),
     run_id UUID NOT NULL,
     turn INTEGER NOT NULL,
     step INTEGER NOT NULL,
@@ -280,9 +330,13 @@ CREATE TABLE app.session_tool_calls (
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
 
+    UNIQUE (session_id, provider_call_id),
     UNIQUE (idempotency_key)
 );
 ```
+
+`provider_call_id` 是模型或供应商返回的 call ID，不假设跨 Session 全局唯一；系统内部一律使用
+`tool_call_id`。`idempotency_key` 应包含租户、Session、逻辑操作与规范化参数哈希，避免跨租户碰撞。
 
 推荐状态：
 
@@ -303,7 +357,7 @@ cancelled
 ```sql
 CREATE TABLE app.session_tool_attempts (
     attempt_id UUID PRIMARY KEY,
-    call_id VARCHAR(128) NOT NULL REFERENCES app.session_tool_calls(call_id),
+    tool_call_id UUID NOT NULL REFERENCES app.session_tool_calls(tool_call_id),
     attempt_no INTEGER NOT NULL,
     status VARCHAR(32) NOT NULL,
     error_code VARCHAR(128),
@@ -311,7 +365,7 @@ CREATE TABLE app.session_tool_attempts (
     started_at TIMESTAMPTZ NOT NULL,
     completed_at TIMESTAMPTZ,
 
-    UNIQUE (call_id, attempt_no)
+    UNIQUE (tool_call_id, attempt_no)
 );
 ```
 
@@ -319,11 +373,11 @@ CREATE TABLE app.session_tool_attempts (
 
 ```text
 session_tool_calls:
-  call-001  status=succeeded  attempt_count=2
+  tool-call-uuid-001  provider_call_id=call-001  status=succeeded  attempt_count=2
 
 session_tool_attempts:
-  call-001  attempt=1  failed     upstream_timeout
-  call-001  attempt=2  succeeded
+  tool-call-uuid-001  attempt=1  failed     upstream_timeout
+  tool-call-uuid-001  attempt=2  succeeded
 ```
 
 ### 5.7 `session_approvals`
@@ -331,9 +385,9 @@ session_tool_attempts:
 ```sql
 CREATE TABLE app.session_approvals (
     approval_id UUID PRIMARY KEY,
-    session_id UUID NOT NULL,
+    session_id UUID NOT NULL REFERENCES app.agent_sessions(session_id),
     run_id UUID NOT NULL,
-    call_id VARCHAR(128) NOT NULL,
+    tool_call_id UUID NOT NULL REFERENCES app.session_tool_calls(tool_call_id),
     status VARCHAR(32) NOT NULL,
     requested_data JSONB NOT NULL DEFAULT '{}',
     decision VARCHAR(16),
@@ -352,7 +406,7 @@ CREATE TABLE app.session_approvals (
 ```sql
 CREATE TABLE app.session_compactions (
     compaction_id UUID PRIMARY KEY,
-    session_id UUID NOT NULL,
+    session_id UUID NOT NULL REFERENCES app.agent_sessions(session_id),
     run_id UUID NOT NULL,
     turn INTEGER NOT NULL,
     status VARCHAR(32) NOT NULL,
@@ -377,7 +431,7 @@ CREATE TABLE app.session_compactions (
 ```sql
 CREATE TABLE app.session_todo_snapshots (
     snapshot_id UUID PRIMARY KEY,
-    session_id UUID NOT NULL,
+    session_id UUID NOT NULL REFERENCES app.agent_sessions(session_id),
     run_id UUID NOT NULL,
     turn INTEGER NOT NULL,
     version INTEGER NOT NULL,
@@ -397,7 +451,7 @@ Todo 使用整表替换语义，读取最新版本即可得到当前 Todo 状态
 ```sql
 CREATE TABLE app.session_state_snapshots (
     snapshot_id UUID PRIMARY KEY,
-    session_id UUID NOT NULL,
+    session_id UUID NOT NULL REFERENCES app.agent_sessions(session_id),
     snapshot_seq BIGINT NOT NULL,
     schema_version INTEGER NOT NULL DEFAULT 1,
 
@@ -455,21 +509,23 @@ state snapshot = 给系统快速恢复现场
 ### 7.2 模型调用
 
 1. Context Builder 生成模型可见上下文；
-2. 写 `session_model_calls(status=running)`；
-3. 写 `session_event_log(request/header)`；
-4. 流式 chunk 走 SSE/Redis，不永久逐块落库；
-5. 完成后写 `session_messages(assistant)`；
-6. 更新 `session_model_calls(status=succeeded)`；
-7. 写 `session_event_log(assistant/message)`。
+2. 在同一事务写 `session_model_calls(status=running)` 与 `session_event_log(request/header)`；
+3. 流式 chunk 走 SSE/Redis，不永久逐块落库；
+4. 完成后在同一事务写 `session_messages(assistant)`、更新
+   `session_model_calls(status=succeeded)` 并写 `session_event_log(assistant/message)`。
+
+在 Redis Stream 和断线续传游标上线并完成验证前，不能先停止 PostgreSQL 中现有
+`assistant/chunk` 写入。迁移期间可以双写并核对客户端收到的 chunk 序列；切换完成后再关闭
+PostgreSQL chunk 持久化。模型中断且没有完整 `assistant/message` 时，Redis 中的 chunk 只用于短期
+UI 恢复，不作为可进入下一轮模型上下文的已提交 assistant 消息。
 
 ### 7.3 工具调用与重试
 
-1. 创建 `session_tool_calls(status=pending)`；
-2. 写 `session_event_log(tool/call)`；
-3. 每次实际执行创建一行 `session_tool_attempts`；
-4. 成功后更新逻辑调用为 `succeeded`；
-5. 失败且可重试时继续增加 attempt；
-6. 最终写 `session_event_log(tool/result)`。
+1. 在同一事务创建 `session_tool_calls(status=pending)` 并写 `session_event_log(tool/call)`；
+2. 每次实际执行创建一行 `session_tool_attempts`；
+3. 成功后更新逻辑调用为 `succeeded`；
+4. 失败且可重试时继续增加 attempt；
+5. 在同一事务更新逻辑调用最终状态并写 `session_event_log(tool/result)`。
 
 有副作用的工具通过 `idempotency_key` 防止重复执行。
 
@@ -664,9 +720,10 @@ fencing_token
 ```text
 session_event_log(session_id, seq)
 session_event_log(run_id, seq)
-session_messages(session_id, turn, step)
+session_messages(session_id, event_seq) UNIQUE
 session_tool_calls(session_id, status)
 session_tool_calls(idempotency_key) UNIQUE
+session_tool_calls(session_id, provider_call_id) UNIQUE
 session_approvals(session_id, status)
 session_compactions(session_id, status, source_to_seq)
 session_state_snapshots(session_id, snapshot_seq DESC)
@@ -690,10 +747,13 @@ session_state_snapshots(session_id, snapshot_seq DESC)
 - 给每种事件增加 Pydantic schema；
 - 确认未使用事件是实现还是移除；
 - 为事件增加 schema migration 测试。
+- 先基于现有 `session_events` 实现纯函数 Session Reducer；
+- 用现有历史事件验证 Reducer 的确定性、幂等性和版本兼容性。
 
 ### 阶段 1：先降低数据库写压力
 
-- 停止永久逐条写 `assistant/chunk`；
+- 先上线 Redis Stream/SSE 游标并验证断线续传；
+- 迁移期双写 chunk，验证一致后停止永久逐条写 `assistant/chunk`；
 - 大型 `tool/result` 外置；
 - 所有读取改为 `after_seq` 增量读取；
 - 保留现有 `session_events` 行为。
@@ -713,11 +773,10 @@ session_state_snapshots(session_id, snapshot_seq DESC)
 - SSE 和 UI 切换到新读取路径；
 - 事件日志改为保存 payload 引用。
 
-### 阶段 4：拆压缩并引入 Reducer
+### 阶段 4：拆压缩并引入状态快照
 
 - 新建 `session_compactions`；
 - 实现统一 Context Builder；
-- 实现纯函数 Session Reducer；
 - 增加 `session_state_snapshots`；
 - 用全量事件重放校验快照。
 
@@ -773,13 +832,15 @@ session_compactions
 
 同时完成：
 
-- `assistant/chunk` 改为短期流；
+- 纯函数 Session Reducer 与全量重放测试；
+- Redis Stream/SSE 游标上线后，将 `assistant/chunk` 改为短期流；
 - 工具结果大字段外置；
 - 数据库或 Redis Lease；
 - 统一事务写入入口；
 - 最新摘要加增量的 Context Builder。
 
-当需要支持长任务、任意中断恢复或多 Sub Agent 后，再正式启用 `session_state_snapshots` 和完整 Session Reducer。
+当需要支持长任务、任意中断恢复或多 Sub Agent 后，再正式启用
+`session_state_snapshots`，并扩展 Reducer 的运行现场字段；基础 Reducer 必须在拆表前完成。
 
 ## 17. 最终结论
 

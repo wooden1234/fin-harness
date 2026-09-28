@@ -24,14 +24,22 @@ class AgentControl:
         self.store = store
         self.session_id = session_id
         self.approvals = ApprovalCoordinator()
+        self._effective_preferences: dict[str, dict[str, Any]] = {}
 
     async def request_context(self, *, turn: int, run_id: str, base_runtime: ToolRuntime):
         events = await self.store.load_events(self.session_id)
         loaded = await load_preference_context(
             store=self.store, session_id=self.session_id, events=events, turn=turn
         )
+        self._effective_preferences[run_id] = loaded.effective()
         sections = list(default_sections())
-        sections.extend(preference_sections(loaded.preferences, loaded.turn_overrides))
+        sections.extend(
+            preference_sections(
+                loaded.preferences,
+                loaded.turn_overrides,
+                loaded.session_overrides,
+            )
+        )
         runtime = self.bind_runtime(turn=turn, run_id=run_id, base_runtime=base_runtime)
         return assemble_system(sections), runtime.openai_tools()
 
@@ -45,7 +53,12 @@ class AgentControl:
             if finalign_is_ready():
                 runtime = runtime.replace_handler(
                     FINALIGN_TOOL_ID,
-                    bind_finalign_analyze(self.store, self.session_id, turn=turn),
+                    bind_finalign_analyze(
+                        self.store,
+                        self.session_id,
+                        turn=turn,
+                        preferences=self._effective_preferences.get(run_id, {}),
+                    ),
                 )
             else:
                 runtime = runtime.exclude(FINALIGN_TOOL_ID, "finalign_analyze")
@@ -53,6 +66,12 @@ class AgentControl:
 
     def validate_approval(self, events, approval_id: str):
         return self.approvals.validate(events, approval_id)
+
+    def finish_run(self, run_id: str) -> None:
+        self._effective_preferences.pop(run_id, None)
+
+    def effective_preferences(self, run_id: str) -> dict[str, Any]:
+        return dict(self._effective_preferences.get(run_id, {}))
 
     async def inject_skill(self, result: dict[str, Any], *, turn: int, run_id: str) -> None:
         await inject_skill_context(

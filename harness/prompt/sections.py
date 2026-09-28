@@ -72,13 +72,17 @@ def _preference_lines(values: Mapping[str, Any]) -> str:
 def preference_sections(
     preferences: Mapping[str, Any] | None = None,
     turn_overrides: Mapping[str, Any] | None = None,
+    session_overrides: Mapping[str, Any] | None = None,
 ) -> tuple[PromptSection, ...]:
-    """长期偏好与本轮覆盖，接在稳定 system 之后，避免插在工具纪律前打冷 KV 前缀。
+    """长期偏好、本会话声明与本轮覆盖，接在稳定 system 之后。
 
     身份 / 合规 / 工具纪律 / skill 目录保持固定前缀。
-    长期偏好 order=50；本轮临时 order=60，只冷尾巴。
+    长期偏好 order=50，本会话 order=55，本轮临时 order=60。
     """
     prefs = {key: value for key, value in dict(preferences or {}).items() if value is not None}
+    session = {
+        key: value for key, value in dict(session_overrides or {}).items() if value is not None
+    }
     overrides = {
         key: value for key, value in dict(turn_overrides or {}).items() if value is not None
     }
@@ -90,8 +94,22 @@ def preference_sections(
                 50,
                 "[用户长期偏好]\n"
                 f"{_preference_lines(prefs)}\n"
-                "仅在当前请求未明确指定时参考长期偏好；当前轮用户要求优先。"
-                "长期偏好中的语言与详略覆盖身份段的默认中文与简洁设定。",
+                "回答默认遵守这些长期偏好，并覆盖身份段的默认中文与简洁设定。"
+                "用户提问时使用的语言或打招呼不改变回答方式。"
+                "该偏好适用于所有用户可见输出，包括问候、闲聊、记忆查看、澄清、错误说明和工具结果总结。"
+                "展示某项偏好时，也必须按有效的 response_language 回答，不能只展示而不执行。"
+                "只有用户明确声明本次会话改用某种方式时，才在本会话内改用该方式。",
+            )
+        )
+    if session:
+        sections.append(
+            PromptSection(
+                "session_overrides",
+                55,
+                "[本会话要求]\n"
+                f"{_preference_lines(session)}\n"
+                "用户已声明本会话采用这些方式。本会话内按这里回答，并覆盖冲突的长期偏好。"
+                "不要写入长期记忆。",
             )
         )
     if overrides:
@@ -101,7 +119,7 @@ def preference_sections(
                 60,
                 "[本轮临时要求]\n"
                 f"{_preference_lines(overrides)}\n"
-                "这些要求只在当前轮生效，并覆盖冲突的长期偏好。",
+                "这些要求只在当前轮生效，并覆盖冲突的长期偏好和本会话要求。",
             )
         )
     return tuple(sections)
@@ -110,9 +128,10 @@ def preference_sections(
 def preference_section(
     preferences: Mapping[str, Any] | None = None,
     turn_overrides: Mapping[str, Any] | None = None,
+    session_overrides: Mapping[str, Any] | None = None,
 ) -> PromptSection | None:
     """兼容单段调用：多段时拼成一段，order 取末尾。"""
-    sections = preference_sections(preferences, turn_overrides)
+    sections = preference_sections(preferences, turn_overrides, session_overrides)
     if not sections:
         return None
     if len(sections) == 1:
