@@ -11,6 +11,7 @@ class PreferenceContext:
     preferences: dict[str, Any] = field(default_factory=dict)
     turn_overrides: dict[str, str] = field(default_factory=dict)
     session_overrides: dict[str, str] = field(default_factory=dict)
+    memory_load_succeeded: bool = True
 
     def effective(self) -> dict[str, Any]:
         """Return the preferences that every user-visible generator must obey."""
@@ -74,6 +75,7 @@ async def load_preference_context(
         return PreferenceContext(
             turn_overrides=turn_overrides,
             session_overrides=session_overrides,
+            memory_load_succeeded=False,
         )
     try:
         tenant_id = str(getattr(header, "tenant_id", "") or "").strip()
@@ -99,8 +101,12 @@ async def load_preference_context(
         preferences = dict(projection.as_dict())
     except Exception:  # noqa: BLE001
         preferences = {}
+        memory_load_succeeded = False
+    else:
+        memory_load_succeeded = True
     return PreferenceContext(
         preferences=preferences,
         turn_overrides=turn_overrides,
         session_overrides=session_overrides,
+        memory_load_succeeded=memory_load_succeeded,
     )

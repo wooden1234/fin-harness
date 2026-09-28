@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from harness.prompt.assembler import assemble_system
-from harness.prompt.preferences import load_preference_context
+from harness.prompt.preferences import PreferenceContext, load_preference_context
 from harness.prompt.sections import default_sections, preference_sections
 from harness.session.store import SessionStore
 from harness.tools.analysis import TOOL_ID as FINALIGN_TOOL_ID, bind_finalign_analyze, finalign_is_ready
@@ -25,13 +25,21 @@ class AgentControl:
         self.session_id = session_id
         self.approvals = ApprovalCoordinator()
         self._effective_preferences: dict[str, dict[str, Any]] = {}
+        self._preference_contexts: dict[str, PreferenceContext] = {}
 
     async def request_context(self, *, turn: int, run_id: str, base_runtime: ToolRuntime):
-        events = await self.store.load_events(self.session_id)
-        loaded = await load_preference_context(
-            store=self.store, session_id=self.session_id, events=events, turn=turn
-        )
-        self._effective_preferences[run_id] = loaded.effective()
+        loaded = self._preference_contexts.get(run_id)
+        if loaded is None:
+            events = await self.store.load_events(self.session_id)
+            loaded = await load_preference_context(
+                store=self.store, session_id=self.session_id, events=events, turn=turn
+            )
+            if not loaded.memory_load_succeeded:
+                loaded = await load_preference_context(
+                    store=self.store, session_id=self.session_id, events=events, turn=turn
+                )
+            self._preference_contexts[run_id] = loaded
+            self._effective_preferences[run_id] = loaded.effective()
         sections = list(default_sections())
         sections.extend(
             preference_sections(
@@ -69,6 +77,7 @@ class AgentControl:
 
     def finish_run(self, run_id: str) -> None:
         self._effective_preferences.pop(run_id, None)
+        self._preference_contexts.pop(run_id, None)
 
     def effective_preferences(self, run_id: str) -> dict[str, Any]:
         return dict(self._effective_preferences.get(run_id, {}))
