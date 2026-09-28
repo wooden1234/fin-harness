@@ -81,7 +81,13 @@ def finalign_is_ready() -> bool:
     return is_finance_llm_available()
 
 
-def bind_finalign_analyze(store: Any, session_id: str, *, turn: int):
+def bind_finalign_analyze(
+    store: Any,
+    session_id: str,
+    *,
+    turn: int,
+    preferences: dict[str, Any] | None = None,
+):
     async def _handle(arguments: dict[str, Any]) -> dict[str, Any]:
         events = await store.load_events(session_id)
         materials = collect_turn_materials(events, turn=turn)
@@ -90,7 +96,11 @@ def bind_finalign_analyze(store: Any, session_id: str, *, turn: int):
         question = str(arguments.get("question") or "").strip()
         if not question:
             question = last_user_question(events, turn=turn)
-        return await synthesize_answer(question=question, materials=materials)
+        return await synthesize_answer(
+            question=question,
+            materials=materials,
+            preferences=preferences,
+        )
 
     return _handle
 

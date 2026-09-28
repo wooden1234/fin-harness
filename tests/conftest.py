@@ -1,6 +1,7 @@
 """pytest 公共配置：加载项目根目录 .env。"""
 
 from pathlib import Path
+import os
 import sys
 
 import pytest
@@ -23,6 +24,10 @@ for path in paths:
         sys.path.insert(0, path)
 
 load_dotenv(ROOT_DIR / ".env", override=False)
+# 单测不要往 LangSmith 上报；需要树结构的测试用 tracing_context(enabled="local")。
+os.environ["LANGSMITH_TRACING"] = "false"
+os.environ["LANGSMITH_TRACING_V2"] = "false"
+os.environ["LANGCHAIN_TRACING_V2"] = "false"
 
 
 def _has_embedding_api_key() -> bool:

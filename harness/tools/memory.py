@@ -10,20 +10,73 @@ from harness.tools.errors import error_result
 
 _AGENT_ID = "fin_agent"
 _MEMORY_KEYS = get_agent_spec(_AGENT_ID).memory_keys
-
-_WRITE_PARAMETERS = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "memory_key": {
-            "type": "string",
-            "enum": list(_MEMORY_KEYS),
-            "description": "白名单偏好 key",
-        },
-        "value": {"type": "string", "description": "该 key 允许的枚举值"},
-    },
-    "required": ["memory_key", "value"],
+_LANGUAGE_ALIASES = {
+    "en": "en-US",
+    "english": "en-US",
+    "英文": "en-US",
+    "英语": "en-US",
+    "zh": "zh-CN",
+    "chinese": "zh-CN",
+    "中文": "zh-CN",
+    "汉语": "zh-CN",
 }
+
+def _preference_choices() -> dict[str, tuple[str, ...]]:
+    from app.services.memory.memory_catalog import preference_definitions
+
+    return {
+        key: tuple(definition.choices)
+        for key, definition in preference_definitions().items()
+        if definition.choices
+    }
+
+
+def _value_description() -> str:
+    parts = [
+        f"{key}: {', '.join(choices)}"
+        for key, choices in _preference_choices().items()
+    ]
+    listed = "；".join(parts)
+    return f"必须使用该 key 的枚举值，不要用缩写或自然语言。{listed}"
+
+
+def _write_parameters() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "memory_key": {
+                "type": "string",
+                "enum": list(_MEMORY_KEYS),
+                "description": "白名单偏好 key",
+            },
+            "value": {"type": "string", "description": _value_description()},
+        },
+        "required": ["memory_key", "value"],
+    }
+
+
+def _canonicalize_value(memory_key: str, value: str) -> str:
+    folded = value.strip()
+    if memory_key == "response_language":
+        aliased = _LANGUAGE_ALIASES.get(folded.lower()) or _LANGUAGE_ALIASES.get(folded)
+        if aliased:
+            return aliased
+    for choice in _preference_choices().get(memory_key, ()):
+        if folded.lower() == choice.lower():
+            return choice
+    return folded
+
+
+def _invalid_value_guidance(memory_key: str) -> str:
+    choices = _preference_choices().get(memory_key, ())
+    if not choices:
+        return "不要原样重试。修正参数，或缺的信息向用户澄清。"
+    return (
+        f"{memory_key} 只接受: {', '.join(choices)}。"
+        "不要原样重试，改用其中之一。"
+    )
+
 
 _DELETE_PARAMETERS = {
     "type": "object",
@@ -73,8 +126,11 @@ def memory_tool_definitions(
             return error_result("unsupported_memory_key")
         value = arguments.get("value")
         if not isinstance(value, str) or not value.strip():
-            return error_result("invalid_memory_value")
-        value = value.strip()
+            return error_result(
+                "invalid_memory_value",
+                model_guidance=_invalid_value_guidance(memory_key),
+            )
+        value = _canonicalize_value(memory_key, value.strip())
         scope = await _session_scope(store, session_id)
         if isinstance(scope, str):
             return error_result(scope)
@@ -100,7 +156,10 @@ def memory_tool_definitions(
                 ),
             )
         except ValueError:
-            return error_result("invalid_memory_value")
+            return error_result(
+                "invalid_memory_value",
+                model_guidance=_invalid_value_guidance(memory_key),
+            )
         except Exception:  # noqa: BLE001
             return error_result("memory_write_failed")
         return {
@@ -157,7 +216,7 @@ def memory_tool_definitions(
         openai_schema=function_schema(
             "memory_write",
             "记住或更新长期回答偏好",
-            _WRITE_PARAMETERS,
+            _write_parameters(),
         ),
         is_concurrency_safe=False,
         read_only=False,

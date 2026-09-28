@@ -228,6 +228,38 @@ def _candidate_preview(hit: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _hit_local_zh(hit: dict[str, Any]) -> str:
+    local_names = hit.get("local_names") or {}
+    if isinstance(local_names, dict):
+        return str(local_names.get("zh") or "")
+    return ""
+
+
+def _prefer_cn_shi(
+    query: str,
+    rivals: list[dict[str, Any]],
+    scored: list[tuple[float, dict[str, Any]]],
+) -> dict[str, Any] | None:
+    """歧义时优先 country=CN 且中文行政后缀为「市」。用户点名区/县则不套这条。"""
+    if _admin_suffix(query) in {"区", "县"}:
+        return None
+    preferred = [
+        hit
+        for hit in rivals
+        if str(hit.get("country") or "").upper() == "CN"
+        and _admin_suffix(_hit_local_zh(hit)) == "市"
+    ]
+    if not preferred:
+        return None
+    score_by_id = {id(hit): score for score, hit in scored}
+    preferred.sort(key=lambda hit: score_by_id.get(id(hit), 0.0), reverse=True)
+    top = score_by_id.get(id(preferred[0]), 0.0)
+    tied = [hit for hit in preferred if score_by_id.get(id(hit), 0.0) >= top - 1e-9]
+    if len(tied) > 1:
+        return None
+    return preferred[0]
+
+
 def _pick_geocode_hit(
     query: str,
     results: list[Any],
@@ -279,6 +311,9 @@ def _pick_geocode_hit(
         states = {str(hit.get("state") or "") for hit in distinct}
         countries = {str(hit.get("country") or "") for hit in distinct}
         if len(states) > 1 or len(countries) > 1:
+            preferred = _prefer_cn_shi(query, distinct, scored)
+            if preferred is not None:
+                return _location_from_hit(preferred, query), [], None
             return (
                 None,
                 [_candidate_preview(hit) for hit in distinct[:5]],

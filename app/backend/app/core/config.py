@@ -275,12 +275,15 @@ class Settings(BaseSettings):
     CONTEXT_ADMISSION_RATIO: float = 0.85
     CONTEXT_APPROXIMATE_SAFETY_MULTIPLIER: float = 1.20
 
-    # MinerU PDF 解析
+    # MinerU PDF 解析。本地文件走批量上传，不使用 url / callback。
     MINERU_API_KEY: str = ""
     MINERU_TOKEN: str = ""
     MINERU_MAX_PAGES: int = 200
     MINERU_BASE_URL: str = "https://mineru.net/api/v4"
     MINERU_MODEL_VERSION: str = "vlm"
+    MINERU_LANGUAGE: str = "ch"
+    MINERU_ENABLE_FORMULA: bool = True
+    MINERU_ENABLE_TABLE: bool = True
 
     # text_to_sql：规则通过后是否启用 LLM 结果质检
     FINANCIAL_SQL_LLM_VALIDATION: bool = False

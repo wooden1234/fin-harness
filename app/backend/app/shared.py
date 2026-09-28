@@ -177,6 +177,9 @@ class CoreState(ConversationState):
     # 本轮临时偏好；由当前用户输入确定性提取，final_answer 后清空。
     turn_preferences: NotRequired[dict[str, object]]
 
+    # 本会话明确声明的回答方式；不写入长期记忆，会话内后续轮次继续生效。
+    session_preferences: NotRequired[dict[str, object]]
+
     # 本轮是否已由记忆管理节点生成确定性回复。
     memory_action_handled: NotRequired[bool]
 

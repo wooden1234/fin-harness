@@ -263,7 +263,14 @@ def extract_pdfs(
         logger.info("所有 PDF 均已解析，无需提交新任务")
         return records
 
-    with MinerUClient(token, base_url=base_url, model_version=model_version) as client:
+    with MinerUClient(
+        token,
+        base_url=base_url,
+        model_version=model_version,
+        language=settings.MINERU_LANGUAGE,
+        enable_formula=settings.MINERU_ENABLE_FORMULA,
+        enable_table=settings.MINERU_ENABLE_TABLE,
+    ) as client:
         for offset in range(0, len(pending_jobs), BATCH_SIZE):
             batch_jobs = pending_jobs[offset : offset + BATCH_SIZE]
             logger.info(

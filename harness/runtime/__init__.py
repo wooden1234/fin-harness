@@ -5,7 +5,6 @@ The legacy modules under :mod:`harness.agent`, :mod:`harness.session`, and
 :mod:`harness.tools` remain available for compatibility during migration.
 """
 
-from harness.agent.loop import Agent
 from harness.session.store import InMemorySessionStore, SessionStore
 from harness.tools.runtime import ToolRuntime
 from harness.runtime.context import request_header
@@ -18,6 +17,7 @@ def product_manager():
     global _MANAGER
     if _MANAGER is None:
         from harness.llm.deepseek import DeepSeekAdapter
+        from harness.agent.postgres_leases import PostgresLeaseStore
         from harness.session.postgres import PostgresSessionStore
         from harness.control.manager import AgentManager
 
@@ -25,6 +25,7 @@ def product_manager():
             store=PostgresSessionStore(),
             llm=DeepSeekAdapter(),
             runtime=ToolRuntime.product(),
+            leases=PostgresLeaseStore(),
         )
     return _MANAGER
 
@@ -32,6 +33,15 @@ def product_manager():
 def reset_product_manager() -> None:
     global _MANAGER
     _MANAGER = None
+
+
+def __getattr__(name: str):
+    # Agent 留在公开 API，但不能在包初始化时回导入 loop（loop → runtime.context → 本模块）。
+    if name == "Agent":
+        from harness.agent.loop import Agent
+
+        return Agent
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [

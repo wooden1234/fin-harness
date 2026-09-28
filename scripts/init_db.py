@@ -14,6 +14,7 @@ from sqlalchemy import text
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
+sys.path.insert(0, str(ROOT_DIR / "app" / "backend"))
 
 from app.core.database import Base, engine
 from app.core.logger import get_logger

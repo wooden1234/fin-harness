@@ -57,8 +57,13 @@ app/frontend/.vite/
 logs/
 *.log
 
-# Knowledge base artifacts (large generated data; keep eval sets)
+# Knowledge base artifacts (large generated data)
 knowledge/
+
+# Retrieval eval artifacts
+retrieval/eval/*.json
+retrieval/eval/*.jsonl
+retrieval/eval/README.md
 
 # Documentation (local only)
 docs/
@@ -91,7 +96,21 @@ Desktop.ini
 *.tmp
 .cache/
 
-evals/
+evals/*
+!evals/README.md
+!evals/__init__.py
+!evals/adapter.py
+!evals/dataset.py
+!evals/run_core_eval.py
+!evals/upload_dataset.py
+!evals/validate_core_dataset.py
+!evals/evaluators/
+evals/evaluators/*
+!evals/evaluators/*.py
+!evals/datasets/
+evals/datasets/*
+!evals/datasets/fin-harness-core-v1.jsonl
+!evals/datasets/fin-harness-core-v1-routing.jsonl
 archive/
 tests/*
 !tests/

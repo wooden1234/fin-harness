@@ -23,9 +23,21 @@ ANALYSIS_SYSTEM = (
     "数字、区间、同比必须与材料一致，禁止用常识补全或改数量级。"
     "多源冲突时点明差异与口径，不要抹平。"
     "材料不足就说暂未查到，不要编造。"
-    "不要输出检索过程、工具名或 evidence_id；用简洁中文直接回答用户问题。"
+    "不要输出检索过程、工具名或 evidence_id；直接回答用户问题。"
     "不得给出个性化买卖指令，不得承诺收益。"
 )
+
+
+def _preference_instruction(preferences: Mapping[str, Any] | None) -> str:
+    values = dict(preferences or {})
+    language = str(values.get("response_language") or "zh-CN")
+    output_format = str(values.get("preferred_output_format") or "markdown")
+    return (
+        "\n[本轮有效输出偏好]\n"
+        f"- response_language={language}\n"
+        f"- preferred_output_format={output_format}\n"
+        "所有用户可见正文必须使用上述回答语言和输出格式；未指定回答语言时才默认使用 zh-CN。"
+    )
 
 
 def _truncate(text: str, limit: int = MAX_MATERIAL_CHARS) -> str:
@@ -94,6 +106,7 @@ async def synthesize_answer(
     *,
     question: str,
     materials: Sequence[Mapping[str, Any]] | Sequence[str] | None = None,
+    preferences: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     query = str(question or "").strip()
     if not query:
@@ -131,7 +144,7 @@ async def synthesize_answer(
         llm = get_finance_llm()
         result = await llm.ainvoke(
             [
-                ("system", ANALYSIS_SYSTEM),
+                ("system", ANALYSIS_SYSTEM + _preference_instruction(preferences)),
                 ("human", human),
             ]
         )

@@ -98,6 +98,27 @@ def test_policy_without_success_publishes():
     assert decision.text == USER_UNAVAILABLE_HINT
 
 
+def test_memory_retry_exhausted_does_not_publish_data_hint():
+    from harness.tools.error_policy import MEMORY_EXHAUSTED_INJECT
+
+    decision = decide_after_tools(
+        [{"ok": False, "error": "retry_exhausted", "name": "memory_write"}],
+        events=[
+            _event(
+                data={
+                    "name": "memory_write",
+                    "ok": False,
+                    "error": "retry_exhausted",
+                }
+            )
+        ],
+        turn=1,
+    )
+    assert decision.action == "inject"
+    assert decision.text == MEMORY_EXHAUSTED_INJECT
+    assert USER_UNAVAILABLE_HINT not in decision.text
+
+
 def test_policy_with_other_success_does_not_publish():
     events = [
         _event(data={"name": "lookup_ok", "ok": True, "content": "100"}),

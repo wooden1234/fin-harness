@@ -23,9 +23,16 @@ class MinerUClient:
         base_url: str = "https://mineru.net/api/v4",
         model_version: str = "vlm",
         timeout: float = 120.0,
+        *,
+        language: str = "ch",
+        enable_formula: bool = True,
+        enable_table: bool = True,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model_version = model_version
+        self.language = language or "ch"
+        self.enable_formula = enable_formula
+        self.enable_table = enable_table
         self._headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
@@ -74,9 +81,9 @@ class MinerUClient:
                 for job in jobs
             ],
             "model_version": self.model_version,
-            "enable_formula": True,
-            "enable_table": True,
-            "language": "ch",
+            "enable_formula": self.enable_formula,
+            "enable_table": self.enable_table,
+            "language": self.language,
         }
         data = self._post("/file-urls/batch", payload)
         batch_id = data["batch_id"]

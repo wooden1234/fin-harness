@@ -14,7 +14,7 @@ def test_long_term_preference_is_before_current_turn_and_marks_override():
         }
     )
     assert isinstance(messages[0], SystemMessage)
-    assert "当前轮用户要求优先" in messages[0].content
+    assert "回答默认遵守这些长期偏好" in messages[0].content
     assert messages[-1].content == "请用英文回答这一轮"
 
 

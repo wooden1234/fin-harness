@@ -15,12 +15,19 @@ import { FollowUpChips } from './FollowUpChips'
 const MATERIAL_NOTES_SECTION_RE = /\n*###\s*资料说明\s*\n[\s\S]*$/
 /** 历史消息里可能残留的 [1][2] 角标，展示时剥离。 */
 const INLINE_CITATION_MARKERS_RE = /\[\d+\]/g
+/** 历史回答里残留的数据来源与 evidence_id，展示时剥离。 */
+const EVIDENCE_PAREN_RE = /\s*[（(]\s*evidence_id\s*[:：][^）)\n]*[）)]/gi
+const SOURCE_CLAUSE_RE = /[ \t]*(?:\*\*|__)?数据来源\s*[:：][^\n]*/g
 
 function displayAssistantContent(content: string): string {
   return content
     .replace(MATERIAL_NOTES_SECTION_RE, '')
     .replace(INLINE_CITATION_MARKERS_RE, '')
-    .trimEnd()
+    .replace(EVIDENCE_PAREN_RE, '')
+    .replace(SOURCE_CLAUSE_RE, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
 }
 
 function FaviconStack({ citations }: { citations: Citation[] }) {
@@ -151,7 +158,7 @@ export function ChatMessage({
             className={`text-[15px] leading-relaxed ${
               isUser
                 ? 'bg-brand-navy text-white px-5 py-3 rounded-3xl rounded-tr-md'
-                : 'text-slate-800 dark:text-slate-200 prose prose-sm dark:prose-invert max-w-none'
+                : 'text-slate-800 dark:text-slate-200 prose dark:prose-invert max-w-none chat-markdown'
             }`}
           >
             {isUser ? (

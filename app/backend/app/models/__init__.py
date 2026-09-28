@@ -16,7 +16,19 @@ from app.models.agent.agent_run_event import AgentRunEvent
 from app.models.persistence.outbox_event import OutboxEvent
 from app.models.agent.conversation_lock import ConversationLock
 from app.models.agent.checkpoint_registry import CheckpointRegistry
-from app.models.agent.session import AgentSession, AgentSessionLease, SessionEventRow
+from app.models.agent.session import (
+    AgentSession,
+    AgentSessionLease,
+    SessionApproval,
+    SessionCompaction,
+    SessionEventLog,
+    SessionEventRow,
+    SessionMessage,
+    SessionModelCall,
+    SessionTodoSnapshot,
+    SessionToolAttempt,
+    SessionToolCall,
+)
 from app.models.persistence.audit_log import AuditLog
 from app.models.identity.user import User
 from app.models.memory.memory_record import MemoryRecord
@@ -35,7 +47,15 @@ __all__ = [
     "AuditLog",
     "AgentSession",
     "AgentSessionLease",
+    "SessionApproval",
+    "SessionCompaction",
+    "SessionEventLog",
     "SessionEventRow",
+    "SessionMessage",
+    "SessionModelCall",
+    "SessionTodoSnapshot",
+    "SessionToolAttempt",
+    "SessionToolCall",
     "DialogueType",
     "FinancialCompany",
     "AnnualReportDocument",

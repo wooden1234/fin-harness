@@ -10,7 +10,7 @@ from harness.session.types import SessionEvent
 from harness.tools.errors import ToolErrorClass, classify, error_result, publishes_if_no_success
 
 MAX_ATTEMPTS_PER_TOOL = 2
-UNLIMITED_TOOLS = frozenset({"todo_write"})
+UNLIMITED_TOOLS = frozenset({"todo_write", "read_tool_log"})
 USER_UNAVAILABLE_HINT = (
     "没有找到匹配的数据工具或技能，或查询已失败。请换个问法，或稍后再试。"
 )

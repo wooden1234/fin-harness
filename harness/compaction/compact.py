@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 from harness.compaction.meter import count_request_tokens, estimate_tokens, surface_tokens
+from harness.compaction.project import project_tool_json
 from harness.compaction.policy import CompactPolicy, retain_limit, target_limit
 from harness.compaction.schema import (
     CompactionDelta,
@@ -37,9 +38,12 @@ _V2_FIELDS = (
 )
 
 
-def _trim(text: str, policy: CompactPolicy) -> str:
+def _trim(text: str, policy: CompactPolicy, *, source_seq: int | None = None) -> str:
     if len(text) <= policy.prune_chars:
         return text
+    projected = project_tool_json(text, limit=policy.prune_chars, source_seq=source_seq)
+    if projected:
+        return projected
     return (
         text[: policy.head_chars]
         + "\n…[truncated]…\n"
@@ -640,7 +644,7 @@ async def _trim_longest_tool(
     content = str(target.data.get("content") or "")
     if len(content) <= policy.prune_chars and trigger != "context-overflow":
         return False
-    trimmed = _trim(content, policy)
+    trimmed = _trim(content, policy, source_seq=target.seq)
     if trimmed == content:
         return False
     await store.append(

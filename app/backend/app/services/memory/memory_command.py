@@ -111,11 +111,21 @@ def _extract_value(normalized: str) -> tuple[str, str] | None:
     return None
 
 
-def extract_turn_preferences(text: str) -> dict[str, str]:
-    """提取只在当前轮生效的确定性偏好，不写入长期记忆。"""
-    if not contains_temporary_memory_marker(text):
-        return {}
-    normalized = _normalize(text)
+_SESSION_MARKERS = (
+    "本次会话",
+    "本轮会话",
+    "这次会话",
+    "当前会话",
+    "这个会话",
+    "本会话",
+    "本次对话",
+    "这次对话",
+    "当前对话",
+    "这个对话",
+)
+
+
+def _matched_preferences(normalized: str) -> dict[str, str]:
     preferences: dict[str, str] = {}
     for memory_key, candidates in _VALUE_PHRASES.items():
         for phrases, value in candidates:
@@ -123,6 +133,25 @@ def extract_turn_preferences(text: str) -> dict[str, str]:
                 preferences[memory_key] = value
                 break
     return preferences
+
+
+def _has_session_marker(text: str) -> bool:
+    normalized = _normalize(text)
+    return any(marker in normalized for marker in _SESSION_MARKERS)
+
+
+def extract_session_preferences(text: str) -> dict[str, str]:
+    """提取明确声明「本次会话采用某种方式」的偏好，不写入长期记忆。"""
+    if not _has_session_marker(text):
+        return {}
+    return _matched_preferences(_normalize(text))
+
+
+def extract_turn_preferences(text: str) -> dict[str, str]:
+    """提取只在当前轮生效的确定性偏好，不写入长期记忆。"""
+    if _has_session_marker(text) or not contains_temporary_memory_marker(text):
+        return {}
+    return _matched_preferences(_normalize(text))
 
 
 def _extract_key(normalized: str) -> str | None:
@@ -207,6 +236,7 @@ def extract_preference_rule(text: str) -> tuple[str, str] | None:
 __all__ = [
     "MemoryActionKind",
     "MemoryRuleAction",
+    "extract_session_preferences",
     "extract_turn_preferences",
     "extract_preference_rule",
     "parse_memory_command",

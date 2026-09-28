@@ -14,6 +14,7 @@ from harness.control.policy import TurnPolicy
 from harness.compaction.compact import maybe_compact
 from harness.compaction.policy import compact_limit, policy_from_settings
 from harness.contracts.errors import ContextBudgetExhaustedError, InvariantError, LlmError
+from harness.finalization.language import enforce_response_language
 from harness.llm.types import StreamAssembler
 from harness.session.invariant import assert_model_request_logged
 from harness.session.store import SessionStore
@@ -23,6 +24,7 @@ from harness.tools.runtime import ToolRuntime
 from harness.tools.scheduler import execute_tool_calls
 from harness.tools.retry_policy import USER_UNAVAILABLE_HINT
 from harness.runtime.context import request_header
+from harness.tracing import traceable, turn_langsmith_extra, without_self
 
 _MAX_STEPS = 30
 
@@ -54,6 +56,14 @@ class Agent:
         self._waiting: dict[str, Any] | None = None
 
     async def prompt(self, text: str, *, source: str = "user") -> RunResult:
+        return await self._prompt_impl(
+            text,
+            source=source,
+            langsmith_extra=turn_langsmith_extra(self.session_id, entry="prompt"),
+        )
+
+    @traceable(name="agent.turn", run_type="chain", process_inputs=without_self)
+    async def _prompt_impl(self, text: str, *, source: str = "user") -> RunResult:
         self._abort = asyncio.Event()
         self._published = None
         self._follow_ups = []
@@ -99,6 +109,14 @@ class Agent:
         )
 
     async def resume_approval(self, approval_id: str, *, decision: str = "allow") -> RunResult:
+        return await self._resume_approval_impl(
+            approval_id,
+            decision=decision,
+            langsmith_extra=turn_langsmith_extra(self.session_id, entry="resume"),
+        )
+
+    @traceable(name="agent.turn", run_type="chain", process_inputs=without_self)
+    async def _resume_approval_impl(self, approval_id: str, *, decision: str = "allow") -> RunResult:
         self._abort = asyncio.Event()
         self._published = None
         self._follow_ups = []
@@ -188,7 +206,12 @@ class Agent:
     async def _publish(self, markdown: str, *, turn: int, run_id: str) -> None:
         if self._published:
             return
-        text = self._turn_policy.finalize(markdown)
+        compliant = await enforce_response_language(
+            markdown,
+            preferences=self._control.effective_preferences(run_id),
+            llm=self._llm,
+        )
+        text = self._turn_policy.finalize(compliant)
         if not text:
             return
         self._published = text
@@ -404,7 +427,11 @@ class Agent:
             abort=self._abort,
         ):
             assembler.push(chunk)
-            if chunk.kind == "content" and chunk.text:
+            if (
+                chunk.kind == "content"
+                and chunk.text
+                and getattr(self._store, "persist_assistant_chunks", True)
+            ):
                 await self._store.append(
                     self.session_id,
                     EventDraft(
@@ -420,6 +447,7 @@ class Agent:
     async def _close_turn(self, turn: int, run_id: str, reason: str) -> None:
         events = await self._store.load_events(self.session_id)
         if any(event.event_type == "turn/end" and event.turn == turn for event in events):
+            self._control.finish_run(run_id)
             return
         await self._store.append(
             self.session_id,
@@ -430,6 +458,7 @@ class Agent:
                 data={"turn": turn, "reason": reason},
             ),
         )
+        self._control.finish_run(run_id)
 
     async def _result(self, run_id: str, reason: str) -> RunResult:
         events = await self._store.load_events(self.session_id)

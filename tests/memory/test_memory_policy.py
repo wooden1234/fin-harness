@@ -1,4 +1,5 @@
 from app.services.memory.memory_command import (
+    extract_session_preferences,
     extract_turn_preferences,
     parse_memory_command,
     parse_memory_rule_action,
@@ -79,6 +80,21 @@ def test_temporary_preferences_are_structured_for_current_turn_only():
         "preferred_output_format": "table",
     }
     assert extract_turn_preferences("以后默认用英文回答") == {}
+    assert extract_turn_preferences("你好") == {}
+    assert extract_turn_preferences("本次会话采用中文回答") == {}
+
+
+def test_session_preference_requires_explicit_session_adoption():
+    assert extract_session_preferences("本次会话采用中文回答") == {
+        "response_language": "zh-CN",
+    }
+    assert extract_session_preferences("这次会话请用英文并用表格回答") == {
+        "response_language": "en-US",
+        "preferred_output_format": "table",
+    }
+    assert extract_session_preferences("你好") == {}
+    assert extract_session_preferences("这次请用英文回答") == {}
+    assert extract_session_preferences("以后默认用英文回答") == {}
 
 
 def test_ambiguous_management_requires_memory_context():

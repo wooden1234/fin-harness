@@ -50,6 +50,8 @@ class SessionStore(Protocol):
 
 
 class InMemorySessionStore:
+    persist_assistant_chunks = True
+
     def __init__(self) -> None:
         self._sessions: dict[str, SessionHeader] = {}
         self._notifiers: dict[str, asyncio.Event] = {}

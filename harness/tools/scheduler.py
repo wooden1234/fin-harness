@@ -20,6 +20,7 @@ from harness.tools.retry_policy import (
     tool_attempt_counts,
     unknown_tool_result,
 )
+from harness.tracing import traceable
 
 
 class ToolResolver(Protocol):
@@ -45,6 +46,17 @@ def _parse_arguments(raw: str) -> dict[str, Any] | None:
     return payloads[0]
 
 
+def _tool_trace_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
+    calls = inputs.get("calls") or []
+    return {
+        "session_id": inputs.get("session_id"),
+        "turn": inputs.get("turn"),
+        "step": inputs.get("step"),
+        "tools": [getattr(call, "name", None) for call in calls],
+    }
+
+
+@traceable(name="agent.tools", run_type="tool", process_inputs=_tool_trace_inputs)
 async def execute_tool_calls(
     *,
     store: Any,

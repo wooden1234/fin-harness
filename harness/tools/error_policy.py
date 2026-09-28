@@ -44,6 +44,11 @@ GIVE_UP_INJECT = (
     "同一工具已重试一次仍失败。若没有更匹配的工具或技能，请直接用原话回复用户："
     f"{USER_UNAVAILABLE_HINT}"
 )
+_MEMORY_TOOLS = frozenset({"memory_write", "memory_delete"})
+MEMORY_EXHAUSTED_INJECT = (
+    "记忆工具本轮不能再调用。不要再调工具。"
+    "直接用文字告诉用户这项偏好没有保存成功，并按用户刚才的要求继续回答。"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +108,15 @@ def decide_after_tools(
     no_success = not turn_has_successful_data_tool(events, turn=turn)
 
     if no_success and any(publishes_if_no_success(item) for item in failures):
+        publish_items = [item for item in failures if publishes_if_no_success(item)]
+        if publish_items and all(
+            str(item.get("name") or "") in _MEMORY_TOOLS for item in publish_items
+        ):
+            return ToolErrorDecision(
+                "inject",
+                MEMORY_EXHAUSTED_INJECT,
+                ToolErrorClass.POLICY.value,
+            )
         return ToolErrorDecision("publish", USER_UNAVAILABLE_HINT, ToolErrorClass.POLICY.value)
 
     for item in failures:
