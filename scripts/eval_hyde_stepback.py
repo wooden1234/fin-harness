@@ -1,7 +1,7 @@
 """HyDE / Step-back 检索消融评测。
 
 不要走完整 PDF Agent 图：证据路由会把「改写收益」和「是否触发改写」缠在一起。
-本脚本固定五路检索，只跟线上 retrieve 对齐：hybrid + admit + 原问/改写 RRF 融合。
+本脚本固定原问、Step-back、HyDE 和答案错配修正四类检索路，并分别评估单路与原问/改写 RRF 融合；只跟线上 retrieve 对齐。
 
 用法：
   # 1) 从 ES 抽候选 chunk，人工改成评测集
@@ -13,6 +13,9 @@
   # 3) 只测原问基线（不调改写 LLM）
   python scripts/eval_hyde_stepback.py run --cases retrieval/eval/hyde_stepback.jsonl --arms original --skip-cosine
 
+  # 4) 命中一片叶子后按其 L2 父块覆盖打分（不改检索）
+  python scripts/eval_hyde_stepback.py run --cases retrieval/eval/parent.jsonl --arms original --skip-cosine --parent-expand
+
 线上 admit_pdf_hits 当前会把多数 PDF 滤成 0 条，改写评测默认不加 --admit。
 """
 
@@ -22,6 +25,7 @@ import argparse
 import asyncio
 import json
 import math
+import re
 import sys
 import time
 from collections import defaultdict
@@ -40,6 +44,10 @@ load_dotenv(ROOT / ".env")
 from app.core.config import settings  # noqa: E402
 from agents.finance_agent.pdf_agent.query_rewrite.hyde import hyde_node  # noqa: E402
 from agents.finance_agent.pdf_agent.query_rewrite.step_back import step_back_node  # noqa: E402
+from agents.finance_agent.pdf_agent.query_rewrite.answer_mismatch import (  # noqa: E402
+    answer_mismatch_node,
+    forbidden_variants,
+)
 from agents.finance_agent.pdf_agent.retrieval.multi_query_fuse import (  # noqa: E402
     fuse_original_and_rewrite_hits,
 )
@@ -49,7 +57,15 @@ from retrieval.clients.es_client import create_es_client, index_name  # noqa: E4
 from retrieval.core.collections import pdf_categories  # noqa: E402
 from retrieval.services import admit_pdf_hits  # noqa: E402
 
-ARMS = ("original", "step_back_only", "hyde_only", "fused_sb", "fused_hyde")
+ARMS = (
+    "original",
+    "step_back_only",
+    "hyde_only",
+    "answer_mismatch_only",
+    "fused_sb",
+    "fused_hyde",
+    "fused_answer_mismatch",
+)
 K_VALUES = (5, 10)
 PDF_INDEXES = (
     "annual_reports",
@@ -131,6 +147,38 @@ def entity_keep(query: str, rewrite: str, entities: list[str]) -> float:
         return 1.0
     text = str(rewrite or "")
     return sum(1.0 for item in required if item in text) / len(required)
+
+
+def anchor_keep(rewrite: str, anchors: list[str]) -> float:
+    expected = [str(item).strip() for item in anchors if str(item).strip()]
+    if not expected:
+        return 1.0
+    text = str(rewrite or "")
+    return 1.0 if any(item in text for item in expected) else 0.0
+
+
+def forbidden_terms(query: str) -> list[str]:
+    """Extract the user-marked distractor after 不是/不要用/而非 for mismatch cases."""
+    text = str(query or "")
+    match = re.search(
+        r"(?:不要答成|不要使用|不要用|不是|而非)\s*([^，。；,;]+)", text
+    )
+    if not match:
+        return []
+    value = match.group(1).strip()
+    return [value] if value else []
+
+
+def forbidden_leakage(query: str, rewrite: str) -> float:
+    terms = forbidden_terms(query)
+    if not terms:
+        return 0.0
+    text = re.sub(r"[\s，,。；;：:？?！!、]+", "", str(rewrite or ""))
+    return 1.0 if any(
+        variant in text
+        for term in terms
+        for variant in forbidden_variants(term)
+    ) else 0.0
 
 
 def cosine(left: list[float], right: list[float]) -> float:
@@ -251,12 +299,18 @@ def _select_arms(case: dict[str, Any], requested: set[str], mode: str) -> list[s
         selected.extend(["hyde_only", "fused_hyde"])
     if bucket in {"control", "none"} or expect == "none":
         selected.extend(["step_back_only", "hyde_only", "fused_sb", "fused_hyde"])
+    if bucket == "answer_mismatch" or expect == "answer_mismatch":
+        selected.extend(["answer_mismatch_only", "fused_answer_mismatch"])
     return [arm for arm in ARMS if arm in selected and arm in requested]
 
 
-async def _rewrite(strategy: str, query: str) -> str:
+async def _rewrite(strategy: str, query: str, *, context: str = "") -> str:
     state = {"original_query": query, "query": query, "rewrite_count": 0}
-    node = step_back_node if strategy == "step_back" else hyde_node
+    if strategy == "answer_mismatch":
+        state["context"] = context
+        node = answer_mismatch_node
+    else:
+        node = step_back_node if strategy == "step_back" else hyde_node
     result = await node(state)
     rewritten = str(result.get("rewrite_query") or result.get("query") or "").strip()
     return rewritten or query
@@ -327,6 +381,59 @@ async def _gold_text(case: dict[str, Any]) -> str:
     return ""
 
 
+def _parent_leaf_keys(doc_id: str, metadata: dict[str, Any]) -> set[tuple[str, str]]:
+    """L2 父块 metadata 里的子叶编号。没有子叶列表时返回空集。"""
+    keys: set[tuple[str, str]] = set()
+    for item in metadata.get("child_chunk_indices") or []:
+        keys.add((doc_id, _norm_chunk_id(item)))
+    if keys:
+        return keys
+    for item in metadata.get("child_chunk_ids") or []:
+        text = str(item)
+        if ":L3:" in text:
+            keys.add((doc_id, _norm_chunk_id(text)))
+    return keys
+
+
+def _expand_hit_leaves(hits: list[RetrievalHit]) -> list[set[tuple[str, str]]]:
+    """每条命中按其 L2 父块展开。已带子叶列表的结果直接用，否则按 parent_chunk_id 查库。"""
+    from retrieval.retrievers.retriever import _load_parent_nodes
+
+    pending: list[str] = []
+    for hit in hits:
+        metadata = hit.metadata or {}
+        doc_id = str(metadata.get("doc_id") or "").strip()
+        if _parent_leaf_keys(doc_id, metadata):
+            continue
+        parent_id = str(metadata.get("parent_chunk_id") or "").strip()
+        if parent_id:
+            pending.append(parent_id)
+    nodes = _load_parent_nodes(pending) if pending else {}
+    covered: list[set[tuple[str, str]]] = []
+    for hit in hits:
+        metadata = hit.metadata or {}
+        doc_id = str(metadata.get("doc_id") or "").strip()
+        keys = _parent_leaf_keys(doc_id, metadata)
+        if not keys:
+            parent_id = str(metadata.get("parent_chunk_id") or "").strip()
+            node = nodes.get(parent_id) or {}
+            keys = _parent_leaf_keys(doc_id, node.get("metadata") or {})
+        if not keys:
+            keys = {hit_key(hit)}
+        covered.append(keys)
+    return covered
+
+
+def _apply_parent_expand(metrics: dict[str, float | int], hits: list[RetrievalHit], gold: set[tuple[str, str]]) -> None:
+    covered = _expand_hit_leaves(hits)
+    for k in K_VALUES:
+        union: set[tuple[str, str]] = set()
+        for item in covered[:k]:
+            union |= item
+        metrics[f"parent_recall@{k}"] = (len(gold & union) / len(gold)) if gold else 0.0
+        metrics[f"parent_cover@{k}"] = 1.0 if gold and gold <= union else 0.0
+
+
 def _score_arm(
     *,
     hits: list[RetrievalHit],
@@ -372,6 +479,7 @@ async def _eval_case(
     mode: str,
     with_cosine: bool,
     admit: bool,
+    parent_expand: bool,
 ) -> dict[str, Any]:
     query = str(case.get("query") or "").strip()
     gold = gold_keys(case)
@@ -388,13 +496,21 @@ async def _eval_case(
     rewrite_hits: dict[str, list[RetrievalHit]] = {}
     need_sb = any(arm in selected for arm in ("step_back_only", "fused_sb"))
     need_hyde = any(arm in selected for arm in ("hyde_only", "fused_hyde"))
+    need_mm = any(arm in selected for arm in ("answer_mismatch_only", "fused_answer_mismatch"))
     if need_sb:
         rewrites["step_back"] = await _rewrite("step_back", query)
     if need_hyde:
         rewrites["hyde"] = await _rewrite("hyde", query)
+    if need_mm:
+        context = "\n\n".join(
+            f"[{i}] {hit.text}" for i, hit in enumerate(original_hits[:top_k], start=1)
+        )
+        rewrites["answer_mismatch"] = await _rewrite(
+            "answer_mismatch", query, context=context
+        )
 
     rerank_enabled = bool(getattr(retriever, "rerank_enabled", False))
-    if need_sb or need_hyde:
+    if need_sb or need_hyde or need_mm:
         retriever.rerank_enabled = False
         try:
             if need_sb:
@@ -404,6 +520,10 @@ async def _eval_case(
             if need_hyde:
                 rewrite_hits["hyde"] = await _search(
                     retriever, rewrites["hyde"], top_k=top_k, admit=admit
+                )
+            if need_mm:
+                rewrite_hits["answer_mismatch"] = await _search(
+                    retriever, rewrites["answer_mismatch"], top_k=top_k, admit=admit
                 )
         finally:
             retriever.rerank_enabled = rerank_enabled
@@ -427,15 +547,29 @@ async def _eval_case(
             top_k=top_k,
             admit=admit,
         )
+    if "fused_answer_mismatch" in selected:
+        fused["fused_answer_mismatch"] = await _fuse(
+            retriever,
+            original_query=query,
+            original_hits=original_hits,
+            rewrite_hits=rewrite_hits.get("answer_mismatch") or [],
+            top_k=top_k,
+            admit=admit,
+        )
 
     arm_hits = {
         "original": original_hits,
         "step_back_only": rewrite_hits.get("step_back") or [],
         "hyde_only": rewrite_hits.get("hyde") or [],
+        "answer_mismatch_only": rewrite_hits.get("answer_mismatch") or [],
         "fused_sb": fused.get("fused_sb") or [],
         "fused_hyde": fused.get("fused_hyde") or [],
+        "fused_answer_mismatch": fused.get("fused_answer_mismatch") or [],
     }
     entities = [str(item) for item in (case.get("must_keep_entities") or [])]
+    terms = [str(item) for item in (case.get("must_keep_terms") or [])]
+    anchors = [str(item) for item in (case.get("expected_anchors") or [])]
+    forbidden = forbidden_terms(query)
     arm_metrics: dict[str, Any] = {}
     for arm in selected:
         metrics = _score_arm(
@@ -447,12 +581,46 @@ async def _eval_case(
             metrics["entity_keep"] = entity_keep(query, rewrites.get("step_back", ""), entities)
         elif arm == "hyde_only":
             metrics["entity_keep"] = entity_keep(query, rewrites.get("hyde", ""), entities)
+        elif arm == "answer_mismatch_only":
+            metrics["entity_keep"] = entity_keep(query, rewrites.get("answer_mismatch", ""), entities)
         elif arm == "fused_sb":
             metrics["entity_keep"] = entity_keep(query, rewrites.get("step_back", ""), entities)
         elif arm == "fused_hyde":
             metrics["entity_keep"] = entity_keep(query, rewrites.get("hyde", ""), entities)
+        elif arm == "fused_answer_mismatch":
+            metrics["entity_keep"] = entity_keep(query, rewrites.get("answer_mismatch", ""), entities)
         else:
             metrics["entity_keep"] = 1.0
+        if terms or anchors:
+            if arm == "original":
+                evaluated_query = query
+            elif arm in {"answer_mismatch_only", "fused_answer_mismatch"}:
+                evaluated_query = rewrites.get("answer_mismatch", "")
+            elif arm in {"hyde_only", "fused_hyde"}:
+                evaluated_query = rewrites.get("hyde", "")
+            else:
+                evaluated_query = rewrites.get("step_back", "")
+            metrics["term_keep"] = entity_keep(query, evaluated_query, terms)
+            metrics["anchor_keep"] = anchor_keep(evaluated_query, anchors)
+        if forbidden:
+            if arm == "original":
+                # 原问中的排除项本来就存在，作为校正后的下界对照记为 1。
+                metrics["forbidden_leakage"] = forbidden_leakage(query, query)
+            else:
+                rewrite_key = (
+                    "answer_mismatch"
+                    if arm in {"answer_mismatch_only", "fused_answer_mismatch"}
+                    else "hyde"
+                    if arm in {"hyde_only", "fused_hyde"}
+                    else "step_back"
+                )
+                metrics["forbidden_leakage"] = forbidden_leakage(
+                    query, rewrites.get(rewrite_key, "")
+                )
+        else:
+            metrics["forbidden_leakage"] = 0.0
+        if parent_expand:
+            _apply_parent_expand(metrics, arm_hits[arm], gold)
         arm_metrics[arm] = metrics
 
     delta_cos = None
@@ -508,10 +676,21 @@ def _summarize(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "recall@10",
             "mrr",
             "entity_keep",
+            "term_keep",
+            "anchor_keep",
             "novel_gold",
             "lost_gold",
             "pollution5",
+            "forbidden_leakage",
+            "parent_cover@5",
+            "parent_cover@10",
+            "parent_recall@5",
+            "parent_recall@10",
         ):
+            if (
+                field.startswith("parent_") or field in {"term_keep", "anchor_keep"}
+            ) and not any(field in item for item in items):
+                continue
             rec[field] = round(_mean([float(item.get(field) or 0.0) for item in items]), 4)
         cos_values = [float(item["delta_cos"]) for item in items if item.get("delta_cos") is not None]
         rec["delta_cos"] = round(_mean(cos_values), 4) if cos_values else None
@@ -528,7 +707,14 @@ def _add_deltas(summary: list[dict[str, Any]]) -> list[dict[str, Any]]:
         baseline = arms.get("original")
         if not baseline:
             continue
-        for arm in ("fused_sb", "fused_hyde", "step_back_only", "hyde_only"):
+        for arm in (
+            "fused_sb",
+            "fused_hyde",
+            "fused_answer_mismatch",
+            "step_back_only",
+            "hyde_only",
+            "answer_mismatch_only",
+        ):
             current = arms.get(arm)
             if not current:
                 continue
@@ -542,6 +728,13 @@ def _add_deltas(summary: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         for field in ("hit@5", "hit@10", "ndcg@5", "recall@10")
                     },
                     "entity_keep": current.get("entity_keep"),
+                    "term_keep": current.get("term_keep"),
+                    "anchor_keep": current.get("anchor_keep"),
+                    "forbidden_leakage": round(
+                        float(current.get("forbidden_leakage") or 0.0)
+                        - float(baseline.get("forbidden_leakage") or 0.0),
+                        4,
+                    ),
                     "novel_gold": current.get("novel_gold"),
                     "lost_gold": current.get("lost_gold"),
                     "delta_cos": current.get("delta_cos"),
@@ -551,6 +744,9 @@ def _add_deltas(summary: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _print_table(rows: list[dict[str, Any]]) -> None:
+    parent = any("parent_cover@10" in row for row in rows)
+    forbidden = any(float(row.get("forbidden_leakage") or 0.0) != 0.0 for row in rows)
+    contract = any("term_keep" in row or "anchor_keep" in row for row in rows)
     fields = [
         "bucket",
         "arm",
@@ -564,6 +760,13 @@ def _print_table(rows: list[dict[str, Any]]) -> None:
         "lost_gold",
         "delta_cos",
     ]
+    if forbidden:
+        fields.insert(-1, "forbidden_leakage")
+    if contract:
+        fields.insert(-1, "term_keep")
+        fields.insert(-1, "anchor_keep")
+    if parent:
+        fields.extend(["parent_cover@10", "parent_recall@10"])
     print("\t".join(fields))
     for row in rows:
         print("\t".join("" if row.get(field) is None else str(row.get(field)) for field in fields))
@@ -572,8 +775,15 @@ def _print_table(rows: list[dict[str, Any]]) -> None:
 async def cmd_run(args: argparse.Namespace) -> int:
     cases_path = Path(args.cases)
     cases = load_jsonl(cases_path)
+    if args.case_id:
+        wanted_ids = {str(item) for item in args.case_id}
+        cases = [case for case in cases if str(case.get("id") or "") in wanted_ids]
+    if args.bucket:
+        cases = [case for case in cases if str(case.get("bucket") or "") == args.bucket]
     if args.limit:
         cases = cases[: max(int(args.limit), 1)]
+    if not cases:
+        raise ValueError("筛选后没有可运行的评测样本")
     requested = set(args.arms) if args.arms else set(ARMS)
     top_k = max(int(args.top_k or settings.PDF_RETRIEVAL_TOP_K or 10), 5)
     results = []
@@ -585,19 +795,30 @@ async def cmd_run(args: argparse.Namespace) -> int:
             mode=args.mode,
             with_cosine=not args.skip_cosine,
             admit=args.admit,
+            parent_expand=args.parent_expand,
         )
         results.append(row)
         print(
             f"{row['id']}\t{row['bucket']}\t"
             + "\t".join(
                 f"{arm} hit@5={metrics.get('hit@5')}"
+                + (
+                    f" parent_cover@10={metrics.get('parent_cover@10')} parent_recall@10={metrics.get('parent_recall@10')}"
+                    if args.parent_expand
+                    else ""
+                )
                 for arm, metrics in row["arms"].items()
             )
         )
     summary = _add_deltas(_summarize(results))
     print("\n=== summary ===")
     _print_table(summary)
-    payload = {"top_k": top_k, "cases": results, "summary": summary}
+    payload = {
+        "top_k": top_k,
+        "parent_expand": bool(args.parent_expand),
+        "cases": results,
+        "summary": summary,
+    }
     if args.out:
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -621,7 +842,18 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--mode", choices=("expected", "full"), default="expected")
     run_p.add_argument("--top-k", type=int, default=0)
     run_p.add_argument("--limit", type=int, default=0)
+    run_p.add_argument("--case-id", nargs="+", help="只运行指定 case id")
+    run_p.add_argument(
+        "--bucket",
+        choices=("too_narrow", "vocab_gap", "control", "answer_mismatch"),
+        help="只运行指定问题桶",
+    )
     run_p.add_argument("--skip-cosine", action="store_true")
+    run_p.add_argument(
+        "--parent-expand",
+        action="store_true",
+        help="命中叶子后按 L2 父块的子叶列表计 parent_cover / parent_recall，检索结果本身不变",
+    )
     run_p.add_argument(
         "--admit",
         action="store_true",

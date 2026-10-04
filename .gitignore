@@ -91,10 +91,10 @@ Desktop.ini
 # Jupyter
 .ipynb_checkpoints/
 
-# Misc
-*.bak
-*.tmp
-.cache/
+# LangGraph Studio local persistence
+.langgraph_api/
+*.pckl
+*.pkl
 
 evals/*
 !evals/README.md

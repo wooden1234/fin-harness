@@ -11,6 +11,10 @@ ROOT = Path(__file__).resolve().parent
 DATASET_PATH = ROOT / "datasets" / "fin-harness-core-v1.jsonl"
 ROUTING_PATH = ROOT / "datasets" / "fin-harness-core-v1-routing.jsonl"
 DATASET_NAME = "fin-harness-core-v1"
+PDF_ANSWER_DATASET_NAME = "fin-harness-pdf-answer-v1"
+PDF_ANSWER_DATASET_PATH = ROOT.parent / "retrieval" / "eval" / "answer_faithfulness.jsonl"
+PDF_ANSWER_V2_DATASET_NAME = "fin-harness-pdf-answer-v2"
+PDF_ANSWER_V2_DATASET_PATH = ROOT.parent / "retrieval" / "eval" / "answer_faithfulness_v2.jsonl"
 
 CALIBRATION_IDS = (
     "core-001",
@@ -71,6 +75,49 @@ def load_cases() -> list[dict[str, Any]]:
     return merged
 
 
+def load_pdf_answer_cases(path: Path | None = None) -> list[dict[str, Any]]:
+    """PDF Agent 回答准确性与忠实度集，不合并路由契约。"""
+    rows = _read_jsonl(path or PDF_ANSWER_DATASET_PATH)
+    cases: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        case_id = str(row.get("id") or "")
+        if not case_id or case_id in seen:
+            raise ValueError(f"invalid or duplicate pdf answer case id: {case_id or '<empty>'}")
+        seen.add(case_id)
+        cases.append(
+            {
+                "id": case_id,
+                "inputs": {
+                    "query": row.get("query") or "",
+                    "categories": list(row.get("categories") or []),
+                },
+                "reference_outputs": {
+                    "answer": str(row.get("gold_answer") or ""),
+                    "gold_answer": str(row.get("gold_answer") or ""),
+                    "required_facts": list(row.get("required_facts") or []),
+                    "forbidden_values": list(row.get("forbidden_values") or []),
+                    "relevant_chunks": list(row.get("relevant_chunks") or []),
+                    "expect_abstain": bool(row.get("expect_abstain")),
+                    "require_citation": bool(row.get("require_citation")),
+                    "abstain_markers": list(row.get("abstain_markers") or []),
+                },
+                "metadata": {
+                    "case_id": case_id,
+                    "bucket": row.get("bucket") or "",
+                    "set": row.get("set") or "pdf_answer",
+                    "eval_notes": row.get("eval_notes") or "",
+                },
+            }
+        )
+    return cases
+
+
+def load_pdf_answer_v2_cases() -> list[dict[str, Any]]:
+    """3 条 PDF 回答 demo 集，用于先把评测链路跑通。"""
+    return load_pdf_answer_cases(PDF_ANSWER_V2_DATASET_PATH)
+
+
 def select_cases(
     cases: Iterable[dict[str, Any]],
     *,
@@ -100,6 +147,10 @@ def select_cases(
 __all__ = [
     "CALIBRATION_IDS",
     "DATASET_NAME",
+    "PDF_ANSWER_DATASET_NAME",
+    "PDF_ANSWER_V2_DATASET_NAME",
     "load_cases",
+    "load_pdf_answer_cases",
+    "load_pdf_answer_v2_cases",
     "select_cases",
 ]

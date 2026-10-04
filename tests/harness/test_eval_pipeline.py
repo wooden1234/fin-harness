@@ -187,7 +187,14 @@ def test_dataset_upload_skips_existing_case_ids() -> None:
 
     client = FakeClient()
     result = upload_dataset(client=client)
-    assert result == {"dataset_name": "fin-harness-core-v1", "created": 49, "skipped": 1}
+    assert result == {
+        "dataset_name": "fin-harness-core-v1",
+        "dataset_id": "dataset-1",
+        "url": "",
+        "created": 49,
+        "updated": 0,
+        "skipped": 1,
+    }
     assert len(client.created) == 49
     assert all("case_id" in item["metadata"] for item in client.created)
 

@@ -13,7 +13,7 @@ from agents.finance_agent.pdf_agent.generation import extract_citation_indices
 
 from ..state import PdfAgentState
 from ..trace import append_trace
-from .prompt import PDF_EVIDENCE_EVALUATION_PROMPT
+from .prompt import PDF_ABSTAIN_ANSWER, PDF_EVIDENCE_EVALUATION_PROMPT
 
 _ROUTES = {"answer", "rewrite", "web_search"}
 _STRATEGIES = {"none", "step_back", "hyde", "answer_mismatch"}
@@ -43,7 +43,12 @@ def _parse_evaluation(content: Any) -> dict[str, Any]:
         confidence = min(max(float(payload.get("confidence", 0.0)), 0.0), 1.0)
     except (TypeError, ValueError):
         confidence = 0.0
-    answer = str(payload.get("answer") or "").strip() if route == "answer" else ""
+    if route == "answer":
+        answer = str(payload.get("answer") or "").strip()
+    elif route == "web_search":
+        answer = PDF_ABSTAIN_ANSWER
+    else:
+        answer = ""
     return {
         "route": route,
         "next_strategy": strategy,
@@ -68,14 +73,15 @@ async def evaluate_evidence_node(state: PdfAgentState, *, config=None) -> PdfAge
         evaluation = _parse_evaluation(response.content)
         if not evaluation:
             raise ValueError("证据评判返回无法解析")
-        answer = evaluation["answer"] if evaluation["route"] == "answer" else ""
-        if evaluation["route"] == "answer" and not answer:
+        if evaluation["route"] == "answer" and not evaluation["answer"]:
             evaluation = {
                 **evaluation,
                 "route": "web_search",
                 "next_strategy": "none",
                 "reason": evaluation["reason"] or "模型未生成有效答案",
+                "answer": PDF_ABSTAIN_ANSWER,
             }
+        answer = str(evaluation.get("answer") or "")
         citation_indices = extract_citation_indices(answer, len(state.get("hits") or []))
         trace_update = append_trace(
             state,
@@ -100,9 +106,14 @@ async def evaluate_evidence_node(state: PdfAgentState, *, config=None) -> PdfAge
     except Exception as exc:
         trace_update = append_trace(state, "evidence_evaluate", status="unavailable", error=str(exc))
         return {
-            "evidence_evaluation": {"route": "web_search", "reason": str(exc)},
+            "evidence_evaluation": {
+                "route": "web_search",
+                "reason": str(exc),
+                "answer": PDF_ABSTAIN_ANSWER,
+            },
             "evidence_evaluation_status": "unavailable",
             "evidence_route": "web_search",
             "next_rewrite_strategy": "none",
+            "answer": PDF_ABSTAIN_ANSWER,
             **trace_update,
         }

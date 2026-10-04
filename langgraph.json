@@ -2,7 +2,8 @@
   "dependencies": ["."],
   "graphs": {
     "predefined_workflow": "./langgraph_entry.py:predefined_graph",
-    "text_to_sql_workflow": "./langgraph_entry.py:text_to_sql_graph"
+    "text_to_sql_workflow": "./langgraph_entry.py:text_to_sql_graph",
+    "pdf_agent": "./langgraph_entry.py:pdf_agent_graph"
   },
   "env": "./.env"
 }

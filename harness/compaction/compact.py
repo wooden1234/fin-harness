@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Mapping, Sequence
 
 from harness.compaction.meter import count_request_tokens, estimate_tokens, surface_tokens
@@ -44,11 +45,14 @@ def _trim(text: str, policy: CompactPolicy, *, source_seq: int | None = None) ->
     projected = project_tool_json(text, limit=policy.prune_chars, source_seq=source_seq)
     if projected:
         return projected
-    return (
-        text[: policy.head_chars]
-        + "\n…[truncated]…\n"
-        + text[-policy.tail_chars :]
-    )
+    head = text[: policy.head_chars]
+    tail = text[-policy.tail_chars :] if policy.tail_chars > 0 else ""
+    start = min(max(policy.head_chars, 0), len(text))
+    end = len(text) - policy.tail_chars if policy.tail_chars > 0 else len(text)
+    end = min(max(end, start), len(text))
+    trimmed = f"{head}\n…[truncated]…\n{tail}"
+    ref = {"seq": source_seq, "chars": len(text), "span": [start, end]}
+    return trimmed + "\n" + json.dumps({"log_ref": ref}, ensure_ascii=False)
 
 
 def _units(messages: Sequence[SurfaceMessage]) -> list[list[SurfaceMessage]]:
