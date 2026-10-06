@@ -28,11 +28,11 @@
 
 首页左侧是历史会话，中间是「Hi，我是小财」，下面按热门讨论、财务查数、市场研判列出可点的问题。
 
-![财智首页：会话列表、问候与今日热榜](docs/screenshots/home.png)
+![财智首页：会话列表、问候与今日热榜](https://finagent.oss-cn-beijing.aliyuncs.com/readme/home.png?OSSAccessKeyId=LTAI5t9zoFKEMCztu5dmewR6&Expires=1822826451&Signature=R9figkR8ggCJ0QwEC61jHm7tg4c%3D)
 
 对话里先守住合规边界，再给出可核对的数据。下图问的是英伟达市值是否还能追：回答明确不替用户决定买卖，并用表格列出最近交易日的价格、市值和涨幅口径。
 
-![财智对话：拒绝个性化买卖判断并给出可核对行情](docs/screenshots/chat.png)
+![财智对话：拒绝个性化买卖判断并给出可核对行情](https://finagent.oss-cn-beijing.aliyuncs.com/readme/chat.png?OSSAccessKeyId=LTAI5t9zoFKEMCztu5dmewR6&Expires=1822826451&Signature=rCdMeJB0j7EAf6Qp%2Ft%2BoCR0Rco0%3D)
 
 页脚固定提示：内容由 AI 生成，仅供参考；涉及账户与资金请以官方渠道为准。
 
@@ -149,7 +149,6 @@ fin-harness/
 ├── app/
 │   ├── backend/             # FastAPI（/api/agent 走 harness）
 │   └── frontend/            # 财智聊天 UI
-├── docs/screenshots/        # README 中的产品界面截图
 ├── tools/                   # 领域工具注册（问财、财报、检索等）
 ├── mcp/                     # MCP（天眼查等）；未配 env 则不注册
 ├── skills/                  # SKILL.md
