@@ -244,6 +244,9 @@ async def retrieve_node(state: PdfAgentState, *, config=None) -> PdfAgentState:
         ),
         rewrite_hit_count=len(rewrite_hits),
         fused_hits=fused_count if fusion_mode == FUSION_MODE_ORIGINAL_REWRITE_RRF else 0,
+        protected_original_hits=(
+            fuse_result.protected_original_count if fuse_rewrite else 0
+        ),
         rewrite_strategy=strategy or "none",
     )
     result: PdfAgentState = {
@@ -271,6 +274,9 @@ async def retrieve_node(state: PdfAgentState, *, config=None) -> PdfAgentState:
     rag_trace["rewrite_hit_count"] = len(rewrite_hits)
     rag_trace["fused_hits"] = (
         fused_count if fusion_mode == FUSION_MODE_ORIGINAL_REWRITE_RRF else 0
+    )
+    rag_trace["protected_original_hits"] = (
+        fuse_result.protected_original_count if fuse_rewrite else 0
     )
     result["rag_trace"] = rag_trace
     return result

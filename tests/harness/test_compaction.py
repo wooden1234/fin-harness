@@ -616,11 +616,17 @@ async def test_tool_trim_quantitative_workload():
     )
     trimmed = str(replace.data.get("content") or "")
     marker = "\n…[truncated]…\n"
-    expected_len = 4096 + len(marker) + 1024
+    head_tail = ("报" * 4096) + marker + ("报" * 1024)
+    ref = json.loads(trimmed.removeprefix(head_tail).strip())
 
     assert changed is True
     assert len(tool_body) == 40_000
-    assert len(trimmed) == expected_len
+    assert trimmed.startswith(head_tail)
+    assert ref["log_ref"] == {
+        "seq": replace.source_event_seqs[0],
+        "chars": 40_000,
+        "span": [4096, 40_000 - 1024],
+    }
     assert tokens_before > token_limit
     assert tokens_after < token_limit
     reduction = 1 - tokens_after / tokens_before

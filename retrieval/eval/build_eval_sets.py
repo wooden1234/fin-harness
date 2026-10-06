@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate recall / parent / HyDE-Step-back eval JSONL from cleaned chunk ids."""
+"""Generate recall / parent / HyDE-Step-back / PDF answer eval JSONL."""
 
 from __future__ import annotations
 
@@ -536,8 +536,9 @@ def rewrite_cases() -> list[dict]:
     rows: list[dict] = []
 
     def add(i: str, bucket: str, query: str, strategy: str, *, cats: list[str],
-            gold: list[tuple[str, int]], entities: list[str], notes: str = "") -> None:
-        rows.append({
+            gold: list[tuple[str, int]], entities: list[str], notes: str = "",
+            terms: list[str] | None = None, anchors: list[str] | None = None) -> None:
+        row = {
             "id": i,
             "set": "hyde_stepback",
             "bucket": bucket,
@@ -547,7 +548,12 @@ def rewrite_cases() -> list[dict]:
             "categories": cats,
             "relevant_chunks": [node(d, c) for d, c in gold],
             "eval_notes": notes,
-        })
+        }
+        if terms:
+            row["must_keep_terms"] = terms
+        if anchors:
+            row["expected_anchors"] = anchors
+        rows.append(row)
 
     # keep original ids
     add("sb-001", "too_narrow", "寒武纪2024年其他业务销售毛利率是多少", "step_back",
@@ -693,23 +699,388 @@ def rewrite_cases() -> list[dict]:
     add("mm-001", "answer_mismatch", "寒武纪2024年营业收入是多少，不要答成龙芯", "answer_mismatch",
         cats=["annual_reports"], gold=[("PDF-AR-688256-2024", 6)],
         entities=["寒武纪", "2024", "营业收入"],
-        notes="两家芯片年报主表结构几乎一样")
+        notes="两家芯片年报主表结构几乎一样",
+        terms=["寒武纪", "2024", "营业收入"], anchors=["年度报告", "主要财务指标"])
     add("mm-002", "answer_mismatch", "龙芯中科2025年营业收入，不要用2024年报", "answer_mismatch",
         cats=["annual_reports"], gold=[("PDF-AR-688047-2025", 6)],
         entities=["龙芯", "2025"],
-        notes="同年公司相邻财年")
+        notes="同年公司相邻财年",
+        terms=["龙芯中科", "2025", "营业收入"], anchors=["年度报告", "主要财务指标"])
     add("mm-003", "answer_mismatch", "宁德时代2025年营业收入，不要用腾讯收入", "answer_mismatch",
         cats=["annual_reports"], gold=[("PDF-AR-CATL-2025", 19)],
-        entities=["宁德时代", "2025", "营业收入"])
+        entities=["宁德时代", "2025", "营业收入"],
+        terms=["宁德时代", "2025", "营业收入"], anchors=["年度报告", "主要财务指标"])
     add("mm-004", "answer_mismatch", "光模块占光通信系统设备成本超过50%，不是电池成本", "answer_mismatch",
         cats=["research_reports"], gold=[("PDF-RR-20260420", 1)],
-        entities=["光模块", "成本"])
+        entities=["光模块", "成本"],
+        terms=["光模块", "光通信系统设备", "成本", "50%"], anchors=["成本构成"])
     add("mm-005", "answer_mismatch", "美国一季度经济韧性，不是中国GDP 5%", "answer_mismatch",
         cats=["macro_research"], gold=[("PDF-MACRO-03", 79)],
-        entities=["美国", "韧性"])
+        entities=["美国", "韧性"],
+        terms=["美国", "一季度", "经济韧性"], anchors=["主要经济指标"])
     add("mm-006", "answer_mismatch", "数字治理指数北京2024年数值，不是数字经济总指数", "answer_mismatch",
         cats=["industry_whitepapers"], gold=[("PDF-WP-02", 38)],
-        entities=["数字治理", "北京", "2024"])
+        entities=["数字治理", "北京", "2024"],
+        terms=["数字治理指数", "北京", "2024", "数值"], anchors=["分指数表"])
+
+    assert len(rows) == 50, len(rows)
+    return rows
+
+
+def answer_cases() -> list[dict]:
+    """PDF Agent 最终答案的准确性与忠实度。
+
+    准确性：required_facts 的 aliases 必须都能在答案里找到。
+    忠实度：作答必须带 [n] 引用；forbidden_values 不得出现。
+    expect_abstain 时必须包含“暂无相关文档依据”，且不得写出具体数值。
+    gold_answer 是给人看的一句金标，便于对照模型输出；拒答题写明无法回答。
+    """
+    rows: list[dict] = []
+
+    def gold_answer(*, abstain: bool, facts: list[dict], notes: str = "") -> str:
+        if abstain:
+            reason = str(notes or "").strip()
+            if reason:
+                return f"无法回答。暂无相关文档依据（{reason}）"
+            return "无法回答。暂无相关文档依据"
+        parts: list[str] = []
+        for item in facts:
+            subject = str(item.get("subject") or "").strip()
+            period = str(item.get("period") or "").strip()
+            metric = str(item.get("metric") or "").strip()
+            unit = str(item.get("unit") or "").strip()
+            aliases = [str(alias).strip() for alias in (item.get("aliases") or []) if str(alias).strip()]
+            display = str(item.get("value") or "").strip()
+            first_alias = ""
+            formatted_alias = ""
+            for alias in aliases:
+                if alias == unit:
+                    continue
+                if not first_alias:
+                    first_alias = alias
+                if "," in alias or "万" in alias:
+                    formatted_alias = alias
+                    break
+            display = formatted_alias or first_alias or display
+            if unit and unit not in display and not display.endswith(("元", "万", "亿", "%", "百万")):
+                display = f"{display}{unit}"
+            label = " ".join(part for part in (subject, period, metric) if part)
+            parts.append(f"{label}：{display}" if label else display)
+        return "；".join(parts)
+
+    def add(
+        i: str,
+        bucket: str,
+        query: str,
+        *,
+        cats: list[str],
+        gold: list[tuple[str, int]],
+        facts: list[dict],
+        forbidden: list[str],
+        abstain: bool = False,
+        notes: str = "",
+    ) -> None:
+        rows.append({
+            "id": i,
+            "set": "pdf_answer",
+            "bucket": bucket,
+            "query": query,
+            "categories": cats,
+            "relevant_chunks": [node(d, c) for d, c in gold],
+            "gold_answer": gold_answer(abstain=abstain, facts=facts, notes=notes),
+            "expect_abstain": abstain,
+            "require_citation": not abstain,
+            "abstain_markers": ["暂无相关文档依据"],
+            "required_facts": facts,
+            "forbidden_values": forbidden,
+            "eval_notes": notes,
+        })
+
+    def fact(subject: str, period: str, metric: str, value: str, unit: str, aliases: list[str]) -> dict:
+        return {
+            "subject": subject,
+            "period": period,
+            "metric": metric,
+            "value": value,
+            "unit": unit,
+            "aliases": aliases,
+        }
+
+    # exact_number：单点数值必须答对，并引用上下文
+    add("ans-001", "exact_number", "寒武纪2024年营业收入是多少，同比增速是多少",
+        cats=["annual_reports"], gold=[("PDF-AR-688256-2024", 6)],
+        facts=[
+            fact("寒武纪", "2024", "营业收入", "1174464377.35", "元", ["1174464377.35", "1,174,464,377.35"]),
+            fact("寒武纪", "2024", "营业收入同比", "65.56", "%", ["65.56"]),
+        ],
+        forbidden=["6497196198.68", "453.21", "龙芯"])
+    add("ans-002", "exact_number", "龙芯中科2024年营业收入和归母净利润分别是多少",
+        cats=["annual_reports"], gold=[("PDF-AR-688047-2024", 5)],
+        facts=[
+            fact("龙芯中科", "2024", "营业收入", "50425.72", "万元", ["50425.72", "50,425.72"]),
+            fact("龙芯中科", "2024", "归母净利润", "-62534.71", "万元", ["-62534.71", "-62,534.71"]),
+        ],
+        forbidden=["寒武纪", "63532.06"])
+    add("ans-003", "exact_number", "宁德时代2024年营业收入是多少，同比变动是多少",
+        cats=["annual_reports"], gold=[("PDF-AR-CATL-2024", 5)],
+        facts=[
+            fact("宁德时代", "2024", "营业收入", "362012554", "千元", ["362012554", "362,012,554"]),
+            fact("宁德时代", "2024", "营业收入同比", "-9.70", "%", ["-9.70", "-9.7"]),
+        ],
+        forbidden=["423701834", "17.04"])
+    add("ans-004", "exact_number", "腾讯2024年全年收入是多少",
+        cats=["annual_reports"], gold=[("PDF-AR-TCEHY-2024", 5)],
+        facts=[fact("腾讯", "2024", "收入", "660257", "百万元", ["660257", "660,257"])],
+        forbidden=["751766", "751,766"])
+    add("ans-005", "exact_number", "2026年3月1年期和5年期以上LPR分别是多少",
+        cats=["macro_research"], gold=[("PDF-MACRO-03", 17)],
+        facts=[
+            fact("LPR", "2026-03", "1年期", "3.0", "%", ["3.0", "3.0%"]),
+            fact("LPR", "2026-03", "5年期以上", "3.5", "%", ["3.5", "3.5%"]),
+        ],
+        forbidden=[])
+    add("ans-006", "exact_number", "寒武纪2024年其他业务毛利率和境内业务毛利率分别是多少",
+        cats=["annual_reports"], gold=[("PDF-AR-688256-2024", 31)],
+        facts=[
+            fact("寒武纪", "2024", "其他业务毛利率", "95.78", "%", ["95.78"]),
+            fact("寒武纪", "2024", "境内毛利率", "56.73", "%", ["56.73"]),
+        ],
+        forbidden=["22.11"])
+    add("ans-007", "exact_number", "腾讯2024年末微信及WeChat合并月活跃账户数是多少",
+        cats=["annual_reports"], gold=[("PDF-AR-TCEHY-2024", 4)],
+        facts=[fact("腾讯", "2024", "微信及WeChat合并月活", "1385", "百万", ["1385", "1,385"])],
+        forbidden=["1418", "1,418"])
+    add("ans-008", "exact_number", "2026年一季度中国GDP同比增长多少",
+        cats=["macro_research"], gold=[("PDF-MACRO-03", 1)],
+        facts=[fact("中国", "2026Q1", "GDP同比", "5", "%", ["5%", "同比增长5"])],
+        forbidden=["美国"])
+
+    # entity_year：主体或年份错了就是不准确，也是把别的文档事实写进答案
+    add("ans-009", "entity_year", "寒武纪2025年营业收入和同比增速是多少",
+        cats=["annual_reports"], gold=[("PDF-AR-688256-2025", 6)],
+        facts=[
+            fact("寒武纪", "2025", "营业收入", "6497196198.68", "元", ["6497196198.68", "6,497,196,198.68"]),
+            fact("寒武纪", "2025", "营业收入同比", "453.21", "%", ["453.21"]),
+        ],
+        forbidden=["1174464377.35", "1,174,464,377.35", "65.56"])
+    add("ans-010", "entity_year", "龙芯中科2025年营业收入是多少",
+        cats=["annual_reports"], gold=[("PDF-AR-688047-2025", 6)],
+        facts=[fact("龙芯中科", "2025", "营业收入", "63532.06", "万元", ["63532.06", "63,532.06"])],
+        forbidden=["50425.72", "50,425.72"])
+    add("ans-011", "entity_year", "腾讯2025年收入是多少",
+        cats=["annual_reports"], gold=[("PDF-AR-TCEHY-2025", 5)],
+        facts=[fact("腾讯", "2025", "收入", "751766", "百万元", ["751766", "751,766"])],
+        forbidden=["660257", "660,257"])
+    add("ans-012", "entity_year", "寒武纪2024年归母净利润是多少",
+        cats=["annual_reports"], gold=[("PDF-AR-688256-2024", 6)],
+        facts=[fact("寒武纪", "2024", "归母净利润", "-452338791.01", "元", ["-452338791.01", "-452,338,791.01"])],
+        forbidden=["-62534.71", "-62,534.71", "龙芯"])
+    add("ans-013", "entity_year", "腾讯2024年营销服务收入是多少",
+        cats=["annual_reports"], gold=[("PDF-AR-TCEHY-2024", 7)],
+        facts=[fact("腾讯", "2024", "营销服务收入", "121374", "百万元", ["121374", "121,374"])],
+        forbidden=["319168", "319,168"])
+    add("ans-014", "entity_year", "腾讯2025年末微信及WeChat合并月活跃账户数是多少",
+        cats=["annual_reports"], gold=[("PDF-AR-TCEHY-2025", 4)],
+        facts=[fact("腾讯", "2025", "微信及WeChat合并月活", "1418", "百万", ["1418", "1,418"])],
+        forbidden=["1385", "1,385"])
+
+    # unit_caliber：数字可以换写，但不得改掉原文单位
+    add("ans-015", "unit_caliber", "宁德时代2024年营业收入是多少，请保留年报原文单位",
+        cats=["annual_reports"], gold=[("PDF-AR-CATL-2024", 5)],
+        facts=[fact("宁德时代", "2024", "营业收入", "362012554", "千元", ["362012554", "362,012,554", "千元"])],
+        forbidden=["362012554亿元", "362,012,554亿元", "362012554万元"])
+    add("ans-016", "unit_caliber", "龙芯中科2024年营业收入是多少，请保留年报原文单位",
+        cats=["annual_reports"], gold=[("PDF-AR-688047-2024", 5)],
+        facts=[fact("龙芯中科", "2024", "营业收入", "50425.72", "万元", ["50425.72", "50,425.72", "万元"])],
+        forbidden=["50425.72元", "50,425.72元", "50425.72亿元"])
+    add("ans-017", "unit_caliber", "腾讯2024年收入是多少，请保留年报原文单位",
+        cats=["annual_reports"], gold=[("PDF-AR-TCEHY-2024", 5)],
+        facts=[fact("腾讯", "2024", "收入", "660257", "百万元", ["660257", "660,257", "百万"])],
+        forbidden=["660257亿元", "660,257亿元"])
+    add("ans-018", "unit_caliber", "寒武纪2024年营业收入是多少，请保留年报原文单位",
+        cats=["annual_reports"], gold=[("PDF-AR-688256-2024", 6)],
+        facts=[fact("寒武纪", "2024", "营业收入", "1174464377.35", "元", ["1174464377.35", "1,174,464,377.35"]),
+               ],
+        forbidden=["1174464377.35万元", "1,174,464,377.35万元"])
+
+    # multi_fact：多个事实都要出现，不能用其中一个替换另一个
+    add("ans-019", "multi_fact", "腾讯2024年增值服务的收入和毛利率分别是多少",
+        cats=["annual_reports"], gold=[("PDF-AR-TCEHY-2024", 7), ("PDF-AR-TCEHY-2024", 8)],
+        facts=[
+            fact("腾讯", "2024", "增值服务收入", "319168", "百万元", ["319168", "319,168"]),
+            fact("腾讯", "2024", "增值服务毛利率", "57", "%", ["57%"]),
+        ],
+        forbidden=["121374", "121,374"])
+    add("ans-020", "multi_fact", "CoreWeave 2026年一季度经调整EBITDA、利润率和净亏损分别是多少",
+        cats=["research_reports"], gold=[("PDF-RR-20260531", 97)],
+        facts=[
+            fact("CoreWeave", "2026Q1", "经调整EBITDA", "12", "亿美元", ["12亿"]),
+            fact("CoreWeave", "2026Q1", "经调整EBITDA利润率", "56", "%", ["56%"]),
+            fact("CoreWeave", "2026Q1", "净亏损", "7.40", "亿美元", ["7.40", "7.4"]),
+        ],
+        forbidden=["净利润12亿", "盈利12亿"])
+    add("ans-021", "multi_fact", "对比寒武纪2024年和2025年的营业收入及同比增速",
+        cats=["annual_reports"], gold=[("PDF-AR-688256-2024", 6), ("PDF-AR-688256-2025", 6)],
+        facts=[
+            fact("寒武纪", "2024", "营业收入", "1174464377.35", "元", ["1174464377.35", "1,174,464,377.35"]),
+            fact("寒武纪", "2024", "营业收入同比", "65.56", "%", ["65.56"]),
+            fact("寒武纪", "2025", "营业收入", "6497196198.68", "元", ["6497196198.68", "6,497,196,198.68"]),
+            fact("寒武纪", "2025", "营业收入同比", "453.21", "%", ["453.21"]),
+        ],
+        forbidden=[])
+    add("ans-022", "multi_fact", "龙芯中科2025年营业收入增长后，扣股份支付后的净利润是多少，是否已经盈利",
+        cats=["annual_reports"], gold=[("PDF-AR-688047-2025", 6), ("PDF-AR-688047-2025", 14)],
+        facts=[
+            fact("龙芯中科", "2025", "营业收入", "63532.06", "万元", ["63532.06", "63,532.06"]),
+            fact("龙芯中科", "2025", "扣股份支付后净利润", "-42608.11", "万元", ["-42608.11", "-42,608.11"]),
+        ],
+        forbidden=["实现盈利", "已经扭亏"])
+    add("ans-023", "multi_fact", "寒武纪2025年营业收入、费用化研发投入和扣股份支付后净利润分别是多少",
+        cats=["annual_reports"], gold=[("PDF-AR-688256-2025", 6), ("PDF-AR-688256-2025", 12), ("PDF-AR-688256-2025", 22)],
+        facts=[
+            fact("寒武纪", "2025", "营业收入", "6497196198.68", "元", ["6497196198.68", "6,497,196,198.68"]),
+            fact("寒武纪", "2025", "费用化研发投入", "1169100962.15", "元", ["1169100962.15", "1,169,100,962.15"]),
+            fact("寒武纪", "2025", "扣股份支付后净利润", "2297212898.47", "元", ["2297212898.47", "2,297,212,898.47"]),
+        ],
+        forbidden=[])
+    add("ans-024", "multi_fact", "中际旭创1.6T光模块于何时向重点客户出货",
+        cats=["research_reports"], gold=[("PDF-RR-20260420", 39)],
+        facts=[fact("中际旭创", "2025Q3", "1.6T出货", "2025年第三季度", "", ["2025年第三季度", "2025Q3"])],
+        forbidden=["尚未出货", "没有出货"])
+
+    # abstain：语料没有依据时必须拒答，不能补一个看起来像真的数
+    add("ans-025", "abstain", "华为2024年净利润是多少",
+        cats=["annual_reports"], gold=[],
+        facts=[], forbidden=["亿元", "万元", "%"],
+        abstain=True, notes="语料无华为年报")
+    add("ans-026", "abstain", "比亚迪2025年动力电池装机量是多少",
+        cats=["annual_reports"], gold=[],
+        facts=[], forbidden=["GWh", "吉瓦时", "%"],
+        abstain=True, notes="语料无比亚迪年报")
+    add("ans-027", "abstain", "工信部第十一次中小企业圆桌会议是谁主持的",
+        cats=["policy"], gold=[],
+        facts=[], forbidden=[],
+        abstain=True, notes="policy 未入库")
+    add("ans-028", "abstain", "寒武纪2026年营业收入是多少",
+        cats=["annual_reports"], gold=[],
+        facts=[], forbidden=["1174464377.35", "6497196198.68", "65.56", "453.21"],
+        abstain=True, notes="语料无2026年报，不得用2024或2025年营收充数")
+
+    add("ans-029", "exact_number", "龙芯中科2024年第四季度营业收入是多少",
+        cats=["annual_reports"], gold=[("PDF-AR-688047-2024", 7)],
+        facts=[fact("龙芯中科", "2024Q4", "营业收入", "19647.66", "万元", ["19647.66", "19,647.66"])],
+        forbidden=["第四季度营业收入50,425.72", "第四季度营业收入50425.72"])
+    add("ans-030", "exact_number", "宁德时代2024年第一季度营业收入是多少",
+        cats=["annual_reports"], gold=[("PDF-AR-CATL-2024", 7)],
+        facts=[fact("宁德时代", "2024Q1", "营业收入", "79770779", "千元", ["79770779", "79,770,779"])],
+        forbidden=["第一季度营业收入362,012,554", "第一季度营业收入362012554"])
+    add("ans-031", "exact_number", "2026年3月末M2和社会融资规模存量同比分别是多少",
+        cats=["macro_research"], gold=[("PDF-MACRO-03", 2)],
+        facts=[
+            fact("中国", "2026-03", "M2同比", "8.5", "%", ["8.5"]),
+            fact("中国", "2026-03", "社融存量同比", "7.9", "%", ["7.9"]),
+        ],
+        forbidden=[])
+    add("ans-032", "exact_number", "光模块在光通信系统设备中的成本占比大约是多少",
+        cats=["research_reports"], gold=[("PDF-RR-20260420", 1)],
+        facts=[fact("光模块", "", "成本占比", "50", "%", ["50%", "超过50"])],
+        forbidden=["电池"])
+    add("ans-033", "exact_number", "时尚春熙平台累计为多少银发用户提供服务",
+        cats=["industry_whitepapers"], gold=[("PDF-WP-07", 3)],
+        facts=[fact("春熙", "", "银发用户", "7.8万", "", ["7.8万"])],
+        forbidden=[])
+    add("ans-034", "exact_number", "数字治理指数表中北京2024年的数值是多少",
+        cats=["industry_whitepapers"], gold=[("PDF-WP-02", 38)],
+        facts=[fact("北京", "2024", "数字治理指数", "12.05", "", ["12.05"])],
+        forbidden=[])
+
+    add("ans-035", "entity_year", "龙芯中科2024年归母净利润是多少",
+        cats=["annual_reports"], gold=[("PDF-AR-688047-2024", 5)],
+        facts=[fact("龙芯中科", "2024", "归母净利润", "-62534.71", "万元", ["-62534.71", "-62,534.71"])],
+        forbidden=["-452338791.01", "-452,338,791.01", "-42608.11", "-42,608.11"])
+    add("ans-036", "entity_year", "宁德时代2025年营业收入和同比增速是多少",
+        cats=["annual_reports"], gold=[("PDF-AR-CATL-2025", 19)],
+        facts=[
+            fact("宁德时代", "2025", "营业收入", "423701834", "", ["423701834", "423,701,834"]),
+            fact("宁德时代", "2025", "营业收入同比", "17.04", "%", ["17.04"]),
+        ],
+        forbidden=["362012554", "362,012,554", "-9.70", "-9.7"])
+    add("ans-037", "entity_year", "龙芯中科的法定代表人是谁",
+        cats=["annual_reports"], gold=[("PDF-AR-688047-2024", 0)],
+        facts=[fact("龙芯中科", "", "法定代表人", "胡伟武", "", ["胡伟武"])],
+        forbidden=["寒武纪"])
+    add("ans-038", "entity_year", "寒武纪2024年年报中云端产品线营业收入是多少",
+        cats=["annual_reports"], gold=[("PDF-AR-688256-2024", 288)],
+        facts=[fact("寒武纪", "2024", "云端产品线营业收入", "1166278485.36", "元", ["1166278485.36", "1,166,278,485.36"])],
+        forbidden=["49%", "思元590"])
+
+    add("ans-039", "unit_caliber", "2021年人身险公司保费收入是多少，请保留原文单位",
+        cats=["macro_research"], gold=[("PDF-MACRO-02", 94)],
+        facts=[fact("人身险", "2021", "保费收入", "31224", "亿元", ["31224", "31,224", "亿元"])],
+        forbidden=["31224万元", "31,224万元", "31224元"])
+    add("ans-040", "unit_caliber", "CoreWeave 2026年资本开支指引是多少，请保留原文单位",
+        cats=["research_reports"], gold=[("PDF-RR-20260531", 100)],
+        facts=[
+            fact("CoreWeave", "2026", "资本开支指引下限", "310", "亿美元", ["310"]),
+            fact("CoreWeave", "2026", "资本开支指引上限", "350", "亿美元", ["350", "亿美元"]),
+        ],
+        forbidden=["310亿元", "350亿元"])
+    add("ans-041", "unit_caliber", "寒武纪2024年云端产品线直接材料金额是多少，请保留原文单位",
+        cats=["annual_reports"], gold=[("PDF-AR-688256-2024", 35)],
+        facts=[fact("寒武纪", "2024", "云端产品线直接材料", "261563612.41", "元", ["261563612.41", "261,563,612.41"])],
+        forbidden=["261563612.41万元", "261,563,612.41万元"])
+    add("ans-042", "unit_caliber", "寒武纪2024年云端产品线营业收入是多少，请保留原文单位",
+        cats=["annual_reports"], gold=[("PDF-AR-688256-2024", 288)],
+        facts=[fact("寒武纪", "2024", "云端产品线营业收入", "1166278485.36", "元", ["1166278485.36", "1,166,278,485.36"])],
+        forbidden=["1166278485.36万元", "1,166,278,485.36万元"])
+
+    add("ans-043", "multi_fact", "龙芯中科2024年全年营收同比和第四季度净利润分别是多少",
+        cats=["annual_reports"], gold=[("PDF-AR-688047-2024", 5), ("PDF-AR-688047-2024", 7)],
+        facts=[
+            fact("龙芯中科", "2024", "营业收入同比", "-0.28", "%", ["-0.28"]),
+            fact("龙芯中科", "2024Q4", "净利润", "-28258.75", "万元", ["-28258.75", "-28,258.75"]),
+        ],
+        forbidden=[])
+    add("ans-044", "multi_fact", "寒武纪2024年营业收入、归母净利润和基本每股收益分别是多少",
+        cats=["annual_reports"], gold=[("PDF-AR-688256-2024", 6), ("PDF-AR-688256-2024", 8)],
+        facts=[
+            fact("寒武纪", "2024", "营业收入", "1174464377.35", "元", ["1174464377.35", "1,174,464,377.35"]),
+            fact("寒武纪", "2024", "归母净利润", "-452338791.01", "元", ["-452338791.01", "-452,338,791.01"]),
+            fact("寒武纪", "2024", "基本每股收益", "-1.09", "元", ["-1.09"]),
+        ],
+        forbidden=[])
+    add("ans-045", "multi_fact", "CoreWeave 2026年一季度利息费用、一季度资本开支和全年资本开支指引分别是多少",
+        cats=["research_reports"], gold=[("PDF-RR-20260531", 97), ("PDF-RR-20260531", 100)],
+        facts=[
+            fact("CoreWeave", "2026Q1", "利息费用", "5.36", "亿美元", ["5.36"]),
+            fact("CoreWeave", "2026Q1", "资本开支", "68", "亿美元", ["68亿"]),
+            fact("CoreWeave", "2026", "资本开支指引", "310-350", "亿美元", ["310", "350"]),
+        ],
+        forbidden=[])
+    add("ans-046", "multi_fact", "宁德时代2024年电气机械及器材制造业占营业收入的比重和毛利率分别是多少",
+        cats=["annual_reports"], gold=[("PDF-AR-CATL-2024", 14), ("PDF-AR-CATL-2024", 16)],
+        facts=[
+            fact("宁德时代", "2024", "电气机械收入占比", "98.48", "%", ["98.48"]),
+            fact("宁德时代", "2024", "电气机械毛利率", "24.69", "%", ["24.69"]),
+        ],
+        forbidden=[])
+
+    add("ans-047", "abstain", "腾讯2026年收入是多少",
+        cats=["annual_reports"], gold=[],
+        facts=[], forbidden=["660257", "660,257", "751766", "751,766"],
+        abstain=True, notes="语料无2026年报")
+    add("ans-048", "abstain", "龙芯中科2026年归母净利润是多少",
+        cats=["annual_reports"], gold=[],
+        facts=[], forbidden=["-62534.71", "-62,534.71", "-42608.11", "-42,608.11"],
+        abstain=True, notes="语料无2026年报")
+    add("ans-049", "abstain", "苹果公司2024年营业收入是多少",
+        cats=["annual_reports"], gold=[],
+        facts=[], forbidden=[],
+        abstain=True, notes="语料无苹果年报")
+    add("ans-050", "abstain", "宁德时代2026年动力电池装机量是多少",
+        cats=["annual_reports"], gold=[],
+        facts=[], forbidden=["GWh", "吉瓦时"],
+        abstain=True, notes="语料无2026年装机量")
 
     assert len(rows) == 50, len(rows)
     return rows
@@ -719,6 +1090,7 @@ def main() -> None:
     dump("recall.jsonl", recall_cases())
     dump("parent.jsonl", parent_cases())
     dump("hyde_stepback.jsonl", rewrite_cases())
+    dump("answer_faithfulness.jsonl", answer_cases())
 
 
 if __name__ == "__main__":

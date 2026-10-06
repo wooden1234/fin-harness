@@ -140,11 +140,57 @@ def _has_session_marker(text: str) -> bool:
     return any(marker in normalized for marker in _SESSION_MARKERS)
 
 
+# 直接说「用中文回答 / 用英文回答」即本会话后续都改语言。不匹配单独的「中文」。
+_DIRECT_SESSION_LANGUAGE: tuple[tuple[str, str], ...] = (
+    ("请用中文回答", "zh-CN"),
+    ("使用中文回答", "zh-CN"),
+    ("用中文回答", "zh-CN"),
+    ("请用英文回答", "en-US"),
+    ("使用英文回答", "en-US"),
+    ("用英文回答", "en-US"),
+    ("请用英语回答", "en-US"),
+    ("使用英语回答", "en-US"),
+    ("用英语回答", "en-US"),
+)
+
+
+def _language_phrase_negated(normalized: str, index: int) -> bool:
+    prefix = normalized[max(0, index - 2) : index]
+    return prefix.endswith(("不要", "别", "勿")) or normalized[max(0, index - 1) : index] == "不"
+
+
+def _direct_session_language(normalized: str) -> str | None:
+    found: list[tuple[int, str]] = []
+    for phrase, value in _DIRECT_SESSION_LANGUAGE:
+        start = 0
+        while True:
+            index = normalized.find(phrase, start)
+            if index < 0:
+                break
+            if not _language_phrase_negated(normalized, index):
+                found.append((index, value))
+            start = index + len(phrase)
+    if not found:
+        return None
+    found.sort()
+    return found[-1][1]
+
+
 def extract_session_preferences(text: str) -> dict[str, str]:
-    """提取明确声明「本次会话采用某种方式」的偏好，不写入长期记忆。"""
-    if not _has_session_marker(text):
+    """提取本会话持续生效的偏好，不写入长期记忆。
+
+    「本次会话…」沿用原规则。另外，「用中文回答 / 用英文回答」这类直接说法
+    也写入会话语言，并盖过长期偏好；「这次 / 以后 / 请记住」仍走本轮或长期。
+    """
+    normalized = _normalize(text)
+    if _has_session_marker(text):
+        return _matched_preferences(normalized)
+    if contains_temporary_memory_marker(text) or contains_persistent_memory_marker(text):
         return {}
-    return _matched_preferences(_normalize(text))
+    language = _direct_session_language(normalized)
+    if not language:
+        return {}
+    return {"response_language": language}
 
 
 def extract_turn_preferences(text: str) -> dict[str, str]:

@@ -6,6 +6,7 @@ import asyncio
 from typing import Protocol, Sequence
 
 from harness.session.envelope import event_from_row, normalize_draft
+from harness.session.reducer import SessionState, reduce_session
 from harness.session.types import EventDraft, SessionEvent, new_id, utcnow
 
 
@@ -36,11 +37,15 @@ class SessionStore(Protocol):
         session_id: str | None = None,
     ) -> SessionHeader: ...
 
-    async def find_by_conversation(self, conversation_id: str | int) -> SessionHeader | None: ...
+    async def find_by_conversation(
+        self, *, tenant_id: str, user_id: str, conversation_id: str | int
+    ) -> SessionHeader | None: ...
 
     async def get(self, session_id: str) -> SessionHeader: ...
 
     async def load_events(self, session_id: str, *, after_seq: int = 0) -> list[SessionEvent]: ...
+
+    async def load_state(self, session_id: str) -> SessionState: ...
 
     async def append(self, session_id: str, draft: EventDraft) -> SessionEvent: ...
 
@@ -73,10 +78,16 @@ class InMemorySessionStore:
         self._sessions[header.session_id] = header
         return header
 
-    async def find_by_conversation(self, conversation_id: str | int) -> SessionHeader | None:
+    async def find_by_conversation(
+        self, *, tenant_id: str, user_id: str, conversation_id: str | int
+    ) -> SessionHeader | None:
         key = str(conversation_id)
         for header in self._sessions.values():
-            if header.conversation_id == key:
+            if (
+                header.conversation_id == key
+                and header.tenant_id == str(tenant_id)
+                and header.user_id == str(user_id)
+            ):
                 return header
         return None
 
@@ -85,6 +96,9 @@ class InMemorySessionStore:
 
     async def load_events(self, session_id: str, *, after_seq: int = 0) -> list[SessionEvent]:
         return [event for event in self._sessions[session_id].events if event.seq > after_seq]
+
+    async def load_state(self, session_id: str) -> SessionState:
+        return reduce_session(None, await self.load_events(session_id))
 
     async def append(self, session_id: str, draft: EventDraft) -> SessionEvent:
         header = self._sessions[session_id]

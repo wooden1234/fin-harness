@@ -21,7 +21,9 @@ from app.core.database import Base
 class AgentSession(Base):
     __tablename__ = "agent_sessions"
     __table_args__ = (
-        UniqueConstraint("conversation_id", name="uq_agent_sessions_conversation_id"),
+        UniqueConstraint(
+            "tenant_id", "user_id", "conversation_id", name="uq_agent_sessions_owner_conversation"
+        ),
         Index("ix_agent_sessions_user", "tenant_id", "user_id"),
         {"schema": "app"},
     )
@@ -274,4 +276,28 @@ class SessionTodoSnapshot(Base):
     version = Column(Integer, nullable=False)
     todos = Column(JSON, nullable=False)
     event_data = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class SessionStateSnapshot(Base):
+    __tablename__ = "session_state_snapshots"
+    __table_args__ = (
+        UniqueConstraint("session_id", "snapshot_seq", name="uq_session_state_snapshot_seq"),
+        Index("ix_session_state_snapshots_latest", "session_id", "snapshot_seq"),
+        {"schema": "app"},
+    )
+
+    snapshot_id = Column(String(36), primary_key=True)
+    session_id = Column(String(36), ForeignKey("app.agent_sessions.session_id", ondelete="CASCADE"), nullable=False)
+    snapshot_seq = Column(Integer, nullable=False)
+    schema_version = Column(Integer, nullable=False, default=1)
+    current_run_id = Column(String(36), nullable=True)
+    current_turn = Column(Integer, nullable=True)
+    current_step = Column(Integer, nullable=True)
+    run_status = Column(String(32), nullable=True)
+    pending_approval_id = Column(String(36), nullable=True)
+    pending_call_ids = Column(JSON, nullable=False, default=list)
+    published_message_id = Column(String(36), nullable=True)
+    latest_compaction_id = Column(String(36), nullable=True)
+    state = Column(JSON, nullable=False, default=dict)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())

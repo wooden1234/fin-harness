@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import func, select, text
 
 from harness.session.envelope import event_from_row, normalize_draft
+from harness.session.reducer import SessionState, reduce_session, state_from_dict, state_to_dict
 from harness.session.store import SessionHeader
 from harness.session.types import EventDraft, SessionEvent, new_id, utcnow
 
@@ -50,13 +51,19 @@ class PostgresSessionStore:
             await db.commit()
         return header
 
-    async def find_by_conversation(self, conversation_id: str | int) -> SessionHeader | None:
+    async def find_by_conversation(
+        self, *, tenant_id: str, user_id: str, conversation_id: str | int
+    ) -> SessionHeader | None:
         from app.core.database import AsyncSessionLocal
         from app.models.agent.session import AgentSession
 
         async with AsyncSessionLocal() as db:
             row = await db.scalar(
-                select(AgentSession).where(AgentSession.conversation_id == str(conversation_id))
+                select(AgentSession).where(
+                    AgentSession.conversation_id == str(conversation_id),
+                    AgentSession.tenant_id == str(tenant_id),
+                    AgentSession.user_id == str(user_id),
+                )
             )
             if row is None:
                 return None
@@ -136,6 +143,11 @@ class PostgresSessionStore:
             )
             db.add(row)
             await _update_session_index(db, AgentSession, session_id, normalized, event_id=event_id)
+            await _maybe_write_state_snapshot(
+                db, session_id=session_id, seq=int(seq), event=_event_from_draft(
+                    seq=int(seq), event_id=event_id, draft=normalized, created_at=created_at
+                ),
+            )
             await db.commit()
             event = await _event_from_log(db, row)
         self._notify(session_id)
@@ -159,6 +171,26 @@ class PostgresSessionStore:
         except TimeoutError:
             pass
         return await self.load_events(session_id, after_seq=after_seq)
+
+    async def load_state(self, session_id: str) -> SessionState:
+        """Restore the latest persisted reducer state plus only its event tail."""
+        from app.core.database import AsyncSessionLocal
+        from app.models.agent.session import SessionEventLog, SessionStateSnapshot
+
+        async with AsyncSessionLocal() as db:
+            snapshot = await db.scalar(
+                select(SessionStateSnapshot)
+                .where(SessionStateSnapshot.session_id == session_id)
+                .order_by(SessionStateSnapshot.snapshot_seq.desc())
+                .limit(1)
+            )
+            state = state_from_dict(snapshot.state) if snapshot is not None else SessionState()
+            rows = list(await db.scalars(
+                select(SessionEventLog)
+                .where(SessionEventLog.session_id == session_id, SessionEventLog.seq > state.last_event_seq)
+                .order_by(SessionEventLog.seq)
+            ))
+            return reduce_session(state, [await _event_from_log(db, row) for row in rows])
 
 
 def _header_from_row(row: Any) -> SessionHeader:
@@ -189,6 +221,54 @@ def _event_from_orm(row: Any) -> SessionEvent:
         data=row.data or {},
         created_at=row.created_at,
     )
+
+
+def _event_from_draft(*, seq: int, event_id: str, draft, created_at) -> SessionEvent:
+    return event_from_row(
+        seq=seq, event_id=event_id, event_type=draft.event_type,
+        schema_version=draft.schema_version, run_id=draft.run_id, turn=draft.turn,
+        step=draft.step, causation_seq=draft.causation_seq, correlation_id=draft.correlation_id,
+        surface_op=draft.surface_op, source_event_seqs=draft.source_event_seqs,
+        visibility=draft.visibility, data=draft.data, created_at=created_at,
+    )
+
+
+_SNAPSHOT_EVENTS = frozenset({
+    "approval/asked", "approval/decided", "answer/published", "compaction/summary", "turn/end",
+})
+_SNAPSHOT_INTERVAL = 50
+
+
+async def _maybe_write_state_snapshot(db, *, session_id: str, seq: int, event: SessionEvent) -> None:
+    """Persist bounded recovery points; replay fills the gap between snapshots."""
+    if event.event_type not in _SNAPSHOT_EVENTS and seq % _SNAPSHOT_INTERVAL:
+        return
+    from app.models.agent.session import SessionEventLog, SessionStateSnapshot
+
+    previous = await db.scalar(
+        select(SessionStateSnapshot)
+        .where(SessionStateSnapshot.session_id == session_id)
+        .order_by(SessionStateSnapshot.snapshot_seq.desc())
+        .limit(1)
+    )
+    base = state_from_dict(previous.state) if previous is not None else SessionState()
+    rows = list(await db.scalars(
+        select(SessionEventLog)
+        .where(SessionEventLog.session_id == session_id, SessionEventLog.seq > base.last_event_seq)
+        .order_by(SessionEventLog.seq)
+    ))
+    prior_events = [await _event_from_log(db, row) for row in rows]
+    state = reduce_session(base, [*prior_events, event])
+    db.add(SessionStateSnapshot(
+        snapshot_id=new_id(), session_id=session_id, snapshot_seq=seq,
+        current_run_id=state.current_run_id, current_turn=state.current_turn,
+        current_step=state.current_step, run_status=state.status,
+        pending_approval_id=state.pending_approval_id,
+        pending_call_ids=list(state.pending_tool_calls),
+        published_message_id=state.published_event_id,
+        latest_compaction_id=state.latest_compaction_id,
+        state=state_to_dict(state),
+    ))
 
 
 def _canonical_hash(value: Any) -> str:

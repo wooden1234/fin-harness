@@ -75,7 +75,7 @@ def build_pdf_agent_graph():
         route_after_evaluation,
         {"select_rewrite": "select_rewrite", "end": END},
     )
-    return builder.compile()
+    return builder.compile(name="pdf_agent")
 
 
 @lru_cache(maxsize=1)

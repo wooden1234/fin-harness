@@ -191,3 +191,5 @@ CREATE TABLE IF NOT EXISTS app.session_state_snapshots (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (session_id, snapshot_seq)
 );
+CREATE INDEX IF NOT EXISTS ix_session_state_snapshots_latest
+    ON app.session_state_snapshots(session_id, snapshot_seq);

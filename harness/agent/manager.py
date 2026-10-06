@@ -43,10 +43,10 @@ class AgentManager:
         conversation_id: str | int | None,
     ):
         if conversation_id is not None:
-            header = await self.store.find_by_conversation(conversation_id)
+            header = await self.store.find_by_conversation(
+                tenant_id=str(tenant_id), user_id=str(user_id), conversation_id=conversation_id
+            )
             if header is not None:
-                if header.user_id != str(user_id) or header.tenant_id != str(tenant_id):
-                    raise PermissionError("session_not_owned")
                 return header
         return await self.store.create(
             tenant_id=str(tenant_id),

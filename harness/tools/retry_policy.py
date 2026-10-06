@@ -12,7 +12,7 @@ from harness.tools.errors import ToolErrorClass, classify, error_result, publish
 MAX_ATTEMPTS_PER_TOOL = 2
 UNLIMITED_TOOLS = frozenset({"todo_write", "read_tool_log"})
 USER_UNAVAILABLE_HINT = (
-    "没有找到匹配的数据工具或技能，或查询已失败。请换个问法，或稍后再试。"
+    "数据工具或服务当前不可用，查询未成功；错误响应不作为有效数据。请稍后再试。"
 )
 RETRY_EXHAUSTED_MESSAGE = (
     "同一工具本轮已调用过一次并重试过一次，不能再调用。"

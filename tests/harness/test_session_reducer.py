@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from harness.session.reducer import SessionState, reduce_session
+from harness.session.reducer import SessionState, reduce_session, state_from_dict, state_to_dict
 from harness.session.types import SessionEvent
 
 
@@ -53,3 +53,13 @@ def test_reducer_is_idempotent_for_already_applied_events() -> None:
     events = [_event(1, "turn/start"), _event(2, "turn/end", {"reason": "completed"})]
     first = reduce_session(None, events)
     assert reduce_session(first, events) == first
+
+
+def test_reducer_snapshot_round_trip_and_tail_replay() -> None:
+    initial = reduce_session(None, [_event(1, "turn/start"), _event(2, "tool/call", {"call_id": "c1"})])
+    restored = state_from_dict(state_to_dict(initial))
+    assert restored == initial
+
+    resumed = reduce_session(restored, [_event(2, "tool/call", {"call_id": "c1"}), _event(3, "tool/result", {"call_id": "c1"})])
+    assert resumed.last_event_seq == 3
+    assert resumed.pending_tool_calls == ()

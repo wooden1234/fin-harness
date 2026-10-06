@@ -1,6 +1,6 @@
 # fin-harness
 
-金融 Agent 平台的 **Harness 主路径**：事件日志驱动的 ReAct 循环，统一工具菜单、人审、失败策略与上下文压缩。产品 HTTP 只走这条线，不再以 LangGraph Orchestrator 作为对外入口。
+**财智**是面向投研与客服的金融助手，对话里叫「小财」。产品 HTTP 只走 **Harness 主路径**：事件日志驱动的 ReAct 循环，统一工具菜单、人审、失败策略与上下文压缩。不再以 LangGraph Orchestrator 作为对外入口。
 
 ```text
 用户 / 前端
@@ -21,7 +21,20 @@
 - **领域能力**：问财、本地财报事实、PDF/FAQ、联网搜索、计算；可选 **天眼查 MCP**
 - **Skills**：`skill` 工具读取 `skills/*/SKILL.md` 注入上下文
 - **治理**：人审、工具错误分类（continue / inject / publish）、上下文压缩
-- **Web**：React + Vite 聊天，SSE 投影 public 事件
+- **Web**：React + Vite。首页是会话列表、问候和今日热榜；回答经 SSE 投影 public 事件
+- **合规**：不替用户做个性化买卖判断。涉及追涨、荐股时先说明边界，再给可核对的行情或财报
+
+## 产品界面
+
+首页左侧是历史会话，中间是「Hi，我是小财」，下面按热门讨论、财务查数、市场研判列出可点的问题。
+
+![财智首页：会话列表、问候与今日热榜](docs/screenshots/home.png)
+
+对话里先守住合规边界，再给出可核对的数据。下图问的是英伟达市值是否还能追：回答明确不替用户决定买卖，并用表格列出最近交易日的价格、市值和涨幅口径。
+
+![财智对话：拒绝个性化买卖判断并给出可核对行情](docs/screenshots/chat.png)
+
+页脚固定提示：内容由 AI 生成，仅供参考；涉及账户与资金请以官方渠道为准。
 
 ## 技术栈
 
@@ -82,7 +95,7 @@ npm install
 npm run dev
 ```
 
-前端默认 <http://127.0.0.1:5173>。
+前端默认 <http://127.0.0.1:5173>，打开后即上面的财智首页。
 
 ### 5. 本地脚本跑 Loop（可选）
 
@@ -135,7 +148,8 @@ fin-harness/
 │   └── adr/                 # 运行时 ADR
 ├── app/
 │   ├── backend/             # FastAPI（/api/agent 走 harness）
-│   └── frontend/            # 聊天 UI
+│   └── frontend/            # 财智聊天 UI
+├── docs/screenshots/        # README 中的产品界面截图
 ├── tools/                   # 领域工具注册（问财、财报、检索等）
 ├── mcp/                     # MCP（天眼查等）；未配 env 则不注册
 ├── skills/                  # SKILL.md
