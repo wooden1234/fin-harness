@@ -95,6 +95,21 @@ def test_session_preference_requires_explicit_session_adoption():
     assert extract_session_preferences("你好") == {}
     assert extract_session_preferences("这次请用英文回答") == {}
     assert extract_session_preferences("以后默认用英文回答") == {}
+    assert extract_session_preferences("请记住以后用中文回答") == {}
+    assert extract_session_preferences("中文年报里的营业收入是多少") == {}
+
+
+def test_direct_language_request_lasts_for_the_session():
+    assert extract_session_preferences("用中文回答") == {"response_language": "zh-CN"}
+    assert extract_session_preferences("请用中文回答寒武纪和腾讯的营收") == {
+        "response_language": "zh-CN",
+    }
+    assert extract_session_preferences("使用英文回答") == {"response_language": "en-US"}
+    assert extract_session_preferences("不要用英文回答，用中文回答") == {
+        "response_language": "zh-CN",
+    }
+    assert extract_turn_preferences("用中文回答") == {}
+    assert parse_memory_command("用中文回答") is None
 
 
 def test_ambiguous_management_requires_memory_context():

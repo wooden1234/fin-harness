@@ -1,5 +1,20 @@
 from harness.prompt.assembler import assemble_system
-from harness.prompt.sections import default_sections, preference_section, preference_sections
+from harness.prompt.sections import (
+    TOOL_DISCIPLINE_SECTION,
+    default_sections,
+    preference_section,
+    preference_sections,
+)
+
+
+def test_tool_discipline_covers_financial_input_boundaries() -> None:
+    assert "不能自行假设汇率" in TOOL_DISCIPLINE_SECTION
+    assert "多个可能实体" in TOOL_DISCIPLINE_SECTION
+    assert "解析后的绝对年份" in TOOL_DISCIPLINE_SECTION
+    assert "携带该游标继续请求" in TOOL_DISCIPLINE_SECTION
+    assert "严格边界" in TOOL_DISCIPLINE_SECTION
+    assert "只回答更正后的实体" in TOOL_DISCIPLINE_SECTION
+    assert "不得逐字复述" in TOOL_DISCIPLINE_SECTION
 
 
 def test_preference_section_renders_long_term_and_marks_override():

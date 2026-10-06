@@ -122,7 +122,20 @@ tests/*
 !tests/orchestrator/*.py
 !tests/harness/
 !tests/harness/**/*.py
+!tests/tool_scenarios/
+!tests/tool_scenarios/**/*.py
 !tests/retrieval/
 tests/retrieval/*
 !tests/retrieval/test_embedding_cache.py
 !tests/test_iwencai_cache.py
+
+# Versioned tool benchmark specifications and dataset plumbing
+!evals/tool_dataset.py
+!evals/TOOLS_README.md
+!evals/TOOL_CASES.md
+!evals/datasets/fin-harness-tools-v1.jsonl
+!evals/datasets/fin-harness-tools-smoke-v1.jsonl
+
+# Local-only notes
+pytest.ini
+sessions.md

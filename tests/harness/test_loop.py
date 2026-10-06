@@ -611,3 +611,36 @@ async def test_session_adoption_overrides_long_term_on_later_turns(monkeypatch):
     assert "[本会话要求]" in system
     assert "response_language=zh-CN" in system.split("[本会话要求]", 1)[1]
     assert "打招呼不改变回答方式" in system
+
+
+@pytest.mark.asyncio
+async def test_direct_chinese_request_overrides_long_term_english(monkeypatch):
+    from types import SimpleNamespace
+
+    store = InMemorySessionStore()
+    header = await store.create(tenant_id="tenant-1", user_id="7")
+
+    async def fake_load(**_kwargs):
+        return SimpleNamespace(as_dict=lambda: {"response_language": "en-US"})
+
+    monkeypatch.setattr(
+        "app.services.memory.memory_loader.MemoryLoader.load_for_agent",
+        fake_load,
+    )
+    llm = FakeLlmAdapter([content_turn("好的，之后用中文。"), content_turn("营收如下。")])
+    agent = Agent(header.session_id, store, llm, runtime=ToolRuntime.builtin(), owner_id="7")
+    first = await agent.prompt("用中文回答")
+    first_system = [
+        event.data["system"]
+        for event in first.events
+        if event.event_type == "request/header"
+    ][-1]
+    assert "response_language=zh-CN" in first_system.split("[本会话要求]", 1)[1]
+    result = await agent.prompt("营收是多少")
+    system = [
+        event.data["system"]
+        for event in result.events
+        if event.event_type == "request/header"
+    ][-1]
+    assert "response_language=en-US" in system
+    assert "response_language=zh-CN" in system.split("[本会话要求]", 1)[1]

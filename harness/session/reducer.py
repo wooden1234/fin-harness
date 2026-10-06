@@ -22,6 +22,39 @@ class SessionState:
     last_event_seq: int = 0
 
 
+def state_to_dict(state: SessionState) -> dict:
+    """Serialize a reducer state without depending on a database model."""
+    return {
+        "current_run_id": state.current_run_id,
+        "current_turn": state.current_turn,
+        "current_step": state.current_step,
+        "status": state.status,
+        "pending_approval_id": state.pending_approval_id,
+        "pending_tool_calls": list(state.pending_tool_calls),
+        "published_event_id": state.published_event_id,
+        "latest_compaction_id": state.latest_compaction_id,
+        "latest_todos": list(state.latest_todos),
+        "last_event_seq": state.last_event_seq,
+    }
+
+
+def state_from_dict(data: dict | None) -> SessionState:
+    """Read persisted state defensively so older snapshots remain usable."""
+    data = data or {}
+    return SessionState(
+        current_run_id=data.get("current_run_id"),
+        current_turn=int(data.get("current_turn") or 0),
+        current_step=int(data.get("current_step") or 0),
+        status=str(data.get("status") or "idle"),
+        pending_approval_id=data.get("pending_approval_id"),
+        pending_tool_calls=tuple(str(item) for item in data.get("pending_tool_calls") or ()),
+        published_event_id=data.get("published_event_id"),
+        latest_compaction_id=data.get("latest_compaction_id"),
+        latest_todos=tuple(dict(item) for item in data.get("latest_todos") or () if isinstance(item, dict)),
+        last_event_seq=int(data.get("last_event_seq") or 0),
+    )
+
+
 def reduce_session(
     snapshot: SessionState | None,
     events: Iterable[SessionEvent],
@@ -67,4 +100,4 @@ def reduce_session(
     return state
 
 
-__all__ = ["SessionState", "reduce_session"]
+__all__ = ["SessionState", "reduce_session", "state_from_dict", "state_to_dict"]

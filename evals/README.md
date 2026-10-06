@@ -82,3 +82,9 @@ python3 -m evals.run_core_eval --all
 确定性评估器不会从自然语言答案反向编造 `facts`、`citations` 或 `claims`；这些字段只来自 Harness session events 中的结构化工具结果。因此，如果某个 provider 没有输出结构化 facts/citations，分数会暴露该可观测性缺口。`required_behavior_semantic` 在未配置 LLM judge 时返回未评分，需在 LangSmith 中人工复核或后续接入经人工校准的 judge。
 
 校验通过后再上传 LangSmith。建议把上传脚本做成 upsert，并以 `id` 作为稳定键；数据集版本变更时创建 `fin-harness-core-v2`，不要原地覆盖历史基线。
+
+## 工具边界与稳定性专项集
+
+新增 [3条调通集](datasets/fin-harness-tools-smoke-v1.jsonl) 和 [100条全面集](datasets/fin-harness-tools-v1.jsonl)，覆盖计算、问财、财报检索、联网搜索及 Registry/MCP/运行时稳定性。
+
+参见 [使用与判分说明](TOOLS_README.md) 和 [完整用例索引](TOOL_CASES.md)。两套集合使用独立 fixture/assertions 契约，不能直接交给 `run_core_eval`；可用 `python -m evals.tool_dataset --source smoke` 或 `--source full` 离线校验，添加 `--upload` 显式上传 LangSmith。
