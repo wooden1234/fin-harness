@@ -28,11 +28,11 @@
 
 首页左侧是历史会话，中间是「Hi，我是小财」，下面按热门讨论、财务查数、市场研判列出可点的问题。
 
-![财智首页：会话列表、问候与今日热榜](https://finagent.oss-cn-beijing.aliyuncs.com/readme/home.png)
+![财智首页：会话列表、问候与今日热榜](assets/readme/home.png)
 
 对话里先守住合规边界，再给出可核对的数据。下图问的是英伟达市值是否还能追：回答明确不替用户决定买卖，并用表格列出最近交易日的价格、市值和涨幅口径。
 
-![财智对话：拒绝个性化买卖判断并给出可核对行情](https://finagent.oss-cn-beijing.aliyuncs.com/readme/chat.png)
+![财智对话：拒绝个性化买卖判断并给出可核对行情](assets/readme/chat.png)
 
 页脚固定提示：内容由 AI 生成，仅供参考；涉及账户与资金请以官方渠道为准。
 
@@ -146,6 +146,7 @@ fin-harness/
 │   ├── compaction/          # 上下文压缩
 │   ├── runtime/             # product_manager 组合根
 │   └── adr/                 # 运行时 ADR
+├── assets/readme/           # README 产品界面截图
 ├── app/
 │   ├── backend/             # FastAPI（/api/agent 走 harness）
 │   └── frontend/            # 财智聊天 UI
