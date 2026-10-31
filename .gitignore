@@ -65,8 +65,13 @@ retrieval/eval/*.json
 retrieval/eval/*.jsonl
 retrieval/eval/README.md
 
-# Documentation (local only)
-docs/
+# Documentation (local only). 安全自评报告和答辩稿需要纳入版本库。
+docs/*
+!docs/安全自评报告.md
+!docs/安全自评报告.docx
+!docs/defense/
+docs/defense/*
+!docs/defense/财智-银行AI智能体答辩.pptx
 deepseek-harness-master/
 
 # Vector / index caches
