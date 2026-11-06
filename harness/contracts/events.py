@@ -50,6 +50,7 @@ TURN_END_REASONS = frozenset(
         "completed",
         "cancelled",
         "error",
+        "llm_timeout",
         "max_tokens",
         "waiting_approval",
         "persist_failed",

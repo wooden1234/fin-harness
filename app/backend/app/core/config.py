@@ -129,6 +129,10 @@ class Settings(BaseSettings):
     DEEPSEEK_MODEL: str = "deepseek-v4-flash"
     # DeepSeek Thinking 模式当前不支持结构化工具选择，工具 Agent 默认关闭。
     DEEPSEEK_THINKING_ENABLED: bool = False
+    # 流式回复连续这么多秒没有新内容就结束本轮，避免界面停在「正在理解问题」。
+    DEEPSEEK_STREAM_CHUNK_TIMEOUT_SEC: float = 30.0
+    # HTTP 读超时。未显式传入时 OpenAI SDK 会退回 600 秒。
+    DEEPSEEK_TIMEOUT_SEC: float = 60.0
     AGENT_ROUTER_TEMPERATURE: float = 0.0
     PDF_QUERY_FILTER_MIN_CONFIDENCE: float = 0.85
     PDF_KB_UNSUPPORTED_MIN_CONFIDENCE: float = 0.90

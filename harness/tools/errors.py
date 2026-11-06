@@ -88,6 +88,16 @@ for _code in (
     "invalid_call_type",
     "invalid_calculation_batch_size",
     "retry_requires_change",
+    "ledger_enterprise_required",
+    "ledger_month_required",
+    "ledger_permission_denied",
+    "ledger_not_found",
+    "ledger_empty_purpose",
+    "ledger_rule_missing",
+    "ledger_actor_unbound",
+    "ledger_action_invalid",
+    "ledger_update_required",
+    "ledger_field_readonly",
 ):
     _add(_code, ToolErrorClass.INVALID_INPUT)
 for _code in (
@@ -121,6 +131,7 @@ for _code in (
     "iwencai_auth_failed",
     "skill_runner_disabled",
     "unavailable_retry_blocked",
+    "ledger_db_missing",
 ):
     _add(_code, ToolErrorClass.UNAVAILABLE)
 for _code in ("finalign_unavailable", "draft_disabled"):

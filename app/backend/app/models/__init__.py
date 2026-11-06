@@ -34,6 +34,16 @@ from app.models.persistence.audit_log import AuditLog
 from app.models.identity.user import User
 from app.models.memory.memory_record import MemoryRecord
 from app.models.memory.memory_event import MemoryEvent
+from app.models.ledger.finance import (
+    LedgerBankTxn,
+    LedgerCompany,
+    LedgerInvoice,
+    LedgerOpenTask,
+    LedgerPermission,
+    LedgerRuleDoc,
+    LedgerSessionScope,
+    LedgerUser,
+)
 
 __all__ = [
     "User",
@@ -70,4 +80,12 @@ __all__ = [
     "AnnualFinancialFact",
     "MemoryRecord",
     "MemoryEvent",
+    "LedgerBankTxn",
+    "LedgerCompany",
+    "LedgerInvoice",
+    "LedgerOpenTask",
+    "LedgerPermission",
+    "LedgerRuleDoc",
+    "LedgerSessionScope",
+    "LedgerUser",
 ]

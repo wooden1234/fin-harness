@@ -6,9 +6,10 @@ from typing import Any
 
 from harness.prompt.assembler import assemble_system
 from harness.prompt.preferences import PreferenceContext, load_preference_context
-from harness.prompt.sections import default_sections, preference_sections
+from harness.prompt.sections import PromptSection, default_sections, preference_sections
 from harness.session.store import SessionStore
 from harness.tools.analysis import TOOL_ID as FINALIGN_TOOL_ID, bind_finalign_analyze, finalign_is_ready
+from harness.tools.ledger import ledger_tool_definitions
 from harness.tools.log_read import read_tool_log_definition
 from harness.tools.memory import memory_tool_definitions
 from harness.tools.runtime import ToolRuntime
@@ -17,12 +18,30 @@ from harness.tools.todo import todo_write_definition
 from harness.control.approval import ApprovalCoordinator
 
 
+def _ledger_open_task_text(app_user_id: str | None) -> str:
+    if not app_user_id or not str(app_user_id).isdigit():
+        return ""
+    try:
+        from retrieval.services.ledger_tasks import open_task_prompt
+
+        return open_task_prompt(int(app_user_id))
+    except Exception:
+        return ""
+
+
 class AgentControl:
     """Product controls injected into the Runtime."""
 
-    def __init__(self, store: SessionStore, session_id: str) -> None:
+    def __init__(
+        self,
+        store: SessionStore,
+        session_id: str,
+        *,
+        app_user_id: str | None = None,
+    ) -> None:
         self.store = store
         self.session_id = session_id
+        self.app_user_id = app_user_id
         self.approvals = ApprovalCoordinator()
         self._effective_preferences: dict[str, dict[str, Any]] = {}
         self._preference_contexts: dict[str, PreferenceContext] = {}
@@ -41,6 +60,9 @@ class AgentControl:
             self._preference_contexts[run_id] = loaded
             self._effective_preferences[run_id] = loaded.effective()
         sections = list(default_sections())
+        task_text = _ledger_open_task_text(self.app_user_id)
+        if task_text:
+            sections.append(PromptSection("ledger_open_tasks", 45, task_text))
         sections.extend(
             preference_sections(
                 loaded.preferences,
@@ -56,6 +78,7 @@ class AgentControl:
             todo_write_definition(self.store, self.session_id, turn=turn, run_id=run_id),
             read_tool_log_definition(self.store, self.session_id),
             *memory_tool_definitions(self.store, self.session_id, run_id=run_id),
+            *ledger_tool_definitions(self.store, self.session_id),
         ])
         if runtime.resolve(FINALIGN_TOOL_ID):
             if finalign_is_ready():

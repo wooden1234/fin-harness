@@ -19,6 +19,8 @@ class User(Base):
     last_login = Column(DateTime, nullable=True)
     status = Column(String(20), default="active")
     role = Column(String(32), nullable=False, default="user", index=True)
+    # 账房权限身份。U001 可看可改两家企业，U002 只能查看甲企业。空值表示未授予。
+    ledger_code = Column(String(16), nullable=True)
 
     conversations = relationship(
         "Conversation",

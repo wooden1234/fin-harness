@@ -46,7 +46,7 @@ class Agent:
         self._runtime = runtime or ToolRuntime.builtin()
         self._leases = leases or InMemoryLeaseStore()
         self._owner_id = owner_id
-        self._control = AgentControl(store, session_id)
+        self._control = AgentControl(store, session_id, app_user_id=owner_id)
         self._turn_policy = TurnPolicy()
         self._abort = asyncio.Event()
         self._compact_policy = policy_from_settings()
@@ -311,6 +311,8 @@ class Agent:
                 )
                 if exc.code == "cancelled":
                     return "cancelled"
+                if exc.code == "timeout":
+                    return "llm_timeout"
                 if exc.code == "context_overflow" and overflow_retries < self._compact_policy.max_overflow_retries:
                     overflow_retries += 1
                     try:

@@ -2,11 +2,45 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, AsyncIterator, Mapping, Sequence
 
 from harness.contracts.errors import LlmError
 from harness.llm.types import StreamChunk
 from harness.tools.arguments import coerce_tool_arguments
+
+
+def _stream_idle_timeout_seconds() -> float:
+    from app.core.config import settings
+
+    return max(5.0, float(settings.DEEPSEEK_STREAM_CHUNK_TIMEOUT_SEC or 30.0))
+
+
+def _request_timeout_seconds() -> float:
+    from app.core.config import settings
+
+    return max(5.0, float(settings.DEEPSEEK_TIMEOUT_SEC or 60.0))
+
+
+_STREAM_END = object()
+
+
+async def _anext_or_end(iterator: Any) -> Any:
+    """在 Task 里吞掉 StopAsyncIteration，避免 wait_for 把它变成 RuntimeError。"""
+    try:
+        return await iterator.__anext__()
+    except StopAsyncIteration:
+        return _STREAM_END
+
+
+async def _close_stream(iterator: Any) -> None:
+    aclose = getattr(iterator, "aclose", None)
+    if aclose is None:
+        return
+    try:
+        await asyncio.wait_for(aclose(), timeout=2)
+    except Exception:
+        return
 
 
 def _parse_tool_args(raw: Any) -> dict[str, Any]:
@@ -92,10 +126,20 @@ class DeepSeekAdapter:
             except TypeError:
                 llm = llm.bind_tools(tools)
         saw_tool_call = False
+        iterator = llm.astream(lc_messages).__aiter__()
         try:
-            async for chunk in llm.astream(lc_messages):
+            while True:
                 if abort.is_set():
                     raise LlmError("cancelled", code="cancelled")
+                try:
+                    chunk = await asyncio.wait_for(
+                        _anext_or_end(iterator),
+                        _stream_idle_timeout_seconds(),
+                    )
+                except TimeoutError:
+                    raise
+                if chunk is _STREAM_END:
+                    break
                 text = chunk.content if isinstance(chunk.content, str) else ""
                 if text:
                     yield StreamChunk(kind="content", text=text)
@@ -109,8 +153,14 @@ class DeepSeekAdapter:
                         name=item.get("name"),
                         arguments_delta=item.get("args") or "",
                     )
+            yield StreamChunk(
+                kind="usage",
+                finish_reason="tool_calls" if saw_tool_call else "stop",
+            )
         except LlmError:
             raise
+        except TimeoutError as exc:
+            raise LlmError("模型响应超时", code="timeout", retryable=True) from exc
         except Exception as exc:
             from loguru import logger
 
@@ -123,13 +173,13 @@ class DeepSeekAdapter:
                 code, retryable = "rate_limit", True
             elif "context" in lowered or "maximum context" in lowered:
                 code = "context_overflow"
-            elif "timeout" in lowered or "temporar" in lowered:
+            elif "timeout" in lowered or "timed out" in lowered:
+                code, retryable = "timeout", True
+            elif "temporar" in lowered:
                 code, retryable = "retryable", True
             raise LlmError(message, code=code, retryable=retryable) from exc
-        yield StreamChunk(
-            kind="usage",
-            finish_reason="tool_calls" if saw_tool_call else "stop",
-        )
+        finally:
+            await _close_stream(iterator)
 
     async def complete(self, *, system: str, prompt: str) -> str:
         """非流式补全，供压缩摘要等旁路使用，不走工具调用。"""
@@ -138,9 +188,13 @@ class DeepSeekAdapter:
         from agents.llm import get_faq_llm
 
         llm = get_faq_llm()
-        result = await llm.ainvoke(
-            [SystemMessage(content=system), HumanMessage(content=prompt)]
-        )
+        try:
+            result = await asyncio.wait_for(
+                llm.ainvoke([SystemMessage(content=system), HumanMessage(content=prompt)]),
+                _request_timeout_seconds(),
+            )
+        except TimeoutError as exc:
+            raise LlmError("模型响应超时", code="timeout", retryable=True) from exc
         text = getattr(result, "content", result)
         if isinstance(text, list):
             text = "".join(
@@ -160,8 +214,14 @@ class DeepSeekAdapter:
             "请严格返回一个合法 JSON object，并满足指定结构；不要输出 Markdown 或额外文本。"
             "只写窗口里出现过的事实。不要编造数据或买卖建议。"
         )
-        return await ainvoke_json_output(
-            get_router_llm(),
-            schema,
-            [SystemMessage(content=system), HumanMessage(content=prompt)],
-        )
+        try:
+            return await asyncio.wait_for(
+                ainvoke_json_output(
+                    get_router_llm(),
+                    schema,
+                    [SystemMessage(content=system), HumanMessage(content=prompt)],
+                ),
+                _request_timeout_seconds(),
+            )
+        except TimeoutError as exc:
+            raise LlmError("模型响应超时", code="timeout", retryable=True) from exc
