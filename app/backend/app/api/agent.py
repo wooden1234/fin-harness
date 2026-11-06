@@ -37,6 +37,54 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 logger = get_logger(service="agent")
 
 
+async def _record_ledger_open_tasks(store, agent, user_id: int) -> None:
+    """按本轮账房工具结果更新该登录用户的未完成任务。"""
+    try:
+        events = await store.load_events(agent.session_id)
+        from retrieval.services.ledger_tasks import record_open_tasks_from_events
+
+        record_open_tasks_from_events(user_id, events)
+    except Exception:
+        logger.exception("ledger open task sync failed user_id={}", user_id)
+
+
+def _bind_ledger_session(session_id: str, user_id: int) -> None:
+    """按登录账户的 ledger_code 绑定账房身份。"""
+    try:
+        from retrieval.services.ledger_store import bind_account_ledger_session
+
+        bind_account_ledger_session(session_id, user_id)
+    except Exception:
+        logger.exception("ledger session actor bind failed: {}", session_id)
+
+
+_LEDGER_BIND_TIMEOUT_SEC = 15.0
+
+
+async def _bind_ledger_for_turn(session_id: str, user_id: int) -> str | None:
+    """在线程里绑定账房身份。只读取已有的 ledger_code，不改表。"""
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(_bind_ledger_session, session_id, user_id),
+            timeout=_LEDGER_BIND_TIMEOUT_SEC,
+        )
+    except TimeoutError:
+        logger.warning("ledger session bind timed out session_id={}", session_id)
+        return "会话准备超时，请重试。"
+    except Exception:
+        logger.exception("ledger session bind failed session_id={}", session_id)
+        return "会话准备失败，请重试。"
+    return None
+
+
+async def _bind_failure_event(run_id: str, message: str) -> str:
+    try:
+        await AgentRunService.mark_failed(run_id, error_message=message)
+    except Exception:
+        logger.exception("failed to mark bind failure run_id={}", run_id)
+    return _sse({"type": "error", "run_id": run_id, "message": message})
+
+
 def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
@@ -142,6 +190,7 @@ async def _stream_agent(
                         payload["conversation_id"] = str(conversation_key)
                     yield _sse(payload)
         result = await run_task
+        await _record_ledger_open_tasks(store, agent, current_user.id)
         events = await store.load_events(agent.session_id, after_seq=after_seq)
         for event in events:
             after_seq = event.seq
@@ -268,7 +317,12 @@ async def _stream_agent(
             logger.exception("failed to enqueue episodic extraction: {}", run_id)
 
         if result.error and not published:
-            yield _sse({"type": "error", "run_id": run_id, "message": "本轮未能发布回答。"})
+            message = (
+                "模型响应超时，请重试。"
+                if result.finish_reason == "llm_timeout"
+                else "本轮未能发布回答。"
+            )
+            yield _sse({"type": "error", "run_id": run_id, "message": message})
             return
         yield _sse(
             {
@@ -367,10 +421,14 @@ async def agent_query(
         raise
 
     started = time.monotonic()
-    with incoming_trace_context(request.headers, thread_id=agent.session_id):
-        run_task = asyncio.create_task(agent.prompt(effective_query, source="user"))
 
     async def process_stream():
+        bind_error = await _bind_ledger_for_turn(agent.session_id, current_user.id)
+        if bind_error:
+            yield await _bind_failure_event(run_id, bind_error)
+            return
+        with incoming_trace_context(request.headers, thread_id=agent.session_id):
+            run_task = asyncio.create_task(agent.prompt(effective_query, source="user"))
         async for chunk in _stream_agent(
             agent=agent,
             store=manager.store,
@@ -442,12 +500,16 @@ async def agent_resume(
             logger.exception("failed to mark resume run failed: {}", run_id)
         raise
     started = time.monotonic()
-    with incoming_trace_context(request.headers, thread_id=agent.session_id):
-        run_task = asyncio.create_task(
-            agent.resume_approval(target_id, decision=chosen)
-        )
 
     async def process_stream():
+        bind_error = await _bind_ledger_for_turn(agent.session_id, current_user.id)
+        if bind_error:
+            yield await _bind_failure_event(run_id, bind_error)
+            return
+        with incoming_trace_context(request.headers, thread_id=agent.session_id):
+            run_task = asyncio.create_task(
+                agent.resume_approval(target_id, decision=chosen)
+            )
         async for chunk in _stream_agent(
             agent=agent,
             store=manager.store,

@@ -25,6 +25,38 @@ def test_allocate_blocks_third_attempt_same_tool():
     assert "todo_write" not in counts
 
 
+def test_ledger_actions_do_not_share_attempt_budget():
+    calls = [
+        SimpleNamespace(
+            name="ledger_records",
+            call_id="invoices",
+            arguments='{"action":"query_invoices","enterprise":"甲企业","month":"2026-09"}',
+        ),
+        SimpleNamespace(
+            name="ledger_records",
+            call_id="bank",
+            arguments='{"action":"query_bank","enterprise":"甲企业","month":"2026-09"}',
+        ),
+        SimpleNamespace(
+            name="ledger_records",
+            call_id="purpose",
+            arguments='{"action":"check_purpose","enterprise":"甲企业","month":"2026-09"}',
+        ),
+        SimpleNamespace(
+            name="ledger_records",
+            call_id="again",
+            arguments='{"action":"query_invoices","enterprise":"甲企业","month":"2026-09"}',
+        ),
+        SimpleNamespace(
+            name="ledger_records",
+            call_id="third",
+            arguments='{"action":"query_invoices","enterprise":"甲企业","month":"2026-09"}',
+        ),
+    ]
+    blocked, _counts = allocate_tool_attempts(calls, prior_counts={})
+    assert blocked == {"third"}
+
+
 def test_allocate_respects_prior_counts():
     calls = [SimpleNamespace(name="lookup_fail", call_id="c3")]
     blocked, _counts = allocate_tool_attempts(calls, prior_counts={"lookup_fail": 2})

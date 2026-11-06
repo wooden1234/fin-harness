@@ -42,6 +42,13 @@ from app.models import (  # noqa: F401 — 注册 ORM 到 metadata
     User,
     MemoryRecord,
     MemoryEvent,
+    LedgerBankTxn,
+    LedgerCompany,
+    LedgerInvoice,
+    LedgerOpenTask,
+    LedgerPermission,
+    LedgerSessionScope,
+    LedgerUser,
 )
 
 logger = get_logger(service="init_db")
@@ -51,13 +58,19 @@ async def init_db(reset: bool = False) -> None:
     try:
         logger.info("Connecting to database...")
         async with engine.begin() as conn:
-            for schema in ("app", "fin_core", "rag", "runtime"):
+            for schema in ("app", "fin_core", "rag", "runtime", "ledger"):
                 await conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema}"))
             if reset:
                 logger.warning("Dropping all tables...")
                 await conn.run_sync(Base.metadata.drop_all)
             logger.info("Creating application and normalized financial fact tables")
             await conn.run_sync(Base.metadata.create_all)
+            await conn.execute(
+                text(
+                    "ALTER TABLE app.users "
+                    "ADD COLUMN IF NOT EXISTS ledger_code VARCHAR(16)"
+                )
+            )
         logger.info("Database initialization completed.")
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")

@@ -2,6 +2,12 @@ import { create } from 'zustand'
 import type { User } from '@/types/api'
 import { clearToken, getToken } from '@/services/api/client'
 import { fetchCurrentUser } from '@/services/api/auth'
+import { useChatStore } from '@/stores/useChatStore'
+
+function clearChatForAccountSwitch() {
+  useChatStore.getState().resetChat()
+  useChatStore.setState({ conversations: [] })
+}
 
 interface AuthState {
   user: User | null
@@ -12,12 +18,18 @@ interface AuthState {
   logout: () => void
 }
 
-export const useAuthStore = create<AuthState>((set) => ({
+export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
   loading: false,
   initialized: false,
 
-  setUser: (user) => set({ user }),
+  setUser: (user) => {
+    const current = get().user
+    if (current?.id !== user?.id) {
+      clearChatForAccountSwitch()
+    }
+    set({ user })
+  },
 
   bootstrap: async () => {
     if (!getToken()) {
@@ -37,6 +49,7 @@ export const useAuthStore = create<AuthState>((set) => ({
 
   logout: () => {
     clearToken()
+    clearChatForAccountSwitch()
     set({ user: null })
   },
 }))

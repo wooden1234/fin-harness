@@ -70,10 +70,25 @@ def _require_qwen_api_key() -> str:
     return key
 
 
+def _deepseek_http_timeout() -> httpx.Timeout:
+    """显式超时。不传时 OpenAI SDK 会用 600 秒，静默连接会一直占着本轮。"""
+    read = max(15.0, float(settings.DEEPSEEK_TIMEOUT_SEC or 60.0))
+    return httpx.Timeout(connect=10.0, read=read, write=read, pool=10.0)
+
+
+def _deepseek_chunk_timeout() -> float:
+    return max(5.0, float(settings.DEEPSEEK_STREAM_CHUNK_TIMEOUT_SEC or 30.0))
+
+
 @lru_cache(maxsize=1)
 def _get_async_http_client() -> httpx.AsyncClient:
-    """DeepSeek 等默认异步客户端。"""
+    """未单独指定超时的异步客户端。"""
     return httpx.AsyncClient()
+
+
+@lru_cache(maxsize=1)
+def _get_deepseek_http_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(timeout=_deepseek_http_timeout())
 
 
 @lru_cache(maxsize=1)
@@ -92,8 +107,10 @@ def _build_deepseek_llm(*, temperature: float) -> ChatDeepSeek:
         api_key=_require_deepseek_api_key(),
         api_base=_normalize_api_base(settings.DEEPSEEK_BASE_URL),
         temperature=temperature,
+        timeout=_deepseek_http_timeout(),
+        stream_chunk_timeout=_deepseek_chunk_timeout(),
         max_retries=0,
-        http_async_client=_get_async_http_client(),
+        http_async_client=_get_deepseek_http_client(),
         extra_body={"thinking": {"type": thinking_type}},
     )
 

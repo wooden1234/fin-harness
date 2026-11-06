@@ -156,5 +156,12 @@ def merge_tool_results(results: list[Mapping[str, Any]]) -> dict[str, Any]:
     if rows:
         merged["data"] = {"datas": rows}
     if not merged["ok"]:
-        merged["error"] = "batched_tool_partial_failure"
+        successes = [item for item in items if item.get("ok") is not False]
+        if successes:
+            merged["ok"] = True
+            merged["partial_errors"] = [
+                item.get("error") for item in items if item.get("ok") is False
+            ]
+        else:
+            merged["error"] = "batched_tool_partial_failure"
     return merged

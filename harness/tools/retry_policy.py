@@ -11,6 +11,8 @@ from harness.tools.errors import ToolErrorClass, classify, error_result, publish
 
 MAX_ATTEMPTS_PER_TOOL = 2
 UNLIMITED_TOOLS = frozenset({"todo_write", "read_tool_log"})
+# 这两个工具的不同业务动作各自计数，避免查发票、查银行、检查用途互相占用重试次数。
+_LEDGER_ATTEMPT_TOOLS = frozenset({"ledger_records", "ledger_search_rules"})
 USER_UNAVAILABLE_HINT = (
     "数据工具或服务当前不可用，查询未成功；错误响应不作为有效数据。请稍后再试。"
 )
@@ -30,6 +32,30 @@ def is_limited_tool(name: str) -> bool:
     return str(name or "").strip() not in UNLIMITED_TOOLS and bool(str(name or "").strip())
 
 
+def attempt_key(name: str, arguments: Any = None) -> str:
+    """普通工具按名称计数。两个账房工具按互不相同的业务动作计数。"""
+    tool_name = str(name or "").strip()
+    if tool_name not in _LEDGER_ATTEMPT_TOOLS:
+        return tool_name
+    payload = _first_object(arguments)
+    if tool_name == "ledger_records":
+        parts = (
+            tool_name,
+            str(payload.get("action") or ""),
+            str(payload.get("enterprise") or ""),
+            str(payload.get("month") or ""),
+            str(payload.get("invoice_no") or ""),
+        )
+    else:
+        parts = (
+            tool_name,
+            str(payload.get("enterprise") or ""),
+            str(payload.get("month") or ""),
+            str(payload.get("topic") or ""),
+        )
+    return "|".join(parts)
+
+
 def tool_attempt_counts(events: Sequence[SessionEvent], *, turn: int) -> dict[str, int]:
     counts: Counter[str] = Counter()
     for event in events:
@@ -38,7 +64,7 @@ def tool_attempt_counts(events: Sequence[SessionEvent], *, turn: int) -> dict[st
         name = str(event.data.get("name") or "").strip()
         if not is_limited_tool(name):
             continue
-        counts[name] += 1
+        counts[attempt_key(name, event.data.get("arguments"))] += 1
     return dict(counts)
 
 
@@ -55,11 +81,12 @@ def allocate_tool_attempts(
         call_id = str(getattr(call, "call_id", "") or "")
         if not is_limited_tool(name):
             continue
-        used = counts.get(name, 0)
+        key = attempt_key(name, getattr(call, "arguments", None))
+        used = counts.get(key, 0)
         if used >= MAX_ATTEMPTS_PER_TOOL:
             blocked.add(call_id)
             continue
-        counts[name] = used + 1
+        counts[key] = used + 1
     return blocked, counts
 
 
@@ -94,14 +121,17 @@ def blocked_retries(
             calls_by_id[str(event.data.get("call_id") or "")] = event
         elif event.event_type == "tool/result" and event.data.get("ok") is False:
             name = str(event.data.get("name") or "").strip()
-            if name:
-                latest_failure[name] = event
+            if not name:
+                continue
+            previous = calls_by_id.get(str(event.data.get("call_id") or ""))
+            arguments = previous.data.get("arguments") if previous is not None else ""
+            latest_failure[attempt_key(name, arguments)] = event
 
     blocked: dict[str, dict[str, Any]] = {}
     for call in calls:
         name = str(getattr(call, "name", "") or "").strip()
         call_id = str(getattr(call, "call_id", "") or "")
-        failure = latest_failure.get(name)
+        failure = latest_failure.get(attempt_key(name, getattr(call, "arguments", None)))
         if failure is None:
             continue
         error_class = str(failure.data.get("error_class") or "")
@@ -148,17 +178,31 @@ def turn_has_successful_data_tool(events: Sequence[SessionEvent], *, turn: int) 
 
 def failed_twice_without_success(events: Sequence[SessionEvent], *, turn: int) -> bool:
     attempts = tool_attempt_counts(events, turn=turn)
+    calls_by_id: dict[str, SessionEvent] = {}
     succeeded: set[str] = set()
     for event in events:
-        if event.turn != turn or event.event_type != "tool/result":
+        if event.turn != turn:
             continue
-        name = str(event.data.get("name") or "").strip()
-        if is_limited_tool(name) and event.data.get("ok") is True:
-            succeeded.add(name)
+        if event.event_type == "tool/call":
+            calls_by_id[str(event.data.get("call_id") or "")] = event
+        elif event.event_type == "tool/result" and event.data.get("ok") is True:
+            name = str(event.data.get("name") or "").strip()
+            if not is_limited_tool(name):
+                continue
+            previous = calls_by_id.get(str(event.data.get("call_id") or ""))
+            arguments = previous.data.get("arguments") if previous is not None else ""
+            succeeded.add(attempt_key(name, arguments))
     return any(
-        count >= MAX_ATTEMPTS_PER_TOOL and name not in succeeded
-        for name, count in attempts.items()
+        count >= MAX_ATTEMPTS_PER_TOOL and key not in succeeded
+        for key, count in attempts.items()
     )
+
+
+def _first_object(raw: Any) -> dict[str, Any]:
+    from harness.tools.arguments import parse_json_objects
+
+    objects = parse_json_objects(raw)
+    return objects[0] if objects else {}
 
 
 def should_publish_unavailable(
