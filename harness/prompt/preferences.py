@@ -51,6 +51,40 @@ def _turn_overrides(events: Sequence[Any], turn: int) -> dict[str, str]:
     return _collected_preferences(events, extract_turn_preferences, turn=turn)
 
 
+def _durable_language(events: Sequence[Any]) -> str | None:
+    try:
+        from app.services.memory.memory_command import extract_durable_response_language
+    except Exception:  # noqa: BLE001
+        return None
+    language = None
+    for event in events:
+        text = _user_message_text(event)
+        if not text:
+            continue
+        extracted = extract_durable_response_language(text)
+        if extracted:
+            language = extracted
+    return language
+
+
+async def _persist_durable_language(*, tenant_id: str, user_id: int, language: str) -> None:
+    try:
+        from app.services.memory.memory_service import MemoryService
+
+        await MemoryService.create(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            memory_key="response_language",
+            value=language,
+            display_text=f"response_language={language}",
+            provenance={"source_type": "durable_language_request"},
+            actor_id=str(user_id),
+            confidence=1.0,
+        )
+    except Exception:  # noqa: BLE001
+        return
+
+
 def _session_overrides(events: Sequence[Any]) -> dict[str, str]:
     try:
         from app.services.memory.memory_command import extract_session_preferences
@@ -69,6 +103,7 @@ async def load_preference_context(
     """从 session header 加载 fin_agent 白名单偏好；任何失败都返回空偏好。"""
     turn_overrides = _turn_overrides(events, turn)
     session_overrides = _session_overrides(events)
+    durable_language = _durable_language(events)
     try:
         header = await store.get(session_id)
     except Exception:  # noqa: BLE001
@@ -104,6 +139,14 @@ async def load_preference_context(
         memory_load_succeeded = False
     else:
         memory_load_succeeded = True
+    if durable_language and not session_overrides.get("response_language") and not turn_overrides.get("response_language"):
+        if preferences.get("response_language") != durable_language:
+            await _persist_durable_language(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                language=durable_language,
+            )
+        preferences["response_language"] = durable_language
     return PreferenceContext(
         preferences=preferences,
         turn_overrides=turn_overrides,

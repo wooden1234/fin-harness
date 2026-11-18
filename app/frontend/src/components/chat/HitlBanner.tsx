@@ -1,5 +1,4 @@
-import { useState } from 'react'
-import { Headphones, Send } from 'lucide-react'
+import { Check, X } from 'lucide-react'
 
 export function HitlBanner({
   message,
@@ -10,42 +9,32 @@ export function HitlBanner({
   onResume: (input: string) => void
   disabled?: boolean
 }) {
-  const [input, setInput] = useState('')
-
-  const handleSubmit = () => {
-    if (!input.trim() || disabled) return
-    onResume(input.trim())
-    setInput('')
-  }
+  const prompt = message.replace(/输入同意或拒绝。?$/, '').trim()
 
   return (
-    <div className="mx-4 mb-3 rounded-xl border border-orange-300 dark:border-orange-700 bg-orange-50 dark:bg-orange-950/30 p-4">
-      <div className="flex items-start gap-3">
-        <div className="w-9 h-9 rounded-full bg-orange-500 text-white flex items-center justify-center shrink-0">
-          <Headphones size={18} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <h4 className="text-sm font-semibold text-orange-800 dark:text-orange-200">需要批准工具调用</h4>
-          <p className="text-xs text-orange-700/80 dark:text-orange-300/80 mt-1">{message}</p>
-          <div className="mt-3 flex gap-2">
-            <input
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
-              placeholder="输入「同意」继续，或「拒绝」取消…"
-              disabled={disabled}
-              className="flex-1 rounded-lg border border-orange-200 dark:border-orange-800 bg-white dark:bg-slate-900 px-3 py-2 text-sm outline-none focus:border-orange-400 disabled:opacity-60"
-            />
-            <button
-              type="button"
-              onClick={handleSubmit}
-              disabled={disabled || !input.trim()}
-              className="px-4 py-2 rounded-lg bg-orange-500 hover:bg-orange-600 text-white text-sm font-medium disabled:opacity-50 flex items-center gap-1"
-            >
-              <Send size={14} />
-              恢复
-            </button>
-          </div>
+    <div className="w-full max-w-5xl mx-auto px-2 sm:px-3 pb-2 shrink-0">
+      <div className="rounded-3xl border border-brand-gold/50 dark:border-brand-gold/40 bg-white/95 dark:bg-slate-900 shadow-[0_8px_30px_rgba(30,58,95,0.06)] px-5 py-4">
+        <h4 className="text-sm font-semibold text-slate-800 dark:text-slate-100">需要批准工具调用</h4>
+        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{prompt}</p>
+        <div className="mt-3 flex gap-2">
+          <button
+            type="button"
+            onClick={() => onResume('同意')}
+            disabled={disabled}
+            className="inline-flex items-center gap-1.5 rounded-full bg-brand-navy px-4 py-2 text-sm font-medium text-white shadow-md transition-colors hover:bg-brand-light disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Check size={15} />
+            同意
+          </button>
+          <button
+            type="button"
+            onClick={() => onResume('拒绝')}
+            disabled={disabled}
+            className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-4 py-2 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+          >
+            <X size={15} />
+            拒绝
+          </button>
         </div>
       </div>
     </div>

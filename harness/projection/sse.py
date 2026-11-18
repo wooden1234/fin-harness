@@ -58,6 +58,15 @@ def sse_cursor_after_completed_turns(events: Iterable[SessionEvent]) -> int:
     return cursor
 
 
+def sse_resume_cursor(events: Iterable[SessionEvent]) -> int:
+    """恢复审批时从当前日志末尾继续，避免把本轮已展示的确认再推一次。"""
+    cursor = 0
+    for event in events:
+        if event.seq > cursor:
+            cursor = event.seq
+    return cursor
+
+
 def project_session_event(event: SessionEvent) -> list[dict[str, Any]]:
     if event.event_type == "tool/call":
         name = str(event.data.get("name") or "")
@@ -112,11 +121,14 @@ def project_session_event(event: SessionEvent) -> list[dict[str, Any]]:
         return [todo_snapshot_event(event.data.get("todos") or [])]
     if event.event_type == "approval/asked":
         name = str(event.data.get("name") or "工具")
+        message = str(event.data.get("message") or "").strip()
+        if not message:
+            message = f"需要批准调用 {name}。输入同意以继续，或输入拒绝以取消。"
         return [
             {
                 "type": "interrupt",
                 "conversation_id": "",
-                "message": f"需要批准调用 {name}。输入同意以继续，或输入拒绝以取消。",
+                "message": message,
                 "approval_id": event.data.get("approval_id"),
                 "name": name,
             }

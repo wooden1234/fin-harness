@@ -136,20 +136,6 @@ export function useAgentChat() {
 
       if (event.type === 'interrupt') {
         setHitlPending(true, event.message ?? '该问题已升级人工处理，请稍候或输入补充说明后恢复。')
-        if (assistantMessageId) {
-          updateMessage(assistantMessageId, {
-            content: contentBuffer || event.message || '已转人工客服，请稍候…',
-            interrupted: true,
-          })
-        } else {
-          addMessage({
-            id: `assistant-hitl-${Date.now()}`,
-            role: 'assistant',
-            content: event.message || '已转人工客服，请稍候…',
-            interrupted: true,
-            timestamp: Date.now(),
-          })
-        }
         setGenerating(false)
         resetAgentProgress()
       }
@@ -262,13 +248,15 @@ export function useAgentChat() {
 
     const trimmed = humanInput.trim()
     if (!trimmed) return
-
-    addMessage({
-      id: `user-${Date.now()}`,
-      role: 'user',
-      content: `[人工补充] ${trimmed}`,
-      timestamp: Date.now(),
-    })
+    const choice = trimmed === '同意' || trimmed === '拒绝'
+    if (!choice) {
+      addMessage({
+        id: `user-${Date.now()}`,
+        role: 'user',
+        content: `[人工补充] ${trimmed}`,
+        timestamp: Date.now(),
+      })
+    }
 
     setGenerating(true)
     resetAgentProgress()
