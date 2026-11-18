@@ -7,7 +7,11 @@ from harness.compaction.compact import maybe_compact
 from harness.compaction.policy import CompactPolicy
 from harness.llm.deepseek import to_langchain_messages
 from harness.llm.fake import FakeLlmAdapter, content_turn, tool_turn
-from harness.projection.sse import project_session_event, sse_cursor_after_completed_turns
+from harness.projection.sse import (
+    project_session_event,
+    sse_cursor_after_completed_turns,
+    sse_resume_cursor,
+)
 from harness.session.store import InMemorySessionStore, assert_contiguous
 from harness.session.surface import derive_messages, messages_for_llm, public_sse_events
 from harness.session.types import EventDraft
@@ -431,6 +435,32 @@ async def test_sse_cursor_does_not_replay_prior_published_answer():
         for payload in project_session_event(event)
     ]
     assert payloads == [{"type": "token", "content": "抱歉，天气查询服务暂时不可用"}]
+
+
+@pytest.mark.asyncio
+async def test_resume_cursor_skips_the_open_turn_approval():
+    store = InMemorySessionStore()
+    header = await store.create(tenant_id="t", user_id="1")
+    await store.append(header.session_id, EventDraft(event_type="turn/end", turn=1, data={"reason": "completed"}))
+    await store.append(
+        header.session_id,
+        EventDraft(
+            event_type="approval/asked",
+            turn=2,
+            data={"approval_id": "ap-1", "name": "todo_write", "message": "是否建立任务清单？"},
+        ),
+    )
+    events = await store.load_events(header.session_id)
+    cursor = sse_resume_cursor(events)
+    assert cursor == events[-1].seq
+    assert cursor > sse_cursor_after_completed_turns(events)
+    replayed = [
+        payload
+        for event in events
+        if event.seq > cursor
+        for payload in project_session_event(event)
+    ]
+    assert replayed == []
 
 
 def _failing_runtime() -> tuple[ToolRuntime, list[int]]:

@@ -7,7 +7,8 @@ import json
 
 from harness.approval.service import validate_decision
 from harness.session.types import EventDraft
-from harness.tools.errors import enrich_tool_result
+from harness.tools.errors import enrich_tool_result, error_result
+from harness.tools.todo import TODO_PLAN_DECLINED_GUIDANCE
 
 
 class ApprovalCoordinator:
@@ -49,7 +50,14 @@ class ApprovalCoordinator:
             ),
         )
         if not self.is_allowed(decision):
-            result = self.denied_payload()
+            if str(asked.get("name") or "") == "todo_write":
+                result = error_result(
+                    "todo_plan_declined",
+                    name="todo_write",
+                    model_guidance=TODO_PLAN_DECLINED_GUIDANCE,
+                )
+            else:
+                result = self.denied_payload()
         else:
             arguments = asked.get("arguments") or "{}"
             try:

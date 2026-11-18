@@ -15,13 +15,13 @@ from harness.compaction.compact import maybe_compact
 from harness.compaction.policy import compact_limit, policy_from_settings
 from harness.contracts.errors import ContextBudgetExhaustedError, InvariantError, LlmError
 from harness.finalization.language import enforce_response_language
-from harness.llm.types import StreamAssembler
+from harness.llm.types import StreamAssembler, ToolCallDraft
 from harness.session.invariant import assert_model_request_logged
 from harness.session.store import SessionStore
 from harness.session.surface import messages_for_llm, project_inbox
 from harness.session.types import EventDraft, SessionEvent, new_id
 from harness.tools.runtime import ToolRuntime
-from harness.tools.scheduler import execute_tool_calls
+from harness.tools.scheduler import execute_tool_calls, run_parked_calls
 from harness.tools.retry_policy import USER_UNAVAILABLE_HINT
 from harness.runtime.context import request_header
 from harness.tracing import traceable, turn_langsmith_extra, without_self
@@ -140,6 +140,7 @@ class Agent:
                 run_id=run_id,
                 runtime=runtime,
             )
+            await self._run_parked_calls(asked, turn=turn, step=step, run_id=run_id)
             if not self._control.approvals.is_allowed(decision):
                 await self._store.append(
                     self.session_id,
@@ -167,6 +168,34 @@ class Agent:
             return await self._result(run_id, reason)
         finally:
             await self._leases.release(self.session_id, lease.token)
+
+    async def _run_parked_calls(self, asked: dict[str, Any], *, turn: int, step: int, run_id: str) -> None:
+        drafts: list[ToolCallDraft] = []
+        for item in asked.get("pending_calls") or []:
+            if not isinstance(item, dict):
+                continue
+            drafts.append(
+                ToolCallDraft(
+                    call_id=str(item.get("call_id") or ""),
+                    name=str(item.get("name") or ""),
+                    arguments=str(item.get("arguments") or ""),
+                )
+            )
+        if not drafts:
+            return
+        results = await run_parked_calls(
+            store=self._store,
+            session_id=self.session_id,
+            runtime=self._bound_runtime(turn, run_id),
+            calls=drafts,
+            turn=turn,
+            step=step,
+            run_id=run_id,
+            abort=self._abort,
+        )
+        for name, result in results:
+            if name == "skill" and result.get("ok"):
+                await self._control.inject_skill(result, turn=turn, run_id=run_id)
 
     def cancel(self) -> None:
         self._abort.set()
@@ -370,6 +399,9 @@ class Agent:
                 abort=self._abort,
             )
             if outcome.waiting_approval:
+                for name, result in outcome.side_results or []:
+                    if name == "skill" and result.get("ok"):
+                        await self._control.inject_skill(result, turn=turn, run_id=run_id)
                 self._waiting = {
                     "approval_id": outcome.approval_id,
                     "call_id": outcome.call_id,

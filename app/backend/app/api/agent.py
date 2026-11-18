@@ -29,7 +29,11 @@ from app.services.persistence.outbox_service import OutboxService
 from harness.agent.result import RunResult
 from harness.approval.service import pending_approvals
 from harness.contracts.errors import AgentBusyError, ApprovalError
-from harness.projection.sse import project_session_event, sse_cursor_after_completed_turns
+from harness.projection.sse import (
+    project_session_event,
+    sse_cursor_after_completed_turns,
+    sse_resume_cursor,
+)
 from harness.runtime import product_manager
 from harness.tracing import incoming_trace_context
 
@@ -177,9 +181,11 @@ async def _stream_agent(
     user_message,
     memory_action,
     started: float,
+    after_seq: int | None = None,
 ) -> Any:
-    existing = await store.load_events(agent.session_id)
-    after_seq = sse_cursor_after_completed_turns(existing)
+    if after_seq is None:
+        existing = await store.load_events(agent.session_id)
+        after_seq = sse_cursor_after_completed_turns(existing)
     try:
         while not run_task.done():
             events = await store.wait_events(agent.session_id, after_seq=after_seq, timeout=0.2)
@@ -506,6 +512,8 @@ async def agent_resume(
         if bind_error:
             yield await _bind_failure_event(run_id, bind_error)
             return
+        existing = await manager.store.load_events(agent.session_id)
+        resume_after = sse_resume_cursor(existing)
         with incoming_trace_context(request.headers, thread_id=agent.session_id):
             run_task = asyncio.create_task(
                 agent.resume_approval(target_id, decision=chosen)
@@ -522,6 +530,7 @@ async def agent_resume(
             user_message=None,
             memory_action=parse_memory_rule_action(""),
             started=started,
+            after_seq=resume_after,
         ):
             yield chunk
 

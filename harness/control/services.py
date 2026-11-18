@@ -46,19 +46,29 @@ class AgentControl:
         self._effective_preferences: dict[str, dict[str, Any]] = {}
         self._preference_contexts: dict[str, PreferenceContext] = {}
 
-    async def request_context(self, *, turn: int, run_id: str, base_runtime: ToolRuntime):
-        loaded = self._preference_contexts.get(run_id)
-        if loaded is None:
-            events = await self.store.load_events(self.session_id)
+    async def _load_preferences(self, *, turn: int, run_id: str) -> PreferenceContext:
+        """每次组提示词都重新读长期偏好。同一步内失败重试一次，仍失败则沿用上次成功结果。"""
+        events = await self.store.load_events(self.session_id)
+        loaded = await load_preference_context(
+            store=self.store, session_id=self.session_id, events=events, turn=turn
+        )
+        if not loaded.memory_load_succeeded:
             loaded = await load_preference_context(
                 store=self.store, session_id=self.session_id, events=events, turn=turn
             )
-            if not loaded.memory_load_succeeded:
-                loaded = await load_preference_context(
-                    store=self.store, session_id=self.session_id, events=events, turn=turn
-                )
+        if loaded.memory_load_succeeded:
             self._preference_contexts[run_id] = loaded
             self._effective_preferences[run_id] = loaded.effective()
+            return loaded
+        previous = self._preference_contexts.get(run_id)
+        if previous is not None and previous.memory_load_succeeded:
+            return previous
+        self._preference_contexts[run_id] = loaded
+        self._effective_preferences[run_id] = loaded.effective()
+        return loaded
+
+    async def request_context(self, *, turn: int, run_id: str, base_runtime: ToolRuntime):
+        loaded = await self._load_preferences(turn=turn, run_id=run_id)
         sections = list(default_sections())
         task_text = _ledger_open_task_text(self.app_user_id)
         if task_text:

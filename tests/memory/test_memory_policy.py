@@ -1,4 +1,5 @@
 from app.services.memory.memory_command import (
+    extract_durable_response_language,
     extract_session_preferences,
     extract_turn_preferences,
     parse_memory_command,
@@ -97,6 +98,19 @@ def test_session_preference_requires_explicit_session_adoption():
     assert extract_session_preferences("以后默认用英文回答") == {}
     assert extract_session_preferences("请记住以后用中文回答") == {}
     assert extract_session_preferences("中文年报里的营业收入是多少") == {}
+
+
+def test_language_request_is_durable_unless_session_phrase():
+    assert extract_durable_response_language("以后请使用中文进行回答") == "zh-CN"
+    assert extract_durable_response_language("后续请使用英文进行回答") == "en-US"
+    assert extract_durable_response_language("后需请使用英文进行回答") == "en-US"
+    assert extract_durable_response_language("用英文回答") is None
+    assert extract_durable_response_language("使用英文回答") is None
+    assert extract_durable_response_language("用英语回答") is None
+    assert extract_durable_response_language("本会话请使用英文进行回答") is None
+    assert extract_durable_response_language("本次对话请用中文进行回答") is None
+    assert extract_durable_response_language("这次请用英文回答") is None
+    assert extract_durable_response_language("中文年报里的营业收入是多少") is None
 
 
 def test_direct_language_request_lasts_for_the_session():

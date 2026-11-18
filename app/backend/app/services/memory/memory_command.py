@@ -176,6 +176,46 @@ def _direct_session_language(normalized: str) -> str | None:
     return found[-1][1]
 
 
+# 没有「本会话 / 本次对话」或直接的「用英文回答」时，语言要求写入长期偏好。
+_DURABLE_LANGUAGE_PHRASES: tuple[tuple[str, str], ...] = (
+    ("使用中文", "zh-CN"),
+    ("用中文", "zh-CN"),
+    ("中文回答", "zh-CN"),
+    ("中文进行回答", "zh-CN"),
+    ("使用英文", "en-US"),
+    ("用英文", "en-US"),
+    ("英文回答", "en-US"),
+    ("英文进行回答", "en-US"),
+    ("使用英语", "en-US"),
+    ("用英语", "en-US"),
+    ("英语回答", "en-US"),
+    ("英语进行回答", "en-US"),
+)
+
+
+def extract_durable_response_language(text: str) -> str | None:
+    """提取应写入长期记忆的回答语言。本会话声明和本轮临时要求返回空。"""
+    if contains_temporary_memory_marker(text) or _has_session_marker(text):
+        return None
+    if _direct_session_language(_normalize(text)):
+        return None
+    normalized = _normalize(text)
+    found: list[tuple[int, str]] = []
+    for phrase, value in _DURABLE_LANGUAGE_PHRASES:
+        start = 0
+        while True:
+            index = normalized.find(phrase, start)
+            if index < 0:
+                break
+            if not _language_phrase_negated(normalized, index):
+                found.append((index, value))
+            start = index + len(phrase)
+    if not found:
+        return None
+    found.sort()
+    return found[-1][1]
+
+
 def extract_session_preferences(text: str) -> dict[str, str]:
     """提取本会话持续生效的偏好，不写入长期记忆。
 
@@ -282,6 +322,7 @@ def extract_preference_rule(text: str) -> tuple[str, str] | None:
 __all__ = [
     "MemoryActionKind",
     "MemoryRuleAction",
+    "extract_durable_response_language",
     "extract_session_preferences",
     "extract_turn_preferences",
     "extract_preference_rule",

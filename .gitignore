@@ -69,6 +69,7 @@ retrieval/eval/README.md
 docs/*
 !docs/安全自评报告.md
 !docs/安全自评报告.docx
+!docs/赛题二-财税Agent-Harness完成说明.pptx
 !docs/defense/
 docs/defense/*
 !docs/defense/财智-银行AI智能体答辩.pptx

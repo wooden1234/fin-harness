@@ -369,7 +369,7 @@ export function ChatView() {
         onClearImage={clearPendingImage}
         placeholder={
           hitlPending
-            ? '请使用上方人工恢复面板输入补充说明'
+            ? '请先在上方选择同意或拒绝'
             : pendingImage?.uploadStatus === 'uploading'
               ? '图片上传中，完成后即可发送…'
               : '有问题，尽管问…'

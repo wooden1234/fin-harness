@@ -67,7 +67,9 @@ def _add(code: str, error_class: ToolErrorClass, *, action: ToolErrorAction | No
 for _code in ("retry_exhausted", "unknown_tool"):
     _add(_code, ToolErrorClass.POLICY, action=ToolErrorAction.PUBLISH_UNAVAILABLE)
 _add("denied", ToolErrorClass.POLICY)
-for _code in ("cancelled", "deferred_for_approval"):
+_add("todo_plan_declined", ToolErrorClass.POLICY)
+_add("todo_plan_required", ToolErrorClass.POLICY)
+for _code in ("cancelled", "deferred_for_approval", "todo_plan_pending"):
     _add(_code, ToolErrorClass.CONTROL)
 for _code in (
     MALFORMED_ARGUMENTS,
